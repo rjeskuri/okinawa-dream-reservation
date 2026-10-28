@@ -1,0 +1,37 @@
+{
+  // The Worker's config. Vars hold placeholders until deploy (task #48); secrets live in .dev.vars locally
+  // and `wrangler secret put` in production, and are declared in src/env.d.ts.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "okinawa-dream",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "triggers": {
+    // Every ten minutes: the outbox and payment follow-ups. Daily at 18:00 UTC (03:00 JST): reconciliation.
+    "crons": ["*/10 * * * *", "0 18 * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "okinawa-dream",
+      // Placeholder until the production database exists (task #48).
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "okinawa-dream-media" }],
+  "vars": {
+    "SITE_URL": "http://localhost:4321",
+    "SQUARE_ENV": "sandbox",
+    "SQUARE_APPLICATION_ID": "sandbox-sq0idb-placeholder",
+    "SQUARE_LOCATION_ID": "placeholder-location-id",
+    "SQUARE_WEBHOOK_URL": "http://localhost:4321/api/square/webhook",
+    "GOOGLE_SHEET_ID": "placeholder-sheet-id",
+    "GOOGLE_DRIVE_FOLDER_ID": "placeholder-drive-folder-id",
+    "APPS_SCRIPT_MAIL_URL": "https://script.google.com/macros/s/placeholder/exec",
+    "STAFF_EMAIL": "staff@example.com",
+    "ENABLE_GOOGLE_PAY": "false",
+    "ENABLE_APPLE_PAY": "false"
+  }
+}

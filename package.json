@@ -9,7 +9,7 @@
     "build": "astro build",
     "lint": "astro check",
     "test:e2e": "node --test --test-concurrency=1 \"tests/e2e/**/*.e2e.ts\"",
-    "typegen": "wrangler types",
+    "typegen": "wrangler types --strict-vars=false",
     "db:migrate:local": "wrangler d1 migrations apply DB --local"
   },
   "dependencies": {

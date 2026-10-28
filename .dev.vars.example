@@ -1,0 +1,8 @@
+# Local secrets for `npm run dev` and wrangler. Copy to .dev.vars (gitignored, copied into worktrees) and fill in.
+SQUARE_ACCESS_TOKEN=
+SQUARE_WEBHOOK_SIGNATURE_KEY=
+GOOGLE_SA_EMAIL=
+GOOGLE_SA_PRIVATE_KEY=
+PUBLISH_SECRET=
+MAIL_SECRET=
+CANCEL_LINK_SECRET=
