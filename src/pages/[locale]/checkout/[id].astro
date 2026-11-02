@@ -1,0 +1,226 @@
+---
+// /{locale}/checkout/{id}: one booking in the state its status and the clock give it. A hold shows its summary and the card
+// form, which src/scripts/checkout.ts runs. Each later status is a page of its own with no form. Until a booking is
+// confirmed nothing of its guest renders, and a cancelled one shows none, since its link outlives the booking.
+import { env } from "cloudflare:workers";
+import { checkout } from "../../../i18n/strings/checkout.ts";
+import { common } from "../../../i18n/strings/common.ts";
+import { email } from "../../../i18n/strings/email.ts";
+import { t } from "../../../i18n/t.ts";
+import Base from "../../../layouts/Base.astro";
+import { getBooking } from "../../../lib/booking/holds.ts";
+import { timeLeftText } from "../../../lib/checkout.ts";
+import { isBlocking } from "../../../lib/db/blocking.ts";
+import { readCatalog } from "../../../lib/db/catalog-store.ts";
+import { isLocale } from "../../../lib/locale.ts";
+import { epochToJst } from "../../../lib/time.ts";
+
+const PRODUCTION_SDK_URL = "https://web.squarecdn.com/v1/square.js";
+const SANDBOX_SDK_URL = "https://sandbox.web.squarecdn.com/v1/square.js";
+
+const GUEST_INPUTS = [
+  { name: "familyName", type: "text", autocomplete: "family-name" },
+  { name: "givenName", type: "text", autocomplete: "given-name" },
+  { name: "email", type: "email", autocomplete: "email" },
+  { name: "phone", type: "tel", autocomplete: "tel" },
+] as const;
+
+const { locale, id } = Astro.params;
+// Astro's own check ignores case and sees any segment of the path, so it passes /JA/.
+if (!isLocale(locale)) return new Response(null, { status: 404 });
+
+const booking = await getBooking(env.DB, id ?? "");
+// A staff block is a row of the same table, with no guest of ours and nothing to pay.
+if (booking === null || booking.source !== "web") return new Response(null, { status: 404 });
+
+// The page changes as the booking does, and from confirmation on it holds the guest's details.
+Astro.response.headers.set("Cache-Control", "no-store");
+
+const now = Date.now();
+// By the rule that frees the bike, so a hold reads as expired from the moment it can be taken, whatever the column says.
+const status = booking.status === "ON_HOLD" && !isBlocking(booking, now) ? "EXPIRED" : booking.status;
+
+const say = (key: string) => t(locale, checkout, `checkout.${key}`);
+const money = (jpy: number | null) =>
+  jpy === null ? null : t(locale, email, "email.amount").replace("{amount}", jpy.toLocaleString("en-US"));
+const when = (ms: number) => {
+  const { date, time } = epochToJst(ms);
+  return `${date} ${time} JST`;
+};
+
+const heading = say(`heading.${status}`);
+const payLabel = say("pay").replace("{amount}", money(booking.depositJpy) ?? "");
+// Anything but production gets the sandbox, so a mistyped SQUARE_ENV cannot reach a real card.
+const sdkUrl = env.SQUARE_ENV === "production" ? PRODUCTION_SDK_URL : SANDBOX_SDK_URL;
+
+const rows: [label: string, value: string | null | undefined][] = [];
+if (status === "ON_HOLD" || status === "CONFIRMED") {
+  const { modelId, packageId, guestFamilyName, guestGivenName, guestEmail, guestPhone } = booking;
+  // The catalog keeps a retired model, and a package can leave it while bookings of it stand, so that row just drops out.
+  const catalog = await readCatalog(env.DB);
+  const model = catalog?.models.find((row) => row.id === modelId);
+  const pack = catalog?.packages.find((row) => row.id === packageId);
+  const stay: typeof rows = [
+    [say("label.model"), model?.texts[locale].name],
+    [say("label.package"), pack?.texts[locale].name],
+    [say("label.pickup"), when(booking.startAt)],
+    [say("label.return"), when(booking.endAt)],
+  ];
+  if (status === "ON_HOLD") {
+    rows.push(...stay, [say("label.price"), money(booking.priceJpy)], [say("label.deposit"), money(booking.depositJpy)]);
+  } else {
+    // Through functions, since a name is the guest's own text and a plain string would read `$&` in it as a pattern.
+    const fullName = say("guest.fullName")
+      .replace("{familyName}", () => guestFamilyName ?? "")
+      .replace("{givenName}", () => guestGivenName ?? "")
+      .trim();
+    rows.push(
+      [say("label.ref"), booking.ref],
+      ...stay,
+      [say("label.paid"), money(booking.paidJpy)],
+      [say("label.name"), fullName],
+      [say("guest.email"), guestEmail],
+      [say("guest.phone"), guestPhone],
+    );
+  }
+}
+---
+
+<Base locale={locale} title={`${heading} | ${t(locale, common, "site.name")}`} keepQuery={false}>
+  <h1>{heading}</h1>
+  {status === "ON_HOLD" && <p>{say("hold.intro")}</p>}
+  {
+    rows.length > 0 && (
+      <dl class="summary">
+        {rows
+          .filter(([, value]) => value)
+          .map(([label, value]) => (
+            <Fragment>
+              <dt>{label}</dt>
+              <dd>{value}</dd>
+            </Fragment>
+          ))}
+      </dl>
+    )
+  }
+  {
+    status === "ON_HOLD" && (
+      <Fragment>
+        <p>
+          {say("label.timeLeft")} <strong id="countdown">{timeLeftText((booking.expiresAt ?? now) - now)}</strong>
+        </p>
+        {/* `dialog` so that a native submit, with no client to stop it, sends the guest's details nowhere at all. */}
+        <form
+          id="checkout"
+          method="dialog"
+          novalidate
+          data-booking-id={booking.id}
+          data-locale={locale}
+          data-deposit-jpy={booking.depositJpy}
+          data-sdk-url={sdkUrl}
+          data-application-id={env.SQUARE_APPLICATION_ID}
+          data-location-id={env.SQUARE_LOCATION_ID}
+          data-expires-at={booking.expiresAt}
+        >
+          <h2>{say("guest.heading")}</h2>
+          {GUEST_INPUTS.map(({ name, type, autocomplete }) => (
+            <Fragment>
+              <label>
+                {say(`guest.${name}`)}
+                <input name={name} type={type} autocomplete={autocomplete} required />
+              </label>
+              <p class="problem" data-error-for={name} hidden />
+            </Fragment>
+          ))}
+          <h2>{say("card.heading")}</h2>
+          <p>{say("card.accepted")}</p>
+          <p>{say("card.unionPay")}</p>
+          <div id="card-container" />
+          <p id="checkout-message" class="problem" role="alert" hidden />
+          <button id="pay-button" type="submit" disabled>{payLabel}</button>
+        </form>
+        <script src="../../../scripts/checkout.ts"></script>
+      </Fragment>
+    )
+  }
+  {
+    status === "PAYMENT_PENDING" && (
+      <Fragment>
+        <p>{say("pending.body")}</p>
+        <p>
+          <a href={`/${locale}/checkout/${booking.id}`}>{say("pending.refresh")}</a>
+        </p>
+      </Fragment>
+    )
+  }
+  {
+    status === "CONFIRMED" && (
+      <Fragment>
+        <h2>{say("confirmed.next")}</h2>
+        <ul>
+          <li>{say("confirmed.email")}</li>
+          <li>{say("confirmed.pickup")}</li>
+          <li>
+            <a href={`/${locale}/access`}>{say("confirmed.access")}</a>
+          </li>
+          <li>
+            <a href={`/${locale}/policies`}>{say("confirmed.policies")}</a>
+          </li>
+        </ul>
+      </Fragment>
+    )
+  }
+  {
+    status === "EXPIRED" && (
+      <Fragment>
+        <p>{say("expired.body")}</p>
+        <p>
+          <a href={`/${locale}/rentals/${booking.modelId}`}>{say("expired.model")}</a>
+        </p>
+        <p>
+          <a href={`/${locale}/rentals`}>{say("search")}</a>
+        </p>
+      </Fragment>
+    )
+  }
+  {
+    status === "CANCELLED" && (
+      <Fragment>
+        <p>{say("cancelled.body")}</p>
+        <p>
+          <a href={`/${locale}/rentals`}>{say("search")}</a>
+        </p>
+      </Fragment>
+    )
+  }
+</Base>
+
+<style>
+  .summary {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--space-1) var(--space-4);
+    margin: 0 0 var(--space-4);
+  }
+  .summary dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  form {
+    max-width: 30rem;
+  }
+  input {
+    width: 100%;
+  }
+  .problem {
+    font-weight: bold;
+  }
+  /* Square's card field fills this, so the page does not jump when it mounts. */
+  #card-container {
+    min-height: 6rem;
+  }
+  button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+</style>
