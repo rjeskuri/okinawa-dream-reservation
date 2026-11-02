@@ -29,8 +29,11 @@ Every value in the examples is a placeholder, not a real price, deposit or plate
 - **Money.** Whole yen. `5000`, `5,000`, `¥5,000` and `5000円` all read as 5000.
 - **Whole numbers.** Digits only, with no decimals. `sort`, `odometer_km` and `base_usage_days` are 0 or more.
 - **TRUE/FALSE.** A checkbox, or the text `TRUE` or `FALSE`.
-- **Dates.** A date cell, or text as `2030-07-15`.
-- **Date and time.** A date-time cell, or text as `2030-07-15 09:00`. Times are Japan time.
+- **Dates.** A date cell, or text as `2027-07-15`.
+- **Date and time.** A date-time cell, or text as `2027-07-15 09:00`. Times are Japan time.
+- **Plausible dates.** In ClosedDates and Blocks, a date more than 2 years before or after the publish date (Japan time)
+  is refused with a row status and the row is skipped. This catches a date typed as digits, such as `260105`, which
+  Sheets reads as a day number in the year 2612.
 - **Times of day.** A time cell, or text as `09:00`.
 - **A number in a text column** is fine: plate `2002` is the text `2002`.
 - **Repeats.** Where an id must be unique, the first row owns it and each later row gets an error, even if the first row
@@ -223,7 +226,9 @@ Example: `7`, `100`.
 | `date` | Yes | A date, unique. A date cell and the same date as text count as the same date. |
 | `note` | No | Text. Not published. |
 
-Example: `2030-01-01`, `New Year`.
+Example: `2027-01-01`, `New Year`.
+
+A date more than 2 years before or after the publish date is an error: the row is skipped and the date is not closed.
 
 ## Blocks
 
@@ -242,10 +247,12 @@ a plate in maintenance or retired.
 | `reference` | No | Text, the booking number on that channel |
 | `note` | No | Text |
 
-Example: `BLK-1`, `pcx-125`, blank, `2030-07-15 09:00`, `2030-07-16 18:00`, `Klook`, `KL-1234`, `Group of two`.
+Example: `BLK-1`, `pcx-125`, blank, `2027-07-15 09:00`, `2027-07-16 18:00`, `Klook`, `KL-1234`, `Group of two`.
 
 A missing or empty Blocks tab, or a missing header, stops the blocks step: stored blocks stay as they are. A row with an
-error does not change the block already stored under its id, so fix the row and press Publish again.
+error does not change the block already stored under its id, so fix the row and press Publish again. That includes a
+`start` or `end` more than 2 years before or after the publish date: the row is skipped, its status names the column,
+and the block stored under that id stays as it is.
 
 ## Bookings
 

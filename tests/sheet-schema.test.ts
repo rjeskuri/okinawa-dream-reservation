@@ -24,6 +24,11 @@ import {
   type Workbook,
 } from "./helpers/sheet-workbook.ts";
 
+// The publish time each validator is given. The valid workbook's ClosedDates (2026-12-31 to 2027-01-02) and Blocks
+// (2030-07 and 2030-08) are 3.6 years apart, so no one `now` has both inside the window of 2 years either side.
+const CATALOG_NOW = Date.parse("2026-11-02T12:00:00+09:00");
+const BLOCKS_NOW = Date.parse("2030-01-01T12:00:00+09:00");
+
 type RowStatus = { tab: string; row: number; level: "ok" | "warning" | "error"; message: string };
 
 type Block = {
@@ -125,7 +130,7 @@ function assertEveryRowHasAStatus(workbook: Workbook, statuses: RowStatus[], tab
 
 /** The workbook publishes clean: `expected` as the catalog, nothing fatal, no row above ok. */
 function assertPublishes(workbook: Workbook, expected: Catalog): void {
-  const { catalog, statuses, fatal } = validateCatalog(workbook);
+  const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
   assert.deepEqual(fatal, []);
   assert.deepEqual(notOk(statuses), []);
   assert.deepEqual(canonical(catalog), canonical(expected));
@@ -149,7 +154,7 @@ function assertWarning(statuses: RowStatus[], tab: string, row: number, column: 
 }
 
 function assertFatal(workbook: Workbook, reasons: string[][]): void {
-  const { catalog, fatal } = validateCatalog(workbook);
+  const { catalog, fatal } = validateCatalog(workbook, CATALOG_NOW);
   assert.equal(catalog, null);
   for (const reason of reasons) {
     assert.ok(
@@ -186,7 +191,7 @@ function textsOf(catalog: Catalog, tab: string, id: string): Record<string, Reco
 
 test("the valid fixture produces the expected catalog", () => {
   const workbook = validWorkbook();
-  const { catalog, statuses, fatal } = validateCatalog(workbook);
+  const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
 
   assert.deepEqual(fatal, []);
   assert.deepEqual(canonical(catalog), canonical(expectedCatalog()));
@@ -209,7 +214,7 @@ test("each rule rejects its bad row and skips dependents", async (t) => {
       const pristine = validWorkbook();
       const workbook = validWorkbook();
       rule.mutate(workbook);
-      const { catalog, statuses, fatal } = validateCatalog(workbook);
+      const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
 
       const bad = rule.errors.map(({ tab, key, column }) => ({
         tab,
@@ -243,7 +248,7 @@ test("each rule rejects its bad row and skips dependents", async (t) => {
   // differ only in what they say is wrong.
   await t.test("two problems in one column read differently", () => {
     const problemOf = (workbook: Workbook, row: number, value: string): string => {
-      const [status] = statusesAt(validateCatalog(workbook).statuses, "Models", row, "error");
+      const [status] = statusesAt(validateCatalog(workbook, CATALOG_NOW).statuses, "Models", row, "error");
       assert.ok(status, `Models row ${row} has no error`);
       return status.message.replaceAll(value, "#").replace(/\d+/g, "#");
     };
@@ -368,7 +373,7 @@ test("headers match in any order and case", async (t) => {
       for (const tab of Object.keys(workbook)) rearrangeColumns(workbook, tab, reorder, respell);
       assertPublishes(workbook, expectedCatalog());
 
-      const { blocks, statuses } = validateBlocks(workbook, expectedCatalog());
+      const { blocks, statuses } = validateBlocks(workbook, expectedCatalog(), BLOCKS_NOW);
       assert.deepEqual(notOk(statuses), []);
       assert.deepEqual(sortedBy(blocks, (block: Block) => block.blockId), EXPECTED_BLOCKS);
     });
@@ -562,7 +567,7 @@ test("normalizes full-width digits and yen formatting", async (t) => {
       await t.test(`${column} ${JSON.stringify(spelling)}`, () => {
         const workbook = validWorkbook();
         setCell(workbook, tab, key, column, spelling);
-        const { catalog, statuses } = validateCatalog(workbook);
+        const { catalog, statuses } = validateCatalog(workbook, CATALOG_NOW);
         assert.deepEqual(notOk(statuses), []);
         assert.ok(catalog);
         assert.equal(read(catalog), amount);
@@ -671,7 +676,7 @@ test("missing translations warn and fall back to en then ja", async (t) => {
       const texts = textsOf(expected, tab, key);
       for (const [locale, field, from] of fallbacks) texts[locale][field] = texts[from][field];
 
-      const { catalog, statuses, fatal } = validateCatalog(workbook);
+      const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
       assert.deepEqual(fatal, []);
       assert.deepEqual(canonical(catalog), canonical(expected));
       assert.deepEqual(notOk(statuses), [`${tab} ${row}`]);
@@ -745,7 +750,7 @@ test("license class defaults from cc and type", async (t) => {
       const expected = expectedCatalog();
       modelOf(expected, "nbox-660").engineCc = cc;
 
-      const { catalog, statuses, fatal } = validateCatalog(workbook);
+      const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
       assert.deepEqual(fatal, []);
       assert.deepEqual(canonical(catalog), canonical(expected));
       assert.deepEqual(notOk(statuses), [`Models ${row}`]);
@@ -801,7 +806,7 @@ test("a package needs exactly one of days or hours", async (t) => {
       const workbook = validWorkbook();
       setCell(workbook, "Packages", "day-3", "days", days);
       setCell(workbook, "Packages", "day-3", "hours", hours);
-      const { catalog, statuses, fatal } = validateCatalog(workbook);
+      const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
 
       assert.deepEqual(fatal, []);
       assertError(statuses, "Packages", sheetRow(workbook, "Packages", "day-3"), ["days", "hours"]);
@@ -831,7 +836,7 @@ function pricesOfModel(catalog: Catalog, id: string): Record<string, number> {
 
 test("a model with a rate class needs no price rows of its own", async (t) => {
   await t.test("the fixture's models inherit their class's prices", () => {
-    const { catalog } = validateCatalog(validWorkbook());
+    const { catalog } = validateCatalog(validWorkbook(), CATALOG_NOW);
     assert.ok(catalog);
     for (const [id, prices] of Object.entries(INHERITED_PRICES)) {
       assert.deepEqual(pricesOfModel(catalog, id), prices, id);
@@ -859,7 +864,7 @@ test("a model with a rate class needs no price rows of its own", async (t) => {
       });
       assertPublishes(workbook, expected);
 
-      const { catalog } = validateCatalog(workbook);
+      const { catalog } = validateCatalog(workbook, CATALOG_NOW);
       assert.ok(catalog);
       assert.deepEqual(pricesOfModel(catalog, "new-model"), INHERITED_PRICES[sibling]);
     });
@@ -1064,7 +1069,7 @@ function sortedBlocks(blocks: Block[]): Block[] {
 
 /** Nothing comes back from a broken tab, and a fatal reason says which of `names` is at fault, as a whole word. */
 function assertBlocksFatal(workbook: Workbook, names: string[]): void {
-  const { blocks, fatal } = validateBlocks(workbook, expectedCatalog());
+  const { blocks, fatal } = validateBlocks(workbook, expectedCatalog(), BLOCKS_NOW);
   assert.deepEqual(blocks, []);
   assert.ok(
     fatal.some((message: string) => names.some((name) => new RegExp(`\\b${name}\\b`).test(message))),
@@ -1075,7 +1080,7 @@ function assertBlocksFatal(workbook: Workbook, names: string[]): void {
 test("validateBlocks checks dates, model, optional plate and duplicate ids", async (t) => {
   await t.test("the valid fixture gives its blocks, serial and text datetimes alike", () => {
     const workbook = validWorkbook();
-    const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog());
+    const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog(), BLOCKS_NOW);
     assert.deepEqual(sortedBlocks(blocks), EXPECTED_BLOCKS);
     assert.deepEqual(notOk(statuses), []);
     assert.deepEqual(rowsWhere(statuses, ({ tab }) => tab === "Blocks"), ["Blocks 2", "Blocks 3", "Blocks 4"]);
@@ -1088,7 +1093,7 @@ test("validateBlocks checks dates, model, optional plate and duplicate ids", asy
       const pristine = validWorkbook();
       const workbook = validWorkbook();
       mutate(workbook);
-      const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog());
+      const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog(), BLOCKS_NOW);
 
       const row = key === APPENDED ? workbook.Blocks.length : sheetRow(pristine, "Blocks", key);
       assertError(statuses, "Blocks", row, [column]);
@@ -1107,7 +1112,7 @@ test("validateBlocks checks dates, model, optional plate and duplicate ids", asy
     const workbook = validWorkbook();
     setCell(workbook, "Blocks", "BLK-1", "start", "soon");
     setCell(workbook, "Blocks", "BLK-3", "plate", "わ9999");
-    const { blocks, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog());
+    const { blocks, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog(), BLOCKS_NOW);
     assert.deepEqual(fatal, []);
     assert.deepEqual([...skippedBlockIds].sort(), ["BLK-1", "BLK-3"]);
     assert.deepEqual(sortedBlocks(blocks), EXPECTED_BLOCKS.filter(({ blockId }) => blockId === "BLK-2"));
@@ -1117,7 +1122,7 @@ test("validateBlocks checks dates, model, optional plate and duplicate ids", asy
     await t.test(`accepts ${name}`, () => {
       const workbook = validWorkbook();
       for (const [column, value] of Object.entries(cells)) setCell(workbook, "Blocks", key, column, value);
-      const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog());
+      const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog(), BLOCKS_NOW);
 
       const expected = structuredClone(EXPECTED_BLOCKS);
       const block = expected.find(({ blockId }) => blockId === key);
@@ -1154,7 +1159,7 @@ test("validateBlocks checks dates, model, optional plate and duplicate ids", asy
   await t.test("a Blocks tab with only its header has no blocks, and nothing is fatal", () => {
     const workbook = validWorkbook();
     workbook.Blocks = workbook.Blocks.slice(0, 1);
-    const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog());
+    const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog(), BLOCKS_NOW);
     assert.deepEqual(blocks, []);
     assert.deepEqual(notOk(statuses), []);
     assert.deepEqual(fatal, []);
@@ -1166,7 +1171,7 @@ test("validateBlocks checks dates, model, optional plate and duplicate ids", asy
     skipped.models = skipped.models.filter(({ id }) => id !== "pcx-125");
     skipped.vehicles = skipped.vehicles.filter(({ modelId }) => modelId !== "pcx-125");
     const workbook = validWorkbook();
-    const rejected = validateBlocks(workbook, skipped);
+    const rejected = validateBlocks(workbook, skipped, BLOCKS_NOW);
     assertError(rejected.statuses, "Blocks", sheetRow(workbook, "Blocks", "BLK-1"), ["model_id"]);
     assert.deepEqual(sortedBlocks(rejected.blocks), EXPECTED_BLOCKS.filter(({ blockId }) => blockId !== "BLK-1"));
     assert.deepEqual(rejected.skippedBlockIds, ["BLK-1"]);
@@ -1182,7 +1187,7 @@ test("validateBlocks checks dates, model, optional plate and duplicate ids", asy
     });
     setCell(workbook, "Blocks", "BLK-1", "model_id", "new-model");
     setCell(workbook, "Blocks", "BLK-1", "plate", "わ7777");
-    const accepted = validateBlocks(workbook, added);
+    const accepted = validateBlocks(workbook, added, BLOCKS_NOW);
     assert.deepEqual(notOk(accepted.statuses), []);
     const expected = structuredClone(EXPECTED_BLOCKS);
     Object.assign(expected[0], { modelId: "new-model", plate: "わ7777" });
@@ -1203,7 +1208,7 @@ test("row numbers in statuses are 1-based sheet rows, past a blank row too", asy
   setCell(workbook, "Models", "nbox-660", "engine_cc", "abc");
   setCell(workbook, "Prices", "bike-125/day-1", "price_jpy", "free");
 
-  const { statuses } = validateCatalog(workbook);
+  const { statuses } = validateCatalog(workbook, CATALOG_NOW);
 
   assert.deepEqual(errors(statuses), ["Models 7", "Prices 6", "Vehicles 7"]);
   assert.deepEqual(
@@ -1218,7 +1223,7 @@ test("row numbers in statuses are 1-based sheet rows, past a blank row too", asy
         const rows = Array.from({ length: count }, () => rowWith(workbook, "Models", cells));
         workbook.Models.splice(2, 0, ...rows);
 
-        const { catalog, statuses, fatal } = validateCatalog(workbook);
+        const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
 
         assert.deepEqual(fatal, []);
         assert.deepEqual(canonical(catalog), canonical(expectedCatalog()));
@@ -1237,10 +1242,10 @@ test("row numbers in statuses are 1-based sheet rows, past a blank row too", asy
     const workbook = validWorkbook();
     for (let row = 0; row < 20; row += 1) appendRow(workbook, "Models", { active: false });
 
-    const { catalog, statuses, fatal } = validateCatalog(workbook);
+    const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
 
     assert.deepEqual(fatal, []);
-    assert.deepEqual(statuses, validateCatalog(validWorkbook()).statuses);
+    assert.deepEqual(statuses, validateCatalog(validWorkbook(), CATALOG_NOW).statuses);
     assert.deepEqual(canonical(catalog), canonical(expectedCatalog()));
   });
 
@@ -1249,10 +1254,10 @@ test("row numbers in statuses are 1-based sheet rows, past a blank row too", asy
     appendRow(workbook, "Vehicles", { notes: false });
     appendRow(workbook, "Blocks", { note: false });
 
-    assert.deepEqual(validateCatalog(workbook).statuses, validateCatalog(validWorkbook()).statuses);
+    assert.deepEqual(validateCatalog(workbook, CATALOG_NOW).statuses, validateCatalog(validWorkbook(), CATALOG_NOW).statuses);
     assert.deepEqual(
-      validateBlocks(workbook, expectedCatalog()).statuses,
-      validateBlocks(validWorkbook(), expectedCatalog()).statuses,
+      validateBlocks(workbook, expectedCatalog(), BLOCKS_NOW).statuses,
+      validateBlocks(validWorkbook(), expectedCatalog(), BLOCKS_NOW).statuses,
     );
   });
 
@@ -1270,12 +1275,276 @@ test("row numbers in statuses are 1-based sheet rows, past a blank row too", asy
       const workbook = validWorkbook();
       workbook.Models.splice(2, 0, rowWith(workbook, "Models", { active: cell }));
 
-      const { catalog, statuses, fatal } = validateCatalog(workbook);
+      const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
 
       assert.deepEqual(fatal, []);
       assertError(statuses, "Models", 3, ["model_id"]);
       assert.deepEqual(errors(statuses), ["Models 3"]);
       assert.deepEqual(canonical(catalog), canonical(expectedCatalog()));
+    });
+  }
+});
+
+// The plausible window for Blocks start and end and for ClosedDates: 2 years either side of the publish date in JST, by
+// calendar date and inclusive at both ends. The first publish is 00:30 JST, which is still the day before in UTC. A
+// publish on Feb 29 has no anniversary, so its bounds fall on Feb 28.
+type Window = { now: string; lo: string; hi: string };
+const NOV_2: Window = { now: "2026-11-02T00:30:00+09:00", lo: "2024-11-02", hi: "2028-11-02" };
+const NOV_3: Window = { now: "2026-11-03T12:00:00+09:00", lo: "2024-11-03", hi: "2028-11-03" };
+const LEAP_DAY: Window = { now: "2028-02-29T10:00:00+09:00", lo: "2026-02-28", hi: "2030-02-28" };
+
+type When = [date: string, time: string];
+type Kind = "text" | "serial";
+type Column = "start" | "end";
+
+/** The cell in the form staff type: text, or the serial Sheets stores for the same wall clock. */
+function cellOf([date, time]: When, kind: Kind): string | number {
+  return kind === "text" ? `${date} ${time}` : sheetSerial(date, time);
+}
+
+function at([date, time]: When): number {
+  return Date.parse(`${date}T${time}:00+09:00`);
+}
+
+/**
+ * The row gives a window reason for each column in `bad` and none for a column in `good`. The reason is any error that
+ * holds both dates of the window, so no one sentence is pinned.
+ */
+function assertWindowReason(
+  statuses: RowStatus[],
+  tab: string,
+  row: number,
+  { lo, hi }: Pick<Window, "lo" | "hi">,
+  bad: string[],
+  good: string[] = [],
+): void {
+  const reasons = statusesAt(statuses, tab, row, "error")
+    .map((status) => status.message)
+    .filter((message) => message.includes(lo) && message.includes(hi));
+  const names = (column: string) => reasons.some((message) => new RegExp(`\\b${column}\\b`).test(message));
+  for (const column of bad) {
+    assert.ok(names(column), `${tab} row ${row} needs an error naming ${column}, ${lo} and ${hi}: ${inspect(statuses)}`);
+  }
+  for (const column of good) {
+    assert.ok(!names(column), `${tab} row ${row} blames ${column}, which is inside the window: ${inspect(reasons)}`);
+  }
+}
+
+/** A Blocks tab holding only the rows given, each [block_id, start, end], all of model pcx-125. */
+function blocksOf(rows: [string, unknown, unknown][]): Workbook {
+  const workbook = validWorkbook();
+  workbook.Blocks = workbook.Blocks.slice(0, 1);
+  for (const [block_id, start, end] of rows) {
+    appendRow(workbook, "Blocks", { block_id, model_id: "pcx-125", start, end });
+  }
+  return workbook;
+}
+
+function span({ blockId, startAt, endAt }: Block) {
+  return { blockId, startAt, endAt };
+}
+
+test("validateBlocks skips serials outside the plausible window", () => {
+  // Today is 46328 as a serial. 260105 and 202601 are dates typed as digits, which Sheets reads as days: 2612-02-21
+  // and 2454-09-12.
+  const now = Date.parse("2026-11-02T12:00:00+09:00");
+  const workbook = blocksOf([
+    ["DIGITS-1", 260105, 260106],
+    ["DIGITS-2", 202601, 202602],
+    ["TODAY", 46328.5, 46329.25],
+  ]);
+  const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog(), now);
+
+  assert.deepEqual(fatal, []);
+  assert.deepEqual(blocks.map(span), [
+    {
+      blockId: "TODAY",
+      startAt: Date.parse("2026-11-02T12:00:00+09:00"),
+      endAt: Date.parse("2026-11-03T06:00:00+09:00"),
+    },
+  ]);
+  assert.deepEqual([...skippedBlockIds].sort(), ["DIGITS-1", "DIGITS-2"]);
+  assert.deepEqual(errors(statuses), ["Blocks 2", "Blocks 3"]);
+  assertWindowReason(statuses, "Blocks", 2, NOV_2, ["start"]);
+  assertWindowReason(statuses, "Blocks", 3, NOV_2, ["start"]);
+  assert.deepEqual(notOk(statuses.filter((status) => status.row === 4)), []);
+  assertEveryRowHasAStatus(workbook, statuses, ["Blocks"]);
+});
+
+// [what was typed, the year Sheets reads it as]. A year before the window is also before the in-window time that the
+// other column holds, and a year after it is also after.
+const TYPED_DIGITS: [number, number][] = [
+  [260105, 2612],
+  [202601, 2454],
+  [100000, 2173],
+  [60105, 2064],
+  [26105, 1971],
+];
+
+test("validateBlocks refuses dates typed as digits, in either column", async (t) => {
+  const inside = sheetSerial("2026-11-05", "10:00");
+  const now = Date.parse(NOV_2.now);
+  for (const [digits, year] of TYPED_DIGITS) {
+    const past = year < 2024;
+    const cases: [Column, unknown, unknown, string[]][] = [
+      ["start", digits, past ? inside : digits + 1, past ? ["end"] : []],
+      ["end", past ? digits - 1 : inside, digits, past ? [] : ["start"]],
+    ];
+    for (const [column, start, end, good] of cases) {
+      await t.test(`${digits} (year ${year}) as the ${column}`, () => {
+        const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(
+          blocksOf([["B-1", start, end]]),
+          expectedCatalog(),
+          now,
+        );
+        assert.deepEqual(fatal, []);
+        assert.deepEqual(blocks, []);
+        assert.deepEqual(skippedBlockIds, ["B-1"]);
+        assert.deepEqual(errors(statuses), ["Blocks 2"]);
+        assertWindowReason(statuses, "Blocks", 2, NOV_2, [column], good);
+      });
+    }
+  }
+});
+
+// [what is on the edge, the publish, start, end, the columns refused]. Each of start and end is checked on its own.
+const BLOCK_EDGES: [string, Window, When, When, Column[]][] = [
+  ["the first allowed moment, midnight", NOV_2, ["2024-11-02", "00:00"], ["2024-11-02", "01:00"], []],
+  ["the last minute before the window", NOV_2, ["2024-11-01", "23:59"], ["2024-11-02", "01:00"], ["start"]],
+  ["the last allowed minute", NOV_2, ["2028-11-02", "22:00"], ["2028-11-02", "23:59"], []],
+  ["midnight after the last allowed day", NOV_2, ["2028-11-02", "23:00"], ["2028-11-03", "00:00"], ["end"]],
+  ["a start and an end both after the window", NOV_2, ["2028-11-03", "00:00"], ["2028-11-03", "01:00"], ["start", "end"]],
+  ["a start and an end both before the window", NOV_2, ["2024-11-01", "10:00"], ["2024-11-01", "11:00"], ["start", "end"]],
+  ["the day before a later publish's window", NOV_3, ["2024-11-02", "23:59"], ["2024-11-03", "01:00"], ["start"]],
+  ["the last minute of a later publish's window", NOV_3, ["2028-11-03", "22:00"], ["2028-11-03", "23:59"], []],
+  ["midnight after a later publish's window", NOV_3, ["2028-11-03", "23:00"], ["2028-11-04", "00:00"], ["end"]],
+  ["Feb 28, the lower bound of a Feb 29 publish", LEAP_DAY, ["2026-02-28", "00:00"], ["2026-02-28", "01:00"], []],
+  ["Feb 27, before a Feb 29 publish's window", LEAP_DAY, ["2026-02-27", "23:00"], ["2026-02-28", "01:00"], ["start"]],
+  ["Feb 28, the upper bound of a Feb 29 publish", LEAP_DAY, ["2030-02-28", "22:00"], ["2030-02-28", "23:59"], []],
+  ["Mar 1, after a Feb 29 publish's window", LEAP_DAY, ["2030-02-28", "23:00"], ["2030-03-01", "00:00"], ["end"]],
+];
+
+// Text and serial cells reach the same check, so every edge is tried with each column written either way.
+const KINDS: [Kind, Kind][] = [
+  ["text", "text"],
+  ["serial", "serial"],
+  ["text", "serial"],
+  ["serial", "text"],
+];
+
+test("validateBlocks window: calendar dates in JST, inclusive, each of start and end on its own", async (t) => {
+  for (const [name, window, start, end, bad] of BLOCK_EDGES) {
+    for (const [startKind, endKind] of KINDS) {
+      await t.test(`${name}, start as ${startKind} and end as ${endKind}`, () => {
+        const workbook = blocksOf([["B-1", cellOf(start, startKind), cellOf(end, endKind)]]);
+        const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(
+          workbook,
+          expectedCatalog(),
+          Date.parse(window.now),
+        );
+        assert.deepEqual(fatal, []);
+        assertEveryRowHasAStatus(workbook, statuses, ["Blocks"]);
+        if (bad.length === 0) {
+          assert.deepEqual(blocks.map(span), [{ blockId: "B-1", startAt: at(start), endAt: at(end) }]);
+          assert.deepEqual(notOk(statuses), []);
+          assert.deepEqual(skippedBlockIds, []);
+        } else {
+          assert.deepEqual(blocks, []);
+          assert.deepEqual(skippedBlockIds, ["B-1"]);
+          assert.deepEqual(errors(statuses), ["Blocks 2"]);
+          assertWindowReason(
+            statuses,
+            "Blocks",
+            2,
+            window,
+            bad,
+            (["start", "end"] as Column[]).filter((column) => !bad.includes(column)),
+          );
+        }
+      });
+    }
+  }
+});
+
+test("validateBlocks refuses a text date far outside the window, and the rest of the tab still publishes", () => {
+  const workbook = validWorkbook();
+  appendRow(workbook, "Blocks", {
+    block_id: "TYPO-1",
+    model_id: "pcx-125",
+    start: "2612-02-21 10:00",
+    end: "2612-02-22 10:00",
+  });
+  appendRow(workbook, "Blocks", {
+    block_id: "TYPO-2",
+    model_id: "pcx-125",
+    start: "2030-07-20 10:00",
+    end: "2612-02-21 10:00",
+  });
+  const { blocks, statuses, fatal, skippedBlockIds } = validateBlocks(workbook, expectedCatalog(), BLOCKS_NOW);
+  const window = { lo: "2028-01-01", hi: "2032-01-01" };
+
+  assert.deepEqual(fatal, []);
+  assert.deepEqual(sortedBlocks(blocks), EXPECTED_BLOCKS);
+  assert.deepEqual([...skippedBlockIds].sort(), ["TYPO-1", "TYPO-2"]);
+  assert.deepEqual(errors(statuses), ["Blocks 5", "Blocks 6"]);
+  assertWindowReason(statuses, "Blocks", 5, window, ["start"]);
+  assertWindowReason(statuses, "Blocks", 6, window, ["end"], ["start"]);
+  assertEveryRowHasAStatus(workbook, statuses, ["Blocks"]);
+});
+
+// [what is on the edge, the publish, the date, whether it stays]. ClosedDates take the same window as Blocks.
+const CLOSED_EDGES: [string, Window, string, boolean][] = [
+  ["the first allowed day", NOV_2, "2024-11-02", true],
+  ["the day before the window", NOV_2, "2024-11-01", false],
+  ["the last allowed day", NOV_2, "2028-11-02", true],
+  ["the day after the window", NOV_2, "2028-11-03", false],
+  ["the first day of a later publish's window", NOV_3, "2024-11-03", true],
+  ["the day before a later publish's window", NOV_3, "2024-11-02", false],
+  ["the last day of a later publish's window", NOV_3, "2028-11-03", true],
+  ["the day after a later publish's window", NOV_3, "2028-11-04", false],
+  ["Feb 28, the lower bound of a Feb 29 publish", LEAP_DAY, "2026-02-28", true],
+  ["Feb 27, before a Feb 29 publish's window", LEAP_DAY, "2026-02-27", false],
+  ["Feb 28, the upper bound of a Feb 29 publish", LEAP_DAY, "2030-02-28", true],
+  ["Mar 1, after a Feb 29 publish's window", LEAP_DAY, "2030-03-01", false],
+];
+
+/** The valid workbook with one more closed date written as `cell`, published at `window`. */
+function publishClosedDate(window: Window, cell: unknown, expectedDate: string | null) {
+  const workbook = validWorkbook();
+  appendRow(workbook, "ClosedDates", { date: cell });
+  const row = workbook.ClosedDates.length;
+  const { catalog, statuses, fatal } = validateCatalog(workbook, Date.parse(window.now));
+  const expected = expectedCatalog();
+  if (expectedDate !== null) expected.closedDates.push(expectedDate);
+
+  assert.deepEqual(fatal, []);
+  assert.deepEqual(canonical(catalog), canonical(expected));
+  assertEveryRowHasAStatus(workbook, statuses, CATALOG_TABS);
+  return { statuses, row };
+}
+
+test("validateCatalog window: closed dates are kept or dropped by the same dates as blocks", async (t) => {
+  for (const [name, window, date, stays] of CLOSED_EDGES) {
+    for (const kind of ["text", "serial"] as const) {
+      await t.test(`${name}, as ${kind}`, () => {
+        const cell = kind === "text" ? date : sheetSerial(date);
+        const { statuses, row } = publishClosedDate(window, cell, stays ? date : null);
+        if (stays) {
+          assert.deepEqual(notOk(statuses), []);
+        } else {
+          assert.deepEqual(errors(statuses), [`ClosedDates ${row}`]);
+          assertError(statuses, "ClosedDates", row, ["date"]);
+          assertWindowReason(statuses, "ClosedDates", row, window, ["date"]);
+        }
+      });
+    }
+  }
+
+  for (const cell of ["2612-02-21", "２６１２－０２－２１", 260105, 202601, 100000, 60105, 26105]) {
+    await t.test(`${JSON.stringify(cell)} is dropped`, () => {
+      const { statuses, row } = publishClosedDate(NOV_2, cell, null);
+      assert.deepEqual(errors(statuses), [`ClosedDates ${row}`]);
+      assertWindowReason(statuses, "ClosedDates", row, NOV_2, ["date"]);
     });
   }
 });
