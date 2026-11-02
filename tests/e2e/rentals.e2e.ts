@@ -1073,6 +1073,154 @@ test("a class with no priced day package shows no price", async () => {
   }
 });
 
+// What a guest gets who presses Search without touching the form.
+
+/** The text of the package select's "any" option per locale, written out here. */
+const ANY: Record<Locale, string> = { ja: "すべて", en: "Any", "zh-cn": "全部", ko: "전체" };
+
+/** The no-results sentence per locale, enough of it to tell it from the rest of the page. */
+const NO_VEHICLES: Record<Locale, string> = {
+  ja: "条件に合う車両はありません",
+  en: "No vehicles match",
+  "zh-cn": "没有符合条件的车辆",
+  ko: "조건에 맞는 차량이 없습니다",
+};
+
+/** The query a browser sends from the form as rendered, untouched: each named control's default, and the empty ones too. */
+function defaultsOf(form: string): URLSearchParams {
+  const query = new URLSearchParams();
+  for (const { name, attributes } of tagsIn(form)) {
+    const field = attributes.name;
+    if (field === undefined || query.has(field)) continue;
+    if (name === "select") query.append(field, chosen(form, field) ?? "");
+    else if (name === "input" && !["submit", "button", "checkbox", "radio"].includes(attributes.type ?? "text")) {
+      query.append(field, attributes.value ?? "");
+    }
+  }
+  return query;
+}
+
+/** The package select's options with their text, in order. */
+function packageOptions(form: string): { value: string | undefined; selected: boolean; text: string }[] {
+  const select = tagsIn(form).find((tag) => tag.name === "select" && tag.attributes.name === "package");
+  assert.ok(select, "no package select");
+  const html = elementAt(form, select);
+  return tagsIn(html)
+    .filter((tag) => tag.name === "option")
+    .map((tag) => ({
+      value: tag.attributes.value,
+      selected: "selected" in tag.attributes,
+      text: visibleText(elementAt(html, tag)),
+    }));
+}
+
+test("searching with the form's own defaults keeps every card priced from its own class", async () => {
+  await publish(sheetCatalog(splitPackages));
+
+  const queries: { query: string; expected: string[] }[] = [
+    { query: "", expected: ACTIVE },
+    { query: "?class=car-k", expected: ["nbox-660"] },
+    { query: "?type=car", expected: ACTIVE },
+    { query: "?class=bike-125", expected: ["pcx-125"] },
+  ];
+  for (const locale of LOCALES) {
+    for (const { query, expected } of queries) {
+      const first = `/${locale}/rentals${query}`;
+      const sent = defaultsOf(filterForm(await listing(first), first));
+      const path = `/${locale}/rentals?${sent}`;
+      const main = await listing(path);
+      assertBrowsing(main, expected, `${path} (from ${first})`);
+      assert.equal(hookText(main, "data-search-error"), undefined, `${path}: a message`);
+      for (const id of expected) {
+        const own = OWN[id] as (typeof OWN)[string];
+        const shown = card(main, id, path);
+        assertPriced(shown, locale, own.packageId, own.price, `${path} (from ${first})`);
+        assert.deepEqual(amounts(shown, "data-deposit"), [own.deposit], `${path}: deposit of ${id}`);
+      }
+    }
+  }
+});
+
+test("the package select offers an empty choice, selected when no package is chosen", async () => {
+  await publish(sheetCatalog(splitPackages));
+
+  for (const locale of LOCALES) {
+    for (const query of ["", "?class=car-k", "?type=car", "?time=10:00", "?package="]) {
+      const path = `/${locale}/rentals${query}`;
+      const form = filterForm(await listing(path), path);
+      const [first, ...rest] = packageOptions(form);
+      assert.equal(first?.value, "", `${path}: the first option`);
+      assert.equal(first?.text, ANY[locale], `${path}: the first option's text`);
+      assert.equal(chosen(form, "package"), "", `${path}: what is submitted`);
+      // Every package is still offered, and none of them is the default.
+      assert.deepEqual(
+        rest.map(({ value }) => value).sort(),
+        ["car-same", "car-two", "day-1", "day-3", "hours-6"],
+        `${path}: packages`,
+      );
+      assert.deepEqual(rest.filter(({ selected }) => selected), [], `${path}: a package selected by default`);
+    }
+
+    // A chosen package is the selected one, and the empty choice is not.
+    for (const packageId of ["day-1", "car-same", "car-two", "hours-6"]) {
+      const path = `/${locale}/rentals?package=${packageId}`;
+      const form = filterForm(await listing(path), path);
+      assert.equal(chosen(form, "package"), packageId, `${path}: what is submitted`);
+      const selected = packageOptions(form).filter(({ selected }) => selected);
+      assert.deepEqual(selected.map(({ value }) => value), [packageId], `${path}: selected options`);
+    }
+  }
+});
+
+test("searching with the form's defaults and a date and time browses, with the prompt", async () => {
+  const catalog = sheetCatalog(splitPackages);
+  await publish(catalog);
+  const [date] = openDates(catalog);
+
+  const queries: { query: string; expected: string[] }[] = [
+    { query: "", expected: ACTIVE },
+    { query: "?class=car-k", expected: ["nbox-660"] },
+  ];
+  for (const locale of LOCALES) {
+    for (const { query, expected } of queries) {
+      const first = `/${locale}/rentals${query}`;
+      const sent = defaultsOf(filterForm(await listing(first), first));
+      sent.set("date", date);
+      sent.set("time", "10:00");
+      const path = `/${locale}/rentals?${sent}`;
+      const main = await listing(path);
+      assertBrowsing(main, expected, path);
+      assertNotice(main, "data-search-prompt", locale, path);
+      assert.equal(hookText(main, "data-search-error"), undefined, `${path}: a message`);
+      assert.ok(!visibleText(main).includes(NO_VEHICLES[locale]), `${path}: says no vehicles match`);
+      assert.ok(idsIn(main).includes("nbox-660"), `${path}: the car is not listed`);
+      // The search keeps what the guest chose.
+      const form = filterForm(main, path);
+      assert.equal(dateInput(form, path).input.attributes.value, date, `${path}: date`);
+      assert.equal(chosen(form, "time"), "10:00", `${path}: time`);
+    }
+  }
+});
+
+test("the date picker takes its package's days, and none when no package is chosen", async () => {
+  await publish(sheetCatalog(splitPackages));
+
+  for (const locale of LOCALES) {
+    for (const query of ["", "?class=car-k", "?type=car", "?package="]) {
+      const path = `/${locale}/rentals${query}`;
+      const { picker } = dateInput(filterForm(await listing(path), path), path);
+      assert.equal(picker.attributes["package-days"], undefined, `${path}: package-days`);
+    }
+    // Day packages of 1, 3, 1 and 2 days, so a fixed value cannot pass.
+    const days: Record<string, string> = { "day-1": "1", "day-3": "3", "car-same": "1", "car-two": "2" };
+    for (const [packageId, expected] of Object.entries(days)) {
+      const path = `/${locale}/rentals?package=${packageId}`;
+      const { picker } = dateInput(filterForm(await listing(path), path), path);
+      assert.equal(picker.attributes["package-days"], expected, `${path}: package-days`);
+    }
+  }
+});
+
 test("a valid cc with type=car is ignored", async () => {
   const catalog = sheetCatalog(splitPackages);
   await publish(catalog);

@@ -98,18 +98,15 @@ export function listedModels(models: Model[], search: ParsedSearch, found: Avail
     : listed.filter((model) => model.rateClassId === rateClassId);
 }
 
-/**
- * The package the select shows: the chosen one, else the first day package. Hours packages sort first on the sheet, and a
- * default that finds nothing would empty every search. Cards price through cardPrice, which does not use this default.
- */
-export function shownPackage(packages: Package[], search: ParsedSearch): Package | undefined {
-  return packages.find(({ id }) => id === search.packageId) ?? packages.find(({ days }) => days !== null) ?? packages[0];
+/** The package the guest chose, or undefined when none: the select starts on "Any", so no default is invented. */
+export function chosenPackage(packages: Package[], search: ParsedSearch): Package | undefined {
+  return packages.find(({ id }) => id === search.packageId);
 }
 
 /**
  * The package and price a card shows for its rate class. A chosen package prices every card, and a class without a price for
  * it gets none. With none chosen, each class takes its own first day package that has a price: bikes and cars have separate
- * packages, and an hours package never stands in. `packages` is in sheet order.
+ * packages, and an hours package never stands in. `packages` is in sort order, as readCatalog returns it.
  */
 export function cardPrice(
   packages: Package[],
@@ -117,7 +114,7 @@ export function cardPrice(
   rateClassId: string,
   search: ParsedSearch,
 ): { pkg: Package; priceJpy: number } | undefined {
-  const chosen = packages.find(({ id }) => id === search.packageId);
+  const chosen = chosenPackage(packages, search);
   for (const pkg of chosen ? [chosen] : packages.filter(({ days }) => days !== null)) {
     const price = prices.find((entry) => entry.rateClassId === rateClassId && entry.packageId === pkg.id);
     if (price !== undefined) return { pkg, priceJpy: price.priceJpy };

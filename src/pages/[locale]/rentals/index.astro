@@ -15,7 +15,7 @@ import { pickupSlots } from "../../../lib/booking/pickup-window.ts";
 import { photoUrl, readPhotoIndex } from "../../../lib/catalog/photos.ts";
 import { readCatalog, type PublishedCatalog } from "../../../lib/db/catalog-store.ts";
 import { isLocale } from "../../../lib/locale.ts";
-import { availabilityQuery, cardPrice, carriedQuery, listedModels, parseSearch, shownPackage } from "../../../lib/search.ts";
+import { availabilityQuery, cardPrice, carriedQuery, chosenPackage, listedModels, parseSearch } from "../../../lib/search.ts";
 import { addDaysToDate, epochToJst, jstToday } from "../../../lib/time.ts";
 import type { Package } from "../../../lib/types.ts";
 
@@ -33,7 +33,7 @@ async function list(catalog: PublishedCatalog) {
   const search = parseSearch(Astro.url.searchParams, catalog, catalog.config, catalog.closedDates, now);
   const query = availabilityQuery(search, now);
   const found = query && (await searchAvailability(env.DB, query));
-  const pkg = shownPackage(catalog.packages, search);
+  const pkg = chosenPackage(catalog.packages, search);
   const photos = await readPhotoIndex(env.DB);
   const carried = carriedQuery(search);
 
@@ -85,6 +85,7 @@ const listing = catalog && (await list(catalog));
           <label>
             {t(locale, rentals, "rentals.form.package")}
             <select name="package">
+              <option value="">{t(locale, rentals, "rentals.form.any")}</option>
               {catalog.packages.map((pkg) => (
                 <option value={pkg.id} data-days={pkg.days ?? undefined} selected={pkg.id === listing.pkg?.id}>
                   {sheetName(pkg.texts, locale)}
@@ -138,7 +139,7 @@ const listing = catalog && (await list(catalog));
               available={listing.complete}
               photo={photo}
               rateClassName={rateClass ? sheetName(rateClass.texts, locale) : ""}
-              packageName={packageName(priced?.pkg ?? (listing.search.packageId ? listing.pkg : undefined))}
+              packageName={packageName(priced?.pkg ?? listing.pkg)}
               priceJpy={priced?.priceJpy}
               depositJpy={depositJpy}
             />
