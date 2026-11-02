@@ -1,6 +1,6 @@
 ---
-// /{locale}/: the hero and a search form that GETs the listing with its params. Before the first publish there is nothing
-// to search, so a notice takes the form's place.
+// /{locale}/: the hero and a search form that GETs the listing with its params. Before the first publish, or with no day
+// package to search, a notice takes the form's place.
 import { env } from "cloudflare:workers";
 import DatePicker from "../../components/DatePicker.astro";
 import { common } from "../../i18n/strings/common.ts";
@@ -31,6 +31,8 @@ if (!isLocale(locale)) return new Response(null, { status: 404 });
 const name = t(locale, common, "site.name");
 const tagline = t(locale, common, "site.tagline");
 const catalog = await readCatalog(env.DB);
+// Task #50 makes hours packages searchable. Until then the listing finds nothing for one and a hold refuses it.
+const dayPackages = catalog?.packages.filter(({ days }) => days !== null) ?? [];
 const now = Date.now();
 ---
 
@@ -40,7 +42,7 @@ const now = Date.now();
     <p>{tagline}</p>
   </section>
   {
-    catalog === null ? (
+    catalog === null || dayPackages.length === 0 ? (
       <p>{t(locale, pages, "home.unpublished")}</p>
     ) : (
       <section>
@@ -71,7 +73,7 @@ const now = Date.now();
           <label>
             {t(locale, pages, "home.search.package")}
             <select name="package">
-              {catalog.packages.map(({ id, texts }) => (
+              {dayPackages.map(({ id, texts }) => (
                 <option value={id}>{texts[locale].name}</option>
               ))}
             </select>

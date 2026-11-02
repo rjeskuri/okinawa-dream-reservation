@@ -7,7 +7,7 @@ import { replaceCatalog } from "../../src/lib/db/catalog-store.ts";
 import { LOCALES, type Locale } from "../../src/lib/locale.ts";
 import { addDaysToDate, epochToJst, formatHHmm, jstToday, parseHHmm } from "../../src/lib/time.ts";
 import type { CancellationTier, Catalog, LocalizedTexts, Package, ShopConfig } from "../../src/lib/types.ts";
-import { blocksOf, bodyOf, mainOf, sectionsIn, tagsIn, visibleText, withoutCode } from "../helpers/html.ts";
+import { blocksOf, bodyOf, mainOf, sectionsIn, tagsIn, visibleText, withoutCode, type Tag } from "../helpers/html.ts";
 import { startWorker, type TestWorker } from "../helpers/worker.ts";
 
 const base = "http://localhost/";
@@ -31,6 +31,10 @@ function names(en: string): LocalizedTexts<{ name: string }> {
 
 function dayPackage(id: string, days: number, sort: number, name: string): Package {
   return { id, days, hours: null, sort, texts: names(name) };
+}
+
+function hoursPackage(id: string, hours: number, sort: number, name: string): Package {
+  return { id, days: null, hours, sort, texts: names(name) };
 }
 
 const CONFIG: ShopConfig = {
@@ -350,22 +354,31 @@ function rentalsForm(html: string, locale: Locale): string {
   return found[0] as string;
 }
 
-/** The non-empty values the form offers for `name`, as select options or radio buttons. An empty value means "any". */
-function offered(form: string, name: string): string[] {
+/** The form's choices for `name`: a select's options or its radio buttons, in order. */
+function choices(form: string, name: string): Tag[] {
   const tags = tagsIn(form);
   const select = tags.find((tag) => tag.name === "select" && tag.attributes.name === name);
-  let values: (string | undefined)[];
   if (select) {
     const body = form.slice(select.index, form.indexOf("</select", select.index));
-    values = tagsIn(body)
-      .filter((tag) => tag.name === "option")
-      .map((tag) => tag.attributes.value);
-  } else {
-    values = tags
-      .filter(({ name: tag, attributes }) => tag === "input" && attributes.type === "radio" && attributes.name === name)
-      .map((tag) => tag.attributes.value);
+    return tagsIn(body).filter((tag) => tag.name === "option");
   }
-  return values.filter((value): value is string => value !== undefined && value !== "");
+  return tags.filter(
+    ({ name: tag, attributes }) => tag === "input" && attributes.type === "radio" && attributes.name === name,
+  );
+}
+
+/** The non-empty values the form offers for `name`, as select options or radio buttons. An empty value means "any". */
+function offered(form: string, name: string): string[] {
+  return choices(form, name)
+    .map((tag) => tag.attributes.value)
+    .filter((value): value is string => value !== undefined && value !== "");
+}
+
+/** What a guest who leaves `name` alone submits: the last selected or checked choice, else a select's first option. */
+function defaultChoice(form: string, name: string): string | undefined {
+  const all = choices(form, name);
+  const marked = all.filter(({ attributes }) => "selected" in attributes || "checked" in attributes).at(-1);
+  return (marked ?? all.find((tag) => tag.name === "option"))?.attributes.value;
 }
 
 /** The pickup times of a config: every slot from opening to one slot before closing, as task #20 defines them. */
@@ -470,6 +483,52 @@ test("home search submits to rentals with the right params", async () => {
     await publish(catalog);
     await assertSearchForm(catalog, now);
   });
+});
+
+test("home search offers day packages only until hours packages can be searched", async () => {
+  // Task #50 makes these bookable. Until then the listing finds nothing for one and a hold refuses it.
+  const cases: { label: string; packages: Package[]; days: string[] }[] = [
+    {
+      label: "hours packages first, between and last",
+      packages: [
+        hoursPackage("hours-6", 6, 1, "Six hours"),
+        dayPackage("p-z-1d", 1, 2, "One day"),
+        hoursPackage("p-half", 4, 3, "Half day"),
+        dayPackage("p-a-3d", 3, 4, "Three days"),
+        hoursPackage("p-short", 1, 5, "Quick ride"),
+      ],
+      days: ["p-z-1d", "p-a-3d"],
+    },
+    {
+      // Stored out of sort order, with ids that do not say hours, and with 24 and 72 hours, so a cut on length shows.
+      label: "stored out of order, 24 and 72 hours",
+      packages: [
+        dayPackage("p-2d", 2, 4, "Weekend"),
+        hoursPackage("p-m-long", 24, 3, "Round the clock"),
+        dayPackage("p-a-14d", 14, 5, "Fortnight"),
+        hoursPackage("p-b-max", 72, 1, "Three full turns"),
+        dayPackage("p-week", 7, 2, "Full week"),
+      ],
+      days: ["p-week", "p-2d", "p-a-14d"],
+    },
+  ];
+
+  for (const { label, packages, days } of cases) {
+    await publish(catalogWith({ packages }));
+    for (const locale of LOCALES) {
+      const where = `${label}, ${locale}`;
+      const form = rentalsForm(await pageHtml(`/${locale}/`), locale);
+      assert.deepEqual(offered(form, "package"), days, `${where}: package values`);
+
+      const preset = defaultChoice(form, "package");
+      assert.ok(preset !== undefined && days.includes(preset), `${where}: the default package is ${preset}`);
+
+      const text = visibleText(form);
+      for (const { id, texts } of packages) {
+        assert.equal(text.includes(texts[locale].name), days.includes(id), `${where}: label of ${id}`);
+      }
+    }
+  }
 });
 
 // Routing.
