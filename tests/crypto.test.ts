@@ -168,7 +168,12 @@ test("randomRef does not draw from Math.random", (t) => {
 
 test("randomRef draws from crypto.getRandomValues", (t) => {
   // t.mock restores crypto.getRandomValues when the test ends. The fake returns the buffer, as the real method does.
-  const spy = t.mock.method(globalThis.crypto, "getRandomValues", (buf) => buf.fill(0));
+  // The signature also admits a DataView, which has no fill, so the zeros go through a byte view of the same memory.
+  const zeroFill: typeof globalThis.crypto.getRandomValues = (buf) => {
+    new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength).fill(0);
+    return buf;
+  };
+  const spy = t.mock.method(globalThis.crypto, "getRandomValues", zeroFill);
   assert.equal(randomRef(), randomRef());
   assert.ok(spy.mock.callCount() > 0);
 });
