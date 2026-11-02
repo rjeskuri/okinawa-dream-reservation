@@ -1,0 +1,201 @@
+---
+// /{locale}/rentals/{model}: one active model of the published catalog, with its prices and deposit, availability for the
+// date, time and package in the query, and the booking form, which starts from that search and posts to /{locale}/book.
+// The query is a link anyone can spoil, so nothing in it reaches the page unchecked, and a book error shows by its code.
+import { env } from "cloudflare:workers";
+import DatePicker from "../../../components/DatePicker.astro";
+import { common } from "../../../i18n/strings/common.ts";
+import { email } from "../../../i18n/strings/email.ts";
+import { model } from "../../../i18n/strings/model.ts";
+import { pages } from "../../../i18n/strings/pages.ts";
+import { t } from "../../../i18n/t.ts";
+import Base from "../../../layouts/Base.astro";
+import { searchAvailability } from "../../../lib/booking/availability.ts";
+import { pickupInstant, pickupSlots, pickupWindowError } from "../../../lib/booking/pickup-window.ts";
+import { photoUrl, readPhotoIndex } from "../../../lib/catalog/photos.ts";
+import { readCatalog } from "../../../lib/db/catalog-store.ts";
+import { isLocale } from "../../../lib/locale.ts";
+import { addDaysToDate, epochToJst, jstToday } from "../../../lib/time.ts";
+
+const HOUR_MS = 3_600_000;
+
+const { locale, model: modelId } = Astro.params;
+// Astro's own check ignores case and sees any segment of the path, so it passes /JA/.
+if (!isLocale(locale)) return new Response(null, { status: 404 });
+
+const catalog = await readCatalog(env.DB);
+const entry = catalog?.models.find(({ id, active }) => active && id === modelId);
+if (!catalog || !entry) return new Response(null, { status: 404 });
+
+const type = catalog.vehicleTypes.find(({ id }) => id === entry.typeId);
+if (!type) throw new Error(`no vehicle type ${entry.typeId} for ${entry.id}`);
+
+const { name, summary, description } = entry.texts[locale];
+const photoIndex = await readPhotoIndex(env.DB);
+const photos = entry.photos.flatMap((photo) => photoUrl(photo, photoIndex) ?? []);
+
+const money = (jpy: number) => t(locale, email, "email.amount").replace("{amount}", jpy.toLocaleString("en-US"));
+
+// readCatalog returns packages in sort order.
+const rows = catalog.packages.flatMap((pkg) => {
+  const price = catalog.prices.find(
+    ({ rateClassId, packageId }) => rateClassId === entry.rateClassId && packageId === pkg.id,
+  );
+  return price === undefined ? [] : [{ pkg, priceJpy: price.priceJpy }];
+});
+// Task #50 makes hours packages bookable. Until then a hold refuses one, so the table lists it and the form does not.
+const bookable = rows.map(({ pkg }) => pkg).filter((pkg) => pkg.days !== null);
+
+const now = Date.now();
+const { searchParams } = Astro.url;
+const date = searchParams.get("date") ?? "";
+const time = searchParams.get("time") ?? "";
+const chosen = bookable.find(({ id }) => id === searchParams.get("package"));
+const startAt = pickupInstant(date, time);
+
+// searchAvailability leaves the window to its caller, and the calendar helpers behind it throw on a date like 9999-12-31.
+const searchable =
+  chosen !== undefined && pickupWindowError(catalog.config, catalog.closedDates, startAt, chosen.days, now) === null;
+const available = searchable
+  ? (await searchAvailability(env.DB, { startAt, packageId: chosen.id, now })).some((row) => row.modelId === entry.id)
+  : null;
+
+// The prefix keeps a tampered code away from what every object inherits.
+const errorKey = `model.error.${searchParams.get("error")}`;
+const error = errorKey in model ? t(locale, model, errorKey) : null;
+---
+
+<Base locale={locale} title={`${name} | ${t(locale, common, "site.name")}`}>
+  {
+    error !== null && (
+      <p class="error" role="alert">
+        {error}
+      </p>
+    )
+  }
+  <h1>{name}</h1>
+  <p>{summary}</p>
+  {
+    photos.length > 0 && (
+      <div class="photos">
+        {photos.map((src) => (
+          <img src={src} alt={name} />
+        ))}
+      </div>
+    )
+  }
+  <p>{description}</p>
+  <dl>
+    <dt>{t(locale, model, "model.details.type")}</dt>
+    <dd>{type.texts[locale].name}</dd>
+    <dt>{t(locale, model, "model.details.engine")}</dt>
+    <dd>{entry.engineCc}cc</dd>
+    <dt>{t(locale, model, "model.details.license")}</dt>
+    <dd>
+      {t(locale, model, `model.license.${entry.licenseClass}`)}
+      (<a href={`/${locale}/faq#license-classes`}>{t(locale, model, "model.license.more")}</a>)
+    </dd>
+  </dl>
+  <section id="prices">
+    <h2>{t(locale, model, "model.prices.heading")}</h2>
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">{t(locale, pages, "home.search.package")}</th>
+          <th scope="col">{t(locale, model, "model.prices.price")}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          rows.map(({ pkg, priceJpy }) => (
+            <tr>
+              <td>{pkg.texts[locale].name}</td>
+              <td>{money(priceJpy)}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+    <p>{t(locale, model, "model.deposit").replace("{amount}", money(type.depositJpy))}</p>
+  </section>
+  <section id="booking">
+    <h2>{t(locale, model, "model.booking.heading")}</h2>
+    {available !== null && <p>{t(locale, model, available ? "model.available" : "model.soldOut")}</p>}
+    {
+      bookable.length === 0 ? (
+        <p>{t(locale, model, "model.booking.unavailable")}</p>
+      ) : (
+        <form class="booking" action={`/${locale}/book`} method="post">
+          <input type="hidden" name="model" value={entry.id} />
+          <DatePicker
+            locale={locale}
+            min={epochToJst(now + catalog.config.minLeadHours * HOUR_MS).date}
+            max={addDaysToDate(jstToday(now), catalog.config.maxDaysAhead)}
+            closedDates={catalog.closedDates}
+            value={Number.isNaN(pickupInstant(date, "00:00")) ? undefined : date}
+            packageDays={(chosen ?? bookable[0]).days}
+          />
+          <label>
+            {t(locale, pages, "home.search.time")}
+            <select name="time">
+              {pickupSlots(catalog.config).map((slot) => (
+                <option value={slot} selected={slot === time}>
+                  {slot}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            {t(locale, pages, "home.search.package")}
+            <select name="package">
+              {bookable.map((pkg) => (
+                <option value={pkg.id} selected={pkg === chosen} data-days={pkg.days}>
+                  {pkg.texts[locale].name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="submit">{t(locale, model, "model.booking.submit")}</button>
+        </form>
+      )
+    }
+  </section>
+</Base>
+
+<script>
+  // The calendar shows the return date of the package chosen here.
+  const select = document.querySelector<HTMLElement>("form.booking select[name=package]");
+  select?.addEventListener("change", () => {
+    const days = select.querySelector<HTMLOptionElement>("option:checked")?.dataset.days;
+    document.querySelector("form.booking date-picker")?.setAttribute("package-days", days ?? "");
+  });
+</script>
+
+<style>
+  .error {
+    padding: var(--space-3);
+    border: 2px solid var(--color-focus-ring);
+    border-radius: var(--radius-base);
+  }
+  .photos {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+  .photos img {
+    max-width: 100%;
+    height: auto;
+  }
+  th,
+  td {
+    padding: var(--space-2) var(--space-3);
+    text-align: left;
+  }
+  .booking {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-4);
+  }
+</style>

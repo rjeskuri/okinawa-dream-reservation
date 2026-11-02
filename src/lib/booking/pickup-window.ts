@@ -1,7 +1,7 @@
 // Which pickup times the shop accepts, in JST: inside opening hours, on the slot grid that starts at shop_open, not on a
 // closed pickup or return date, and between the lead time and the booking horizon.
 import { rentalEnd } from "../db/blocking.ts";
-import { epochToJst, formatHHmm, JST_OFFSET_MS, parseHHmm } from "../time.ts";
+import { epochToJst, formatHHmm, JST_OFFSET_MS, jstToEpoch, parseHHmm } from "../time.ts";
 import type { ShopConfig } from "../types.ts";
 
 export type PickupWindowReason = "OUTSIDE_HOURS" | "OFF_SLOT" | "CLOSED_PICKUP" | "CLOSED_RETURN" | "TOO_SOON" | "TOO_FAR";
@@ -23,6 +23,15 @@ export function pickupSlots(config: ShopConfig): string[] {
   const last = parseHHmm(config.shopClose) - slotMinutes;
   for (let minute = parseHHmm(config.shopOpen); minute <= last; minute += slotMinutes) slots.push(formatHHmm(minute));
   return slots;
+}
+
+/** The instant of a pickup from a form or a query. NaN when it is no real date and time, which pickupWindowError refuses. */
+export function pickupInstant(date: string, time: string): number {
+  try {
+    return jstToEpoch(date, time);
+  } catch {
+    return Number.NaN;
+  }
 }
 
 /**
