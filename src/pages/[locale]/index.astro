@@ -1,9 +1,28 @@
 ---
-// /{locale}/: a placeholder home page until task #28 fills it.
+// /{locale}/: the hero and a search form that GETs the listing with its params. Before the first publish, or with no day
+// package to search, a notice takes the form's place.
+import { env } from "cloudflare:workers";
+import DatePicker from "../../components/DatePicker.astro";
 import { common } from "../../i18n/strings/common.ts";
+import { pages } from "../../i18n/strings/pages.ts";
 import { t } from "../../i18n/t.ts";
 import Base from "../../layouts/Base.astro";
+import { readCatalog } from "../../lib/db/catalog-store.ts";
 import { isLocale } from "../../lib/locale.ts";
+import { addDaysToDate, epochToJst, formatHHmm, jstToday, parseHHmm } from "../../lib/time.ts";
+import type { ShopConfig } from "../../lib/types.ts";
+
+const HOUR_MS = 3_600_000;
+
+/** The times of day a pickup can start, HH:mm, from shop_open to shop_close - slot_minutes. Task #20's pickupSlots replaces this. */
+function pickupSlots({ shopOpen, shopClose, slotMinutes }: ShopConfig): string[] {
+  if (!Number.isInteger(slotMinutes) || slotMinutes <= 0) return [];
+  const slots: string[] = [];
+  for (let at = parseHHmm(shopOpen); at <= parseHHmm(shopClose) - slotMinutes; at += slotMinutes) {
+    slots.push(formatHHmm(at));
+  }
+  return slots;
+}
 
 const { locale } = Astro.params;
 // Astro's own check ignores case and sees any segment of the path, so it passes /JA/.
@@ -11,9 +30,69 @@ if (!isLocale(locale)) return new Response(null, { status: 404 });
 
 const name = t(locale, common, "site.name");
 const tagline = t(locale, common, "site.tagline");
+const catalog = await readCatalog(env.DB);
+// Task #50 makes hours packages searchable. Until then the listing finds nothing for one and a hold refuses it.
+const dayPackages = catalog?.packages.filter(({ days }) => days !== null) ?? [];
+const now = Date.now();
 ---
 
 <Base locale={locale} title={`${name} | ${tagline}`}>
-  <h1>{name}</h1>
-  <p>{tagline}</p>
+  <section class="hero">
+    <h1>{name}</h1>
+    <p>{tagline}</p>
+  </section>
+  {
+    catalog === null || dayPackages.length === 0 ? (
+      <p>{t(locale, pages, "home.unpublished")}</p>
+    ) : (
+      <section>
+        <h2>{t(locale, pages, "home.search.heading")}</h2>
+        <form class="search" action={`/${locale}/rentals`} method="get">
+          <label>
+            {t(locale, pages, "home.search.type")}
+            <select name="type">
+              {catalog.vehicleTypes.map(({ id, texts }) => (
+                <option value={id}>{texts[locale].name}</option>
+              ))}
+            </select>
+          </label>
+          <DatePicker
+            locale={locale}
+            min={epochToJst(now + catalog.config.minLeadHours * HOUR_MS).date}
+            max={addDaysToDate(jstToday(now), catalog.config.maxDaysAhead)}
+            closedDates={catalog.closedDates}
+          />
+          <label>
+            {t(locale, pages, "home.search.time")}
+            <select name="time">
+              {pickupSlots(catalog.config).map((slot) => (
+                <option value={slot}>{slot}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            {t(locale, pages, "home.search.package")}
+            <select name="package">
+              {dayPackages.map(({ id, texts }) => (
+                <option value={id}>{texts[locale].name}</option>
+              ))}
+            </select>
+          </label>
+          <button type="submit">{t(locale, pages, "home.search.submit")}</button>
+        </form>
+      </section>
+    )
+  }
 </Base>
+
+<style>
+  .hero {
+    padding: var(--space-8) 0;
+  }
+  .search {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-4);
+  }
+</style>

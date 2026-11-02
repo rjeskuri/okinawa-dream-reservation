@@ -21,16 +21,22 @@ Every value in the examples is a placeholder, not a real price, deposit or plate
 - **Headers.** Every column listed on this page must exist, also where the cell may stay empty. A header matches by name
   in any column order, and upper or lower case and spaces around it do not matter. Extra columns are ignored, so you can
   keep your own notes in one.
-- **Text.** Full-width characters become half-width and half-width katakana become full-width (Unicode NFKC), and spaces
-  around a value are removed, before any check. `ｐｃｘ－１２５` and `pcx-125` are the same id.
+- **Text.** Spaces around a value are removed, also the wide space of a Japanese keyboard. In every column that is
+  checked or matched (ids, numbers, money, dates, times, TRUE/FALSE, statuses, brand and notes), full-width characters
+  become half-width and half-width katakana become full-width (Unicode NFKC) before the check. `ｐｃｘ－１２５` and
+  `pcx-125` are the same id. The exceptions are the texts guests read, which are kept as typed: see Translations.
+  The `photos` column is kept exact too.
 - **Ids (slugs).** Lower-case letters, digits and single hyphens, at most 40 characters: `pcx-125`. Not `PCX_125`, not
   `pcx--125`, not `-pcx`.
 - **Allowed values** are written exactly as shown, in lower case.
 - **Money.** Whole yen. `5000`, `5,000`, `¥5,000` and `5000円` all read as 5000.
 - **Whole numbers.** Digits only, with no decimals. `sort`, `odometer_km` and `base_usage_days` are 0 or more.
 - **TRUE/FALSE.** A checkbox, or the text `TRUE` or `FALSE`.
-- **Dates.** A date cell, or text as `2030-07-15`.
-- **Date and time.** A date-time cell, or text as `2030-07-15 09:00`. Times are Japan time.
+- **Dates.** A date cell, or text as `2027-07-15`.
+- **Date and time.** A date-time cell, or text as `2027-07-15 09:00`. Times are Japan time.
+- **Plausible dates.** In ClosedDates and Blocks, a date more than 2 years before or after the publish date (Japan time)
+  is refused with a row status and the row is skipped. This catches a date typed as digits, such as `260105`, which
+  Sheets reads as a day number in the year 2612.
 - **Times of day.** A time cell, or text as `09:00`.
 - **A number in a text column** is fine: plate `2002` is the text `2002`.
 - **Repeats.** Where an id must be unique, the first row owns it and each later row gets an error, even if the first row
@@ -44,6 +50,10 @@ Columns ending `_ja`, `_en`, `_zh` and `_ko` hold the text of each site language
 cell gets a warning and shows the English text, or the Japanese text if English is blank too, or else any language the
 row has. A row with no name in any language is an error. Summaries and descriptions may be blank in every language: the
 row still publishes, with a warning per cell.
+
+The `name_`, `summary_` and `description_` columns are published exactly as typed, with only the spaces around the text
+removed. Full-width punctuation such as `，` and `！` and characters such as `①` stay as they are, and so does
+half-width katakana. A cell of only spaces counts as blank.
 
 ## publish_status
 
@@ -68,15 +78,23 @@ clear on the next Publish.
 | Packages | The prices of that package. |
 | Models | The vehicles of that model. |
 
-Some problems stop the whole Publish. Nothing changes on the site, nothing is written to the sheet, and the reasons are
-shown to you:
+Some problems stop the whole Publish. Nothing changes on the site, nothing is written to the sheet, and the reasons
+appear in the alert the Publish menu shows:
 
 - a required tab or a header is missing;
 - a Config key is missing, or its value is bad.
 
+What the code does today: `validateCatalog` returns no catalog and lists each reason, for example
+`Config: slot_minutes is missing or invalid`. Writing nothing back and showing the alert belong to the Publish endpoint
+(task #15) and the Apps Script menu (task #16), which are not built yet.
+
 ## Config
 
-One setting per row. All eight keys are required. A bad value is an error on its row and also stops the Publish.
+One setting per row. All eight keys are required. A bad or missing value is fatal: the Publish stops, nothing is
+written back to the sheet (also not to the other rows), and the reason, such as `Config: shop_close is missing or
+invalid`, appears in the Publish alert. Staff see only that short reason. The check also words a longer message for the
+row (for `08:00` as `shop_close`: `shop_close 08:00 must be after shop_open 09:00`), but on a fatal Publish it is shown
+nowhere: not in the alert, and not in `publish_status`, which is not written. Check the value against the table below.
 
 | Column | Accepts |
 | --- | --- |
@@ -86,7 +104,7 @@ One setting per row. All eight keys are required. A bad value is an error on its
 | key | value | Example |
 | --- | --- | --- |
 | `shop_open` | Time of day | `09:00` |
-| `shop_close` | Time of day, after `shop_open`. The error appears on this row. | `18:00` |
+| `shop_close` | Time of day, after `shop_open`; if it is not, the Publish stops with `Config: shop_close is missing or invalid`. | `18:00` |
 | `slot_minutes` | Whole number, 1 or more | `30` |
 | `turnaround_minutes` | Whole number, 0 or more | `60` |
 | `hold_minutes` | Whole number, 1 or more | `15` |
@@ -159,7 +177,7 @@ Example: `bike-125`, `day-1`, `¥5,200`.
 | `name_ja`, `name_en`, `name_zh`, `name_ko` | At least one | Text |
 | `summary_ja`, `summary_en`, `summary_zh`, `summary_ko` | No | Text |
 | `description_ja`, `description_en`, `description_zh`, `description_ko` | No | Text |
-| `photos` | No | Drive file names separated by either comma, `,` or `，`: `pcx-1.jpg, pcx-2.jpg`. Names are kept exactly as typed, with only the spaces around each one removed. |
+| `photos` | No | Drive file names separated by any of three commas, `,`, `，` or `、`: `pcx-1.jpg, pcx-2.jpg` or `pcx-1.jpg、pcx-2.jpg`. Names are kept exactly as typed, with only the spaces around each one removed. |
 
 The default license class comes from the type and the engine:
 
@@ -223,7 +241,9 @@ Example: `7`, `100`.
 | `date` | Yes | A date, unique. A date cell and the same date as text count as the same date. |
 | `note` | No | Text. Not published. |
 
-Example: `2030-01-01`, `New Year`.
+Example: `2027-01-01`, `New Year`.
+
+A date more than 2 years before or after the publish date is an error: the row is skipped and the date is not closed.
 
 ## Blocks
 
@@ -242,15 +262,26 @@ a plate in maintenance or retired.
 | `reference` | No | Text, the booking number on that channel |
 | `note` | No | Text |
 
-Example: `BLK-1`, `pcx-125`, blank, `2030-07-15 09:00`, `2030-07-16 18:00`, `Klook`, `KL-1234`, `Group of two`.
+Example: `BLK-1`, `pcx-125`, blank, `2027-07-15 09:00`, `2027-07-16 18:00`, `Klook`, `KL-1234`, `Group of two`.
 
-A missing or empty Blocks tab, or a missing header, stops the blocks step: stored blocks stay as they are. A row with an
-error does not change the block already stored under its id, so fix the row and press Publish again.
+A missing Blocks tab, a tab with no header row (as when its contents were cleared), or a missing header stops the blocks
+step: stored blocks stay as they are, and nothing is cancelled. A row with an error does not change the block already
+stored under its id, so fix the row and press Publish again. That includes a `start` or `end` more than 2 years before
+or after the publish date: the row is skipped, its status names the column, and the block stored under that id stays
+as it is.
+
+A tab that keeps its header row but has no data rows is not an error for the check: it reads as no blocks. Cancelling
+the future blocks that are no longer on the sheet is task #21, which is not built yet. By its ticket, #21 cancels
+nothing and reports an error when the tab has no data rows while future blocks are stored, so that clearing the tab by
+accident cannot free bikes that an OTA has sold.
 
 ## Bookings
 
 The Worker writes this tab. **Use filter views, and never sort it**: a sort moves rows, and one that lands while the
 Worker is updating the tab can put a booking's update on the wrong row. A filter view moves nothing.
+
+Every column up to the last one needs a header, because a column with no header stops the Worker writing to this tab
+until it is named or removed.
 
 Staff type in one column, `override_plate`, to move a booking to another bike. Publish moves it if that bike is active,
 of the same model and free for the booking's time. `override_status` then shows the result, and the booking keeps its

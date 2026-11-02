@@ -19,7 +19,7 @@ export type AvailableModel = { modelId: string; vacancies: number; priceJpy: num
 const MINUTE_MS = 60_000;
 
 /** Engine sizes in cc, both ends included, one band per bike license class: moped, small, standard, large. */
-const CC_BANDS: Record<CcBand, [min: number, max: number]> = {
+export const CC_BANDS: Record<CcBand, [min: number, max: number]> = {
   upto50: [1, 50],
   "51to125": [51, 125],
   "126to400": [126, 400],

@@ -1,0 +1,26 @@
+---
+// Placeholder text a guest could otherwise take as settled, boxed under a visible draft mark until the shop supplies the
+// real text.
+import { pages } from "../i18n/strings/pages.ts";
+import { t } from "../i18n/t.ts";
+import type { Locale } from "../lib/locale.ts";
+
+interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+---
+
+<div class="draft">
+  <p><strong>{t(locale, pages, "draft.mark")}</strong></p>
+  <slot />
+</div>
+
+<style>
+  .draft {
+    padding: var(--space-3) var(--space-4);
+    border: 2px dashed var(--color-focus-ring);
+    border-radius: var(--radius-base);
+  }
+</style>

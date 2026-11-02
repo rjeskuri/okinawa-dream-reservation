@@ -1,0 +1,61 @@
+---
+// /{locale}/policies: the published cancellation tiers as sentences, and draft terms and privacy text until the shop
+// supplies the real text. readCatalog returns the tiers highest first, the order a guest reads them in.
+import { env } from "cloudflare:workers";
+import DraftNote from "../../components/DraftNote.astro";
+import { common } from "../../i18n/strings/common.ts";
+import { pages } from "../../i18n/strings/pages.ts";
+import { t } from "../../i18n/t.ts";
+import Base from "../../layouts/Base.astro";
+import { readCatalog } from "../../lib/db/catalog-store.ts";
+import { isLocale } from "../../lib/locale.ts";
+import type { CancellationTier } from "../../lib/types.ts";
+
+const { locale } = Astro.params;
+// Astro's own check ignores case and sees any segment of the path, so it passes /JA/.
+if (!isLocale(locale)) return new Response(null, { status: 404 });
+
+const heading = t(locale, common, "nav.policies");
+const catalog = await readCatalog(env.DB);
+const tiers = catalog?.cancellationTiers ?? [];
+
+const tierSentence = ({ minDaysBefore, refundPercent }: CancellationTier) =>
+  t(locale, pages, minDaysBefore === 0 ? "policies.tier.pickupDay" : "policies.tier.days")
+    .replace("{days}", String(minDaysBefore))
+    .replace("{percent}", String(refundPercent));
+---
+
+<Base locale={locale} title={`${heading} | ${t(locale, common, "site.name")}`}>
+  <h1>{heading}</h1>
+  <section id="cancellation">
+    <h2>{t(locale, pages, "policies.cancellation.heading")}</h2>
+    {
+      tiers.length === 0 ? (
+        <p>{t(locale, pages, "policies.cancellation.unpublished")}</p>
+      ) : (
+        <>
+          <p>{t(locale, pages, "policies.cancellation.intro")}</p>
+          <ul>
+            {tiers.map((tier) => (
+              <li>{tierSentence(tier)}</li>
+            ))}
+          </ul>
+          <p>{t(locale, pages, "policies.cancellation.noMatch")}</p>
+          <p>{t(locale, pages, "policies.cancellation.note")}</p>
+        </>
+      )
+    }
+  </section>
+  <section id="terms">
+    <h2>{t(locale, pages, "policies.terms.heading")}</h2>
+    <DraftNote locale={locale}>
+      <p>{t(locale, pages, "policies.terms.body")}</p>
+    </DraftNote>
+  </section>
+  <section id="privacy">
+    <h2>{t(locale, pages, "policies.privacy.heading")}</h2>
+    <DraftNote locale={locale}>
+      <p>{t(locale, pages, "policies.privacy.body")}</p>
+    </DraftNote>
+  </section>
+</Base>

@@ -45,6 +45,8 @@ export type PriceRow = { rate_class_id: string; package_id: string; price_jpy: n
 
 export type TierRow = { min_days_before: number; refund_percent: number };
 
+export type CatalogMetaRow = { id: number; version: number; published_at: number; source: string };
+
 export type BookingRow = {
   id: string;
   ref: string;
@@ -231,6 +233,16 @@ export async function seedTiers(db: D1Database, tiers: TierRow[] = DEFAULT_TIERS
   const stored: TierRow[] = [];
   for (const tier of tiers) stored.push(await insertRow<TierRow>(db, "cancellation_tiers", tier, "min_days_before"));
   return stored;
+}
+
+/** The table holds one row, so seeding again updates it, as a publish does. */
+export async function seedCatalogMeta(db: D1Database, partial: Partial<CatalogMetaRow> = {}): Promise<CatalogMetaRow> {
+  const row = { id: 1, version: 1, published_at: DEFAULT_START_AT - DAY_MS, source: "sheet", ...partial };
+  return insertRow<CatalogMetaRow>(db, "catalog_meta", row, "id");
+}
+
+export async function seedClosedDates(db: D1Database, dates: string[]): Promise<void> {
+  for (const date of dates) await insertRow(db, "closed_dates", { date });
 }
 
 /** The vehicle and model of a booking: both named, the named vehicle's model, or a new vehicle. */
