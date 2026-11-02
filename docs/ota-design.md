@@ -73,7 +73,8 @@ is 18 slots a day, so 18 x 365 = 6,570 objects per option. That is too much to c
 fixed set of OTA pickup times, one or two (a proposal; the count is an open question). Each must be on the grid.
 
 **`maxUnits: 1`.** One booking row is one vehicle, and `createHold` has no way to insert two rows atomically under one
-uuid. Two scooters are two OCTO bookings. Whether Klook honours `maxUnits` is an open question.
+uuid, so a reserve of more than one unit item is refused. Two scooters are two OCTO bookings. Whether Klook honours
+`maxUnits` is an open question.
 
 **Bookings.** ON_HOLD, then CONFIRMED, then CANCELLED, and EXPIRED, as in the
 [bookings page](https://docs.octo.travel/octo-api-core/bookings.md). There is no PAYMENT_PENDING on this path because the
@@ -88,15 +89,27 @@ REJECTED and REDEEMED are not used (see the voucher below). An unexpired ON_HOLD
   `BLOCKING_SQL` uses. A uuid replay after a lapse returns that EXPIRED booking and never takes a new hold; a new hold
   needs a new uuid. `docs/data-model.md` now says EXPIRED is reported to OTAs.
 - **Confirm.** A conditional update on `status = 'ON_HOLD' AND expires_at > now`. A confirm of a lapsed hold fails with
-  UNPROCESSABLE_ENTITY and changes nothing. The [confirmation
+  INVALID_BOOKING_UUID and changes nothing: the [OCTO](https://docs.octo.travel/getting-started/errors.md) and
+  [Klook](https://klook.gitbook.io/openapi/getting-started/errors.md) errors pages both give it as "Missing or invalid
+  booking uuid, or if you're confirming the booking the booking may have expired already", and UNPROCESSABLE_ENTITY there
+  is for a body that is "technically correct but cannot be processed for other reasons". The [confirmation
   body](https://github.com/octotravel/typespec/blob/main/lib/schemas/BookingConfirmationBody.tsp) requires `contact`
   and may carry `resellerReference`. The same D1 batch stores the contact's name, email, phone and locale in the
   `guest_*` and `locale` columns, `resellerReference` as `external_ref` and the channel (from the API key) as
   `external_channel`, so the OTA unique index has data.
-- **Sheet.** The booking reaches the Bookings tab through the outbox, as #40 built it: a `sheet_booking` item
-  (`src/lib/outbox.ts`) that `src/lib/sheets/bookings-sync.ts` drains by reading the booking's current row. No caller
-  in `src/` enqueues one yet, so confirm adds `enqueueStatements` to its batch (T6), and `docs/sheet-schema.md`, which
-  lists `source` as `web` or `block`, gains the OTA value.
+- **Sheet.** The Bookings tab changes only when a `sheet_booking` item (`src/lib/outbox.ts`) is queued: `drainOutbox`
+  claims it and hands the id to `syncBookingRows` (`src/lib/sheets/bookings-sync.ts`), which reads the booking's
+  current row. No caller in `src/` enqueues one yet, so each event that changes what the row shows adds
+  `enqueueStatements` to its own D1 batch (T6): confirm, cancel of a CONFIRMED booking, and a contact PATCH. A lapsed
+  hold is never on the tab: reserve queues nothing, the sync appends only CONFIRMED and CANCELLED rows, and EXPIRED is
+  derived on read, never stored. Cancelling a hold that was never confirmed queues nothing, or the sync would append it as
+  CANCELLED. `dedupe_key` is UNIQUE with INSERT OR IGNORE, so a key that repeats is silently dropped for good, and each
+  event needs its own: `sheet:<booking id>:<event>:<updated_at>`, with `updated_at` the value the same batch writes. No
+  code in `src/` builds a key yet; the `sheet:<id>:<status>` in `tests/outbox.test.ts` is a fixture, and it would give a
+  contact PATCH on a CONFIRMED booking the confirm's key. Two events on one booking in the same millisecond share a key,
+  which is harmless only while the first is unsent. `drainOutbox` has no caller in `src/` and the cron `registry` in
+  `src/cron/index.ts` is empty, so nothing delivers these items until #42 lands: T6 depends on #42. `docs/sheet-schema.md`,
+  which lists `source` as `web` or `block`, gains the OTA value.
 
 **uuid is `bookings.id`.** The spec says setting the uuid ["acts like an idempotency key preventing you from double
 booking"](https://docs.octo.travel/octo-api-core/bookings.md). The uuid is optional in the [reservation
@@ -186,11 +199,13 @@ sheet](https://docs.google.com/spreadsheets/d/1UIgUYAPO3SUsdoGmg5xIGHIBHWHOx7XfQ
 **Capabilities.** [Pricing is mandatory](https://klook.gitbook.io/openapi/getting-started/endpoint-and-capabilities.md)
 for Klook; content is offered. Nothing else at first (pickups and webhooks are marked Coming Soon there). We build all
 OCTO Core, including Update and Extend, which Klook's endpoint table omits, because OCTO's
-[Core is "required"](https://docs.octo.travel/getting-started/endpoints-and-capabilities.md) and the
-[Self-Certification Tool](https://docs.octo.travel/additional-resources/self-certification-tool.md) wants a 100% run. As
-far as any OTA doc read shows, the certificate is optional; no OTA requiring it was found. The tool is not a functional
-or performance test. Certify against the [validator](https://github.com/octotravel/validator): it requires `allDay` to
-equal `type === OPENING_HOURS` and disagrees with the typespec on opening hours, which our START_TIME avoids.
+[Core is "required"](https://docs.octo.travel/getting-started/endpoints-and-capabilities.md). The
+[Self-Certification Tool](https://docs.octo.travel/additional-resources/self-certification-tool.md) wants a 100% run, but
+as far as any OTA doc read shows the certificate is optional, and no OTA requiring it was found. It is not the reason
+for building Core, and **a 100% validator run, so a valid OCTO certificate, is out of reach under this design**: see
+the next two bullets and question 2. The tool is not a functional or performance test. We run the
+[validator](https://github.com/octotravel/validator) as a check: it requires `allDay` to equal `type === OPENING_HOURS`
+and disagrees with the typespec on opening hours, which our START_TIME avoids.
 
 - **Calendar.** `POST /availability/calendar` (one object per day) is Core, so T4 builds it from the same computation as
   `/availability`. Klook does not use it: its calendar section is struck through.
@@ -199,17 +214,24 @@ equal `type === OPENING_HOURS` and disagrees with the typespec on opening hours,
   first `PATCH /bookings/{uuid}` refuses those three (UNPROCESSABLE_ENTITY) and takes contact and notes; a move is a
   cancel plus a new booking. **The validator's Update flow would not accept this.** The
   [flow](https://github.com/octotravel/validator/blob/main/backend/src/common/validation/supplier/services/validation/Flows/Booking/BookingUpdateFlow.ts)
-  always runs three scenarios: change date (a PATCH with another `availabilityId`), unit items (a PATCH with three unit
-  items on a booking of two) and contact. It adds change product (`productId`, `optionId`, `availabilityId`,
-  `unitItems`) when two or more products are bookable. Only contact passes under the refusal. This is a known gap
-  before certification (T10). The fallback is a conditional reassign like #21's edited blocks; the unit-items scenario
-  would still fail at `maxUnits` 1. Klook's endpoint table has no Update, so it is no gate for Klook. We read the
-  validator and did not run it, and did not check whether the Self-Certification Tool runs the same flows.
+  always runs three scenarios: "Booking Update - Change Date" (a PATCH with another `availabilityId`), "Booking Update -
+  Unit Items" (a PATCH with three unit items on a booking of two) and "Booking Update - Contact". It adds "Booking Update
+  - Change Product" (`productId`, `optionId`, `availabilityId`, `unitItems`) when two or more products are bookable. Only
+  contact passes under the refusal. A conditional reassign like #21's edited blocks would fix Change Date (and Change
+  Product, if it can move a booking to another product) and is optional work; Unit Items cannot pass at `maxUnits` 1.
+- **Why 100% is unreachable.** The validator reads `maxUnits` only to size its default reservation. Two scenarios of its
+  [Confirmation flow](https://github.com/octotravel/validator/blob/main/backend/src/common/validation/supplier/services/validation/Flows/Booking/BookingConfirmationFlow.ts),
+  "Booking Confirmation unitItems update" and "Booking Confirmation Invalid Unit ID (400 INVALID_UNIT_ID)", and the
+  Update flow's "Booking Update - Unit Items" all reserve with an explicit `unitItemsQuantity: 2`, which ignores
+  `maxUnits`. We refuse a reserve of two unit items, because a booking row is one vehicle and `createHold` has no atomic
+  two-row insert, so each ends in "Reservation Creation Failed". Under this design the run fails those three, plus Change
+  Date (and Change Product when it runs) unless the reassign is built. Atomic multi-row holds are not worth building for a
+  certificate no OTA doc requires, so `maxUnits` stays 1. If Klook does require the certificate or a validator pass
+  (question 2), multi-unit bookings and the conditional reassign become required work and the ticket list must grow
+  before the build. Klook's endpoint table has no Update, so Update is no gate for Klook. We read the validator and did
+  not run it, and did not check whether the Self-Certification Tool runs the same flows.
 
-**Effort** (our estimate): about 10 tickets (T1 to T10), 5 of them M. The pieces: a migration for the source and
-references; `createHold` taking a source, the price and deposit handling and an expiry; availability for a day or a
-range in one query; auth, headers and errors; `/supplier`, `/products`, content and pricing; the bookings endpoints; a
-voucher; reconciliation; certification and Klook's tests. The list in [Phase-2 tickets](#phase-2-tickets) sizes each.
+**Effort** (our estimate): about 10 tickets (T1 to T10), 5 of them M, sized in [Phase-2 tickets](#phase-2-tickets).
 
 **Load.** Klook says it uses `POST /availability` to ["sync both remaining inventory &
 price"](https://klook.gitbook.io/openapi/api-core-mandatory/availability.md), at a frequency "configurable by Klook based
@@ -342,7 +364,9 @@ The gate questions (1 to 7) block T0 and so every later ticket. Each other quest
 **Gate: Klook and the shop**
 
 1. Does Klook accept scooters and motorcycles over OCTO under a merchant contract, for a shop this size?
-2. Do they accept type OTHER, multi-day options and `maxUnits` 1?
+2. Do they accept type OTHER, multi-day options and `maxUnits` 1? Does Klook require the OCTO certificate or a validator
+   pass? If it does, multi-unit bookings and the conditional reassign become required work and the ticket list must grow
+   before the build (see Update).
 3. What sync frequency would they use for us?
 4. What do they do when a reserve is rejected?
 5. Can cars go this route? [Klook's merchant page](https://merchant.klook.com/introduction?lang=en-NZ) sends "car rentals"
@@ -379,7 +403,8 @@ We could not read the Klook and KKday listing pages, so whether existing Okinawa
 
 ## Phase-2 tickets
 
-Not created on GitHub. Sizes are our estimate. T1 to T10 wait on T0 and on gate outcome 1; T11 only on outcome 2.
+Not created on GitHub. Sizes are our estimate. T1 to T10 wait on T0 and on gate outcome 1; T11 only on outcome 2. If
+question 2 says Klook requires the certificate, this list grows before the build.
 
 | # | Ticket | Size | Depends on |
 | --- | --- | --- | --- |
@@ -389,11 +414,11 @@ Not created on GitHub. Sizes are our estimate. T1 to T10 wait on T0 and on gate 
 | T3 | `createHold`: source, OTA price and deposit handling (`deposit_jpy` NULL, `price_jpy` retail), expiry parameter; `settle` ignores locale on the OTA source; same conditional insert | S | T2 |
 | T4 | Availability for OCTO: vacancies by slot in one query, with a day-level cache, and `POST /availability/calendar` | M | T1, questions 10, 11 |
 | T5 | OCTO read side: auth, headers, errors, `/supplier`, `/products`, content, pricing | M | T1, question 9 |
-| T6 | OCTO bookings: reserve, confirm (guest fields, `external_ref`, `external_channel`, outbox item, derived EXPIRED), cancel, get, list, update (contact and notes only), extend; the `docs/sheet-schema.md` source value | M | T3, T4, T5, questions 9, 13 |
+| T6 | OCTO bookings: reserve, confirm (guest fields, `external_ref`, `external_channel`, derived EXPIRED), cancel, get, list, update (contact and notes only), extend; an outbox item per event that changes the row (confirm, cancel, contact PATCH) with its own `dedupe_key`; the `docs/sheet-schema.md` source value | M | T3, T4, T5, #42, questions 9, 13 |
 | T7 | Voucher with a QR or barcode, and the counter check | S | T6 |
 | T8 | OTA reconciliation against the OTA's statement | M | T6, questions 8, 13 |
 | T9 | Publish warning on Blocks rows for a connected channel, and the cutover | S | #21, T6 |
-| T10 | OCTO validator and self-certification run (the Update gap is known), Klook test bookings, go live | S | T6, T7, T8, T9 |
+| T10 | Klook's own test passes, and a validator run is recorded in the ticket with only the named failing scenarios (see Update); go live | S | T6, T7, T8, T9 |
 | T11 | Only for gate outcome 2: Bokun Channel Manager plugin spike, with a one-hour hold cap | M | T0, question 14 |
 
 ## What was not verified
