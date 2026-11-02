@@ -23,6 +23,8 @@ Do these in the order below. Setting the GitHub secrets comes last, because the 
 | R2 bucket `okinawa-dream-media` (binding `MEDIA`) | `npx wrangler r2 bucket create okinawa-dream-media` | Nothing. Enabling R2 may require a payment method. |
 | Custom domain | Put the domain on Cloudflare DNS. | Add `"routes": [{ "pattern": "<domain>", "custom_domain": true }]` to `wrangler.jsonc`, which has no `routes` yet. The first deploy attaches it to the Worker `okinawa-dream`. |
 
+The Astro adapter adds two more bindings at build time, so they are in `dist/server/wrangler.json` but not in `wrangler.jsonc`: `SESSION` (KV) and `IMAGES` (Cloudflare Images). There is nothing to create for `SESSION`: `npx wrangler deploy` creates the namespace on the first deploy, which is why the token in step 4 needs KV access. Check at go-live whether `IMAGES` needs anything on the Workers Free plan.
+
 ## 2. Vars
 
 Replace the placeholders under `vars` in `wrangler.jsonc`. They are committed and are not secret.
@@ -60,7 +62,7 @@ The first run offers to create the Worker, because it does not exist yet. Accept
 
 ## 4. Turn deploys on
 
-Create a Cloudflare API token from the Edit Cloudflare Workers template, add D1 Edit, and limit it to this account and the domain's zone. Then set both GitHub repository secrets. `gh secret set` prompts for the value.
+Create a Cloudflare API token from the Edit Cloudflare Workers template, which should already cover Workers and KV. Add D1 Edit, and limit it to this account and the domain's zone. Then set both GitHub repository secrets. `gh secret set` prompts for the value.
 
 ```sh
 gh secret set CLOUDFLARE_API_TOKEN
