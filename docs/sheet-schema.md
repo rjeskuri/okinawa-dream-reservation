@@ -285,6 +285,10 @@ result, so an old override can stay on the row. One Publish moves at most 20 boo
 `override_status`, and the next Publish applies it. Rows run top to bottom, so when two rows want one bike for
 overlapping times, the higher row gets it.
 
+If Publish fails on writing to this tab, the moves it made still stand, and publishing again finds nothing to do for
+those rows. Each move is queued for the Worker's own update of the tab, which writes its `plate`. That update leaves
+`override_status` alone, so the cell stays as it was.
+
 | Column | Holds |
 | --- | --- |
 | `booking_ref`, `booking_id` | The booking's reference and internal id |

@@ -1,11 +1,13 @@
 // Staff overrides from the Bookings tab. Rows run top to bottom, each against what the rows before it did. Refusals are
 // decided from chunked reads, so a refused row costs no statement of its own and only a row likely to move spends an
 // UPDATE. The moves are capped, which keeps a call inside the 50 D1 statements of a Workers Free invocation: one chunk
-// per 90 bookings with an override typed, a few more for the bikes and the config, and MOVE_CAP. D1 has no transactions
-// but runs one statement at a time, so as for a hold the statement is the lock: the UPDATE checks the booking and the
-// bike again, because a rival can land after any of the reads.
+// per 90 bookings with an override typed, a few more for the bikes and the config, MOVE_CAP, and one to queue the
+// moves. D1 has no transactions but runs one statement at a time, so as for a hold the statement is the lock: the
+// UPDATE checks the booking and the bike again, because a rival can land after any of the reads.
 import { BLOCKING_SQL, OVERLAP_SQL, conflicts } from "../db/blocking.ts";
 import { readShopConfig } from "../db/config.ts";
+import { enqueueInOneStatement } from "../outbox.ts";
+import type { OutboxItem } from "../outbox.ts";
 import type { BookingStatus, VehicleStatus } from "../types.ts";
 
 export type OverrideRow = { row: number; bookingId: string; overridePlate: string };
@@ -112,9 +114,33 @@ async function readRivals(
 }
 
 /**
+ * Queues a Bookings sync for each booking moved: if the sheet write fails, the next Publish finds these rows a no-op,
+ * so only that sync can write their plates. `now` is in the key because an item of an earlier move can still be
+ * pending, and INSERT OR IGNORE would keep it in place of this one. Two moves of a booking in one call need one item,
+ * which reads the booking as it stands when it is drained. A failure is logged and goes no further: a move's own error
+ * must reach the caller, and with no such error the sheet write is still to come and can write the plates itself.
+ */
+async function queueSyncs(db: D1Database, moved: Set<string>, now: number): Promise<void> {
+  if (moved.size === 0) return;
+  const items = [...moved].map(
+    (bookingId): OutboxItem => ({
+      kind: "sheet_booking",
+      dedupeKey: `sheet:${bookingId}:moved:${now}`,
+      payload: { bookingId },
+    }),
+  );
+  try {
+    await enqueueInOneStatement(db, items, now).run();
+  } catch (error) {
+    console.error("Queueing the Bookings sync failed for these moved bookings:", [...moved], error);
+  }
+}
+
+/**
  * Moves each booking to the plate its row names, if that bike is active, of the booking's model and free for its time.
  * A row that already matches is not touched and has no result, and a row past MOVE_CAP is told to publish again. Rows
- * are reported in order, with `row` as given, and `plate` is set only on a move.
+ * are reported in order, with `row` as given, and `plate` is set only on a move. The moves made are queued for the
+ * Bookings sync, also when a D1 error stops the rows part-way and rejects the call.
  */
 export async function applyOverrides(
   db: D1Database,
@@ -144,37 +170,43 @@ export async function applyOverrides(
   const onBike = await readRivals(db, wanted, bufMs, now);
 
   const results: OverrideResult[] = [];
+  const moved = new Set<string>();
   let attempts = 0;
-  for (const { row, bookingId, overridePlate: plate } of rows) {
-    const booking = bookings.get(bookingId);
-    if (booking === undefined) {
-      results.push({ row, level: "error", message: NO_BOOKING });
-      continue;
-    }
-    // First of all, or the record of an old override would be refused on every Publish once its rental ended.
-    if (booking.plate === plate) continue;
+  try {
+    for (const { row, bookingId, overridePlate: plate } of rows) {
+      const booking = bookings.get(bookingId);
+      if (booking === undefined) {
+        results.push({ row, level: "error", message: NO_BOOKING });
+        continue;
+      }
+      // First of all, or the record of an old override would be refused on every Publish once its rental ended.
+      if (booking.plate === plate) continue;
 
-    const taken = onBike.get(plate)?.some((rival) => rival.id !== bookingId && conflicts(rival, booking, bufMs));
-    const refusal =
-      bookingRefusal(booking, now) ??
-      bikeRefusal(vehicles.get(plate), booking) ??
-      (taken ? BUSY : null) ??
-      (attempts >= MOVE_CAP ? NOT_APPLIED : null);
-    if (refusal !== null) {
-      results.push({ row, level: "error", message: refusal });
-      continue;
-    }
+      const taken = onBike.get(plate)?.some((rival) => rival.id !== bookingId && conflicts(rival, booking, bufMs));
+      const refusal =
+        bookingRefusal(booking, now) ??
+        bikeRefusal(vehicles.get(plate), booking) ??
+        (taken ? BUSY : null) ??
+        (attempts >= MOVE_CAP ? NOT_APPLIED : null);
+      if (refusal !== null) {
+        results.push({ row, level: "error", message: refusal });
+        continue;
+      }
 
-    attempts += 1;
-    const { meta } = await db.prepare(MOVE_SQL).bind(bookingId, bufMs, now, plate).run();
-    if (meta.changes === 0) {
-      results.push({ row, level: "error", message: OVERTAKEN });
-      continue;
+      attempts += 1;
+      const { meta } = await db.prepare(MOVE_SQL).bind(bookingId, bufMs, now, plate).run();
+      if (meta.changes === 0) {
+        results.push({ row, level: "error", message: OVERTAKEN });
+        continue;
+      }
+      moved.add(bookingId);
+      onBike.set(booking.plate, (onBike.get(booking.plate) ?? []).filter(({ id }) => id !== bookingId));
+      onBike.set(plate, [...(onBike.get(plate) ?? []), booking]);
+      booking.plate = plate;
+      results.push({ row, level: "ok", message: `Moved to ${plate}.`, plate });
     }
-    onBike.set(booking.plate, (onBike.get(booking.plate) ?? []).filter(({ id }) => id !== bookingId));
-    onBike.set(plate, [...(onBike.get(plate) ?? []), booking]);
-    booking.plate = plate;
-    results.push({ row, level: "ok", message: `Moved to ${plate}.`, plate });
+  } finally {
+    await queueSyncs(db, moved, now);
   }
   return { results };
 }

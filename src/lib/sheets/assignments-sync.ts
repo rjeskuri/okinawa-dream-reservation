@@ -22,7 +22,8 @@ function textOf(value: unknown): string {
 /**
  * Applies the overrides on the tab. A blank override cell is skipped, and a row that matches its booking's plate in D1
  * is not touched, so a rerun changes nothing. A missing column moves nothing and is reported on the header row. A
- * failed write throws: the moves stand, and the Bookings sync writes their plates.
+ * failed write throws: the moves stand, and applyOverrides has queued each one in the outbox, so the Bookings sync
+ * writes its plate when that item is drained. That sync does not write override_status, so that cell stays as it was.
  */
 export async function syncAssignments({ db, sheets, now }: SyncDeps): Promise<AssignmentsResult> {
   const [header = [], ...body] = (await sheets.batchGet([TAB]))[TAB] ?? [];

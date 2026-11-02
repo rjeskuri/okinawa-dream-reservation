@@ -24,9 +24,16 @@
 //   refusal, since no Publish would ever do that row.
 // - The stored state includes the bike: a row wanting a busy bike or a plate that is no bike keeps its own refusal, and a
 //   tab of them neither fills the cap nor spends a statement a row. That refusal is what the row gets as a call's only row.
+// - A booking a call moved leaves a pending sheet_booking item naming it, due at once, because a no-op never writes the
+//   plate cell and only the Bookings sync can repair it. A row that did not move queues nothing.
+// - The queue is reached even when a move throws: the moves before it are queued and the call rejects with that error.
+// - Every Publish that moves a booking queues it, whatever is still pending for it. Two rows moving one booking in one
+//   call need one item between them, since an item reads the booking's current state when it is drained.
+// - Delivery is ticket #42. The queue row is what a call owes, and drainOutbox is here only as the reader of that row.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHold } from "../src/lib/booking/holds.ts";
+import { drainOutbox } from "../src/lib/outbox.ts";
 import { createTestDb } from "./helpers/d1.ts";
 import { seedBooking, seedCatalogMeta, seedConfig, seedModel, seedPackage, seedPrice, seedVehicle } from "./helpers/seed.ts";
 import type { BookingRow, VehicleRow } from "./helpers/seed.ts";
@@ -1272,6 +1279,318 @@ test("a valid row under busy rows moves on the first call", async () => {
         assert.equal(first[i].message, await ownRefusal(db, asked, label), `${label}: not its own refusal`);
       }
     }
+  });
+});
+
+// --- The Bookings sync a move owes the sheet -------------------------------------------------------------------------
+
+/** The bookings named by the pending Bookings syncs, an entry an item, oldest first. The payload is read as a drain reads it. */
+async function pendingSyncs(db: D1Database): Promise<string[]> {
+  const { results } = await db
+    .prepare("SELECT payload FROM outbox WHERE kind = 'sheet_booking' AND status = 'pending' ORDER BY id")
+    .all<{ payload: string }>();
+  return results.map(({ payload }) => (JSON.parse(payload) as { bookingId: string }).bookingId);
+}
+
+function sorted(ids: string[]): string[] {
+  return [...ids].sort();
+}
+
+test("a call queues a Bookings sync for each booking it moved and for no other row", async () => {
+  await withShop(async (db) => {
+    const shop = await seedShop(db);
+    const otherModel = await seedModel(db, { rate_class_id: shop.rateClassId });
+    const busy = await bike(db, shop);
+    await rental(db, shop, busy);
+    const foreign = (await seedVehicle(db, { model_id: otherModel.id })).plate;
+    const free = await bike(db, shop);
+    const on = async (partial: Partial<BookingRow> = {}): Promise<string> => (await rental(db, shop, await bike(db, shop), partial)).id;
+    const settled = await rental(db, shop, await bike(db, shop));
+    const settledCancelled = await rental(db, shop, await bike(db, shop), { status: "CANCELLED" });
+
+    // Each row that stays put, and none of them may queue a thing. `free` is free, so the booking is the reason in those.
+    const still: { label: string; bookingId: string; plate: string }[] = [
+      { label: "a bike taken", bookingId: await on(), plate: busy },
+      { label: "a bike in maintenance", bookingId: await on(), plate: await bike(db, shop, { status: "maintenance" }) },
+      { label: "a bike retired", bookingId: await on(), plate: await bike(db, shop, { status: "retired" }) },
+      { label: "a plate that is no bike", bookingId: await on(), plate: "no-such-plate" },
+      { label: "a bike of another model", bookingId: await on(), plate: foreign },
+      { label: "a cancelled rental", bookingId: await on({ status: "CANCELLED", cancelled_at: NOW - HOUR_MS }), plate: free },
+      { label: "an expired hold", bookingId: await on({ status: "EXPIRED", expires_at: NOW - HOUR_MS }), plate: free },
+      { label: "a live hold", bookingId: await on({ status: "ON_HOLD", expires_at: NOW + HOUR_MS }), plate: free },
+      { label: "a charge in flight", bookingId: await on({ status: "PAYMENT_PENDING" }), plate: free },
+      { label: "a rental that ended", bookingId: await on({ start_at: NOW - 2 * DAY_MS, end_at: NOW - DAY_MS }), plate: free },
+      { label: "no booking by this id", bookingId: "no-such-booking", plate: free },
+      { label: "a no-op", bookingId: settled.id, plate: settled.vehicle_plate },
+      { label: "a no-op on a cancelled rental", bookingId: settledCancelled.id, plate: settledCancelled.vehicle_plate },
+    ];
+
+    // A call with no move queues nothing, whatever kind of row it has.
+    const asCalls: [string, OverrideRow[]][] = [
+      ["no rows", []],
+      ...still.map(({ label, bookingId, plate }): [string, OverrideRow[]] => [label, [{ row: 2, bookingId, overridePlate: plate }]]),
+      ["all of them", still.map(({ bookingId, plate }, i) => ({ row: i + 2, bookingId, overridePlate: plate }))],
+    ];
+    for (const [label, rows] of asCalls) {
+      const results = await apply(db, rows);
+      assert.ok(results.every(({ level }) => level === "error"), `${label}: ${JSON.stringify(results)}`);
+      const queued = await db.prepare("SELECT COUNT(*) AS n FROM outbox").first<{ n: number }>();
+      assert.equal(queued?.n, 0, label);
+    }
+
+    // Each row that moves, among the rows that do not. Spans, sources and plates differ, and none can be told from its id.
+    const moves: { label: string; bookingId: string; plate: string }[] = [
+      { label: "a rental ahead", bookingId: await on(), plate: await bike(db, shop) },
+      {
+        label: "a rental under way",
+        bookingId: await on({ start_at: NOW - HOUR_MS, end_at: NOW + HOUR_MS }),
+        plate: await bike(db, shop),
+      },
+      { label: "a rental with a millisecond left", bookingId: await on({ start_at: NOW - HOUR_MS, end_at: NOW + 1 }), plate: await bike(db, shop) },
+      { label: "a week ahead", bookingId: await on({ start_at: PICKUP + 7 * DAY_MS, end_at: CLOSE + 13 * DAY_MS }), plate: await bike(db, shop) },
+      { label: "a staff block", bookingId: await on(block()), plate: await bike(db, shop) },
+      { label: "a plate with a quote in it", bookingId: await on(), plate: await bike(db, shop, { plate: "O'Neil-22" }) },
+    ];
+    const lines = [...still.slice(0, 6), moves[0], moves[1], ...still.slice(6, 9), moves[2], moves[3], ...still.slice(9), moves[4], moves[5]];
+    const rows = lines.map(({ bookingId, plate }, i) => ({ row: 700 - i * 11, bookingId, overridePlate: plate }));
+    const moved = moves.map(({ bookingId }) => bookingId);
+
+    const results = await apply(db, rows);
+
+    assert.deepEqual(
+      results.filter(({ level }) => level === "ok").map(({ row }) => row),
+      rows.filter((_, i) => moves.includes(lines[i])).map(({ row }) => row),
+      "the rows that moved are the ones meant to",
+    );
+    assert.deepEqual(sorted(await pendingSyncs(db)), sorted(moved), "one item for each booking moved");
+
+    // The next Publish meets the same tab: the moves are no-ops by now, the refusals are refused again, and neither queues.
+    await apply(db, rows, NOW + HOUR_MS);
+    assert.deepEqual(sorted(await pendingSyncs(db)), sorted(moved), "the next Publish");
+
+    // The items are due from the moment of the move, and a drain finds in them the bookings that moved.
+    const delivered: string[] = [];
+    const drained = await drainOutbox({
+      db,
+      now: NOW,
+      sendEmail: async () => ({ ok: false, retryable: false, error: "an override sends no email" }),
+      syncBookings: async (ids) => {
+        delivered.push(...ids);
+        return { ok: true };
+      },
+    });
+    assert.deepEqual(sorted(delivered), sorted(moved), "what a drain hands the Bookings sync");
+    assert.equal(drained.sent, moved.length);
+  });
+});
+
+test("a row past the cap queues nothing until the Publish that moves it", async () => {
+  await withShop(async (db) => {
+    const shop = await seedShop(db);
+    const bookings = await copiesOf(db, await rental(db, shop, await bike(db, shop)), MOVE_CAP + 5);
+    const rows: OverrideRow[] = [];
+    for (const [i, { id }] of bookings.entries()) {
+      rows.push({ row: 400 - i * 7, bookingId: id, overridePlate: await bike(db, shop) });
+    }
+    const ids = bookings.map(({ id }) => id);
+
+    await apply(db, rows);
+    assert.deepEqual(sorted(await pendingSyncs(db)), sorted(ids.slice(0, MOVE_CAP)), "the first call");
+
+    await apply(db, rows, NOW + HOUR_MS);
+    assert.deepEqual(sorted(await pendingSyncs(db)), sorted(ids), "the second call, the rest and once each");
+  });
+});
+
+test("a row overtaken at the update queues nothing, and the row after it does", async () => {
+  await withShop(async (db) => {
+    const run = (sql: string, value: string) => db.prepare(sql).bind(value).run();
+    const landings: { label: string; land: (shop: Shop, plate: string, booking: BookingRow) => Promise<unknown> }[] = [
+      { label: "a rival rental", land: (shop, plate) => rental(db, shop, plate) },
+      { label: "a guest's live hold", land: (shop, plate) => rental(db, shop, plate, { status: "ON_HOLD", expires_at: NOW + HOUR_MS }) },
+      { label: "the bike retired", land: (_shop, plate) => run("UPDATE vehicles SET status = 'retired' WHERE plate = ?1", plate) },
+      {
+        label: "the booking itself cancelled",
+        land: (_shop, _plate, booking) => run("UPDATE bookings SET status = 'CANCELLED' WHERE id = ?1", booking.id),
+      },
+    ];
+    for (const { label, land } of landings) {
+      const shop = await seedShop(db);
+      const target = await bike(db, shop);
+      const booking = await rental(db, shop, await bike(db, shop));
+      const next = await rental(db, shop, await bike(db, shop));
+      const nextTarget = await bike(db, shop);
+      const racing = raceBeforeUpdate(db, () => land(shop, target, booking));
+      const known = (await pendingSyncs(db)).length;
+
+      const results = await apply(racing.db, [
+        { row: 6, bookingId: booking.id, overridePlate: target },
+        { row: 7, bookingId: next.id, overridePlate: nextTarget },
+      ]);
+
+      assert.ok(racing.raced(), `${label}: no statement updated bookings`);
+      assertRefused(results[0], 6, target, label);
+      assertApplied(results[1], 7, nextTarget, label);
+      assert.deepEqual((await pendingSyncs(db)).slice(known), [next.id], label);
+    }
+  });
+});
+
+/** `db`, with the `nth` statement run that updates bookings rejecting with `failure`. Every other statement runs as usual. */
+function failNthUpdate(db: D1Database, nth: number, failure: Error): { db: D1Database; failed: () => boolean } {
+  let updates = 0;
+  const failing = (statement: D1PreparedStatement): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, property) {
+        const value = Reflect.get(target, property);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (property === "bind") return failing(value.apply(target, args));
+          updates += 1;
+          return updates === nth ? Promise.reject(failure) : value.apply(target, args);
+        };
+      },
+    });
+  const wrapped = new Proxy(db, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (sql: string) => (BOOKING_UPDATE.test(sql) ? failing(target.prepare(sql)) : target.prepare(sql));
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { db: wrapped, failed: () => updates >= nth };
+}
+
+test("a D1 failure among the moves still queues the moves already made", async () => {
+  const failure = new Error("D1_ERROR: the injected failure");
+  const moveCount = 5;
+  await withShop(async (db) => {
+    // Which move fails. The first leaves nothing to queue, and the call must still reject with the D1 error.
+    for (const failingMove of [2, 4, moveCount, 1]) {
+      const label = `move ${failingMove} of ${moveCount} fails`;
+      const shop = await seedShop(db);
+      const busy = await bike(db, shop);
+      await rental(db, shop, busy);
+      const bookings: BookingRow[] = [];
+      const wanted: string[] = [];
+      for (let i = 0; i < moveCount; i += 1) {
+        bookings.push(await rental(db, shop, await bike(db, shop)));
+        wanted.push(await bike(db, shop));
+      }
+      const refused = await rental(db, shop, await bike(db, shop));
+      const settled = await rental(db, shop, await bike(db, shop));
+      const asks = bookings.map(({ id }, i) => ({ bookingId: id, overridePlate: wanted[i] }));
+      const asked = [
+        { bookingId: settled.id, overridePlate: settled.vehicle_plate },
+        asks[0],
+        { bookingId: refused.id, overridePlate: busy },
+        ...asks.slice(1),
+      ];
+      const rows = asked.map((ask, i) => ({ row: 90 - i * 3, ...ask }));
+      const known = (await pendingSyncs(db)).length;
+      const failing = failNthUpdate(db, failingMove, failure);
+
+      await assert.rejects(apply(failing.db, rows), /the injected failure/, label);
+
+      assert.ok(failing.failed(), `${label}: the call never reached that move`);
+      const made = bookings.slice(0, failingMove - 1);
+      for (const [i, booking] of bookings.entries()) {
+        if (i < made.length) await assertMoved(db, booking, wanted[i], NOW, `${label}, booking ${i}`);
+        else await assertKept(db, booking, `${label}, booking ${i}`);
+      }
+      assert.deepEqual(sorted((await pendingSyncs(db)).slice(known)), sorted(made.map(({ id }) => id)), label);
+
+      // Publish again: the rest move, and what is now a no-op is not queued a second time.
+      await apply(db, rows, NOW + HOUR_MS);
+      assert.deepEqual(sorted((await pendingSyncs(db)).slice(known)), sorted(bookings.map(({ id }) => id)), `${label}, published again`);
+    }
+  });
+});
+
+test("every move of a booking is queued, whatever is still pending for it", async () => {
+  // The bikes a booking is moved to, a Publish each, and the time between Publishes. A sheet row keeps its number and its
+  // booking, so what tells two moves apart is when they were made. "home" is the plate it started on.
+  const histories: { label: string; route: ("home" | "first" | "second")[]; gapMs: number }[] = [
+    { label: "on to a third bike", route: ["first", "second"], gapMs: DAY_MS },
+    { label: "back to its original plate", route: ["first", "home"], gapMs: HOUR_MS },
+    { label: "out to the same bike a second time", route: ["first", "home", "first"], gapMs: MINUTE_MS },
+    { label: "round and round", route: ["first", "second", "home", "second", "first", "home"], gapMs: 1 },
+  ];
+  await withShop(async (db) => {
+    for (const { label, route, gapMs } of histories) {
+      const shop = await seedShop(db);
+      const plates = { home: await bike(db, shop), first: await bike(db, shop), second: await bike(db, shop) };
+      const booking = await rental(db, shop, plates.home);
+      const bystander = await rental(db, shop, await bike(db, shop));
+      const bystanderRow = { row: 12, bookingId: bystander.id, overridePlate: await bike(db, shop) };
+      const count = async (id: string): Promise<number> => (await pendingSyncs(db)).filter((queued) => queued === id).length;
+
+      for (const [i, stop] of route.entries()) {
+        const step = `${label}, move ${i + 1}`;
+        const row = { row: 9, bookingId: booking.id, overridePlate: plates[stop] };
+
+        // The bystander moves at the first Publish and is a no-op at the others, so its one item never grows.
+        const results = await apply(db, [row, bystanderRow], NOW + i * gapMs);
+
+        assertApplied(results[0], 9, plates[stop], step);
+        assert.equal(await count(booking.id), i + 1, step);
+        assert.equal(await count(bystander.id), 1, `${step}: the bystander`);
+      }
+
+      // The same tab at the next Publish moves nothing.
+      const last = route[route.length - 1];
+      await apply(db, [{ row: 9, bookingId: booking.id, overridePlate: plates[last] }], NOW + route.length * gapMs);
+      assert.equal(await count(booking.id), route.length, `${label}: a rerun`);
+    }
+
+    // Two rows for one booking move it twice in one call, and the call still ends with a sync queued for it.
+    const shop = await seedShop(db);
+    const booking = await rental(db, shop, await bike(db, shop));
+    const [first, second] = [await bike(db, shop), await bike(db, shop)];
+    const results = await apply(db, [
+      { row: 2, bookingId: booking.id, overridePlate: first },
+      { row: 3, bookingId: booking.id, overridePlate: second },
+    ]);
+    assertApplied(results[0], 2, first, "two rows, the first");
+    assertApplied(results[1], 3, second, "two rows, the second");
+    assert.ok((await pendingSyncs(db)).includes(booking.id), "two rows, one booking");
+  });
+});
+
+test("twenty moves on a long tab are queued within the D1 statements of one invocation", async () => {
+  await withShop(async (db) => {
+    const shop = await seedShop(db);
+    // src/lib/booking/overrides.ts reads bookings in chunks of 90, so 1,000 rows take 12 reads. These 21 plates take a read
+    // for the bikes and one for their rivals, the config one more, and the moves 20. That is 35 statements: 36 with one
+    // for the queue, and 55 with a statement a move, which the check on the real count below holds the fixture to.
+    const bookings = await copiesOf(db, await rental(db, shop, await bike(db, shop)), 1000);
+    const everyNth = bookings.length / MOVE_CAP;
+    const rows: OverrideRow[] = [];
+    const moves: { booking: BookingRow; row: number; plate: string }[] = [];
+    for (const [i, booking] of bookings.entries()) {
+      const moving = i % everyNth === 13;
+      const plate = moving ? await bike(db, shop) : booking.vehicle_plate;
+      rows.push({ row: i + 2, bookingId: booking.id, overridePlate: plate });
+      if (moving) moves.push({ booking, row: i + 2, plate });
+    }
+    assert.equal(moves.length, MOVE_CAP, "twenty moves");
+
+    const counted = countStatements(db);
+    const results = await apply(counted.db, rows);
+
+    const statements = counted.count();
+    assert.ok(statements <= STATEMENT_BUDGET, `${statements} D1 statements for ${rows.length} rows and ${moves.length} moves`);
+    // This tab only proves anything if the same call with a statement a move in place of the one would be over the limit.
+    assert.ok(statements - 1 + MOVE_CAP > STATEMENT_BUDGET, `the tab is too short to tell: ${statements} D1 statements`);
+
+    assert.equal(results.length, MOVE_CAP);
+    for (const [i, { booking, row, plate }] of moves.entries()) {
+      assertApplied(results[i], row, plate, `move ${i}`);
+      await assertMoved(db, booking, plate, NOW, `move ${i}`);
+    }
+    assert.deepEqual(sorted(await pendingSyncs(db)), sorted(moves.map(({ booking }) => booking.id)));
   });
 });
 

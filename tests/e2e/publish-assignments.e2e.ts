@@ -16,7 +16,8 @@
 // - A row with an override and a blank booking_id is reported as an unknown booking in its override_status, counts in
 //   `errors` and moves nothing. A blank override cell is still skipped silently, whatever else the row holds.
 // - When writing the cells fails, the route answers 5xx, the booking stays moved, and the next Publish sees a no-op for
-//   that row. So its cells stay as they were until the Bookings sync writes the plate.
+//   that row. So its cells stay as they were until the Bookings sync writes the plate, which the move has queued in the
+//   outbox. Delivering that item is ticket #42.
 import assert from "node:assert/strict";
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { after, before, test } from "node:test";
@@ -162,6 +163,14 @@ async function assertMoved(booking: BookingRow, plate: string, since: number, la
 
 async function assertKept(booking: BookingRow, label: string): Promise<void> {
   assert.deepEqual(await stored(booking.id), booking, label);
+}
+
+/** How many pending Bookings syncs name this booking. */
+async function pendingSyncs(bookingId: string): Promise<number> {
+  const { results } = await worker.db
+    .prepare("SELECT payload FROM outbox WHERE kind = 'sheet_booking' AND status = 'pending'")
+    .all<{ payload: string }>();
+  return results.filter(({ payload }) => (JSON.parse(payload) as { bookingId: string }).bookingId === bookingId).length;
 }
 
 test("signed assignment sync writes override_status back", async () => {
@@ -459,6 +468,8 @@ test("a failed write to the sheet leaves the move made, and the next Publish fin
   await assertMoved(mover, free, since, "the move stands");
   await assertKept(refused, "the busy bike");
   assert.deepEqual(sheet.grid("Bookings"), original, "nothing reached the sheet");
+  assert.equal(await pendingSyncs(mover.id), 1, "the move is queued for the Bookings sync, which alone can write its plate");
+  assert.equal(await pendingSyncs(refused.id), 0, "the refused row moved nothing to sync");
   const movedAt = (await stored(mover.id)).updated_at;
 
   const again = await signedSync();
@@ -471,6 +482,8 @@ test("a failed write to the sheet leaves the move made, and the next Publish fin
   await assertMoved(mover, free, since, "the move still stands");
   assert.equal((await stored(mover.id)).updated_at, movedAt, "and was not made twice");
   await assertKept(refused, "the busy bike, again");
+  assert.equal(await pendingSyncs(mover.id), 1, "the no-op leaves the item waiting and adds no other");
+  assert.equal(await pendingSyncs(refused.id), 0, "the refused row, again");
 });
 
 /** A valid override on a fresh tab, ready to go through for whoever signs the request properly. */
