@@ -11,6 +11,11 @@
 // - Columns are found by header name in the live header row of the tab (any order, case and surrounding spaces
 //   ignored, extra columns left alone), as docs/sheet-schema.md promises. A missing required header, or a tab with no
 //   header row, is a non-retryable failure that names the header and writes nothing.
+// - Every column up to the last header must have a name: a blank header cell anywhere before the last non-blank header
+//   (an unnamed column A, a spacer before a notes column, a column with data but no name) is a non-retryable failure
+//   that names the column letter and writes nothing. Stricter than refusing wholly blank columns, on purpose: one rule
+//   staff can follow, and it does not depend on how Google detects the table a values.append goes to. Named extra
+//   columns stay ignored.
 // - Only CONFIRMED and CANCELLED bookings are appended; ON_HOLD, PAYMENT_PENDING and EXPIRED are skipped, not an error.
 // - An appended row has "" in the override cells; an update never writes them.
 // - A call with nothing in it (no ranges, no rows) is never made.
@@ -975,6 +980,76 @@ test("a tab with no header row is a non-retryable failure that writes nothing", 
       assert.equal(sheet.count("batchUpdate") + sheet.count("append"), 0, `${name}: no write at all`);
       assert.deepEqual(sheet.grid("Bookings"), grid, `${name}: the tab is unchanged`);
     }, { grid });
+  }
+});
+
+test("a column with no header inside the header row is a non-retryable failure that writes nothing", async () => {
+  const letter = (index: number): string => String.fromCharCode(65 + index); // every case here is inside A..Z
+  const cases: { name: string; layout: Layout; blank: number; data: boolean }[] = [
+    { name: "blank column A", layout: ["blank", ...BOOKINGS_COLUMNS], blank: 0, data: false },
+    {
+      name: "blank spacer before a notes column",
+      layout: [...BOOKINGS_COLUMNS, "blank", "notes"],
+      blank: COLUMN_COUNT,
+      data: false,
+    },
+    {
+      name: "blank-headed column with data in some rows, after a named staff column",
+      layout: ["notes", "blank", ...BOOKINGS_COLUMNS],
+      blank: 1,
+      data: true,
+    },
+    {
+      name: "blank column between two required columns",
+      layout: withStaffColumns([["guest_name", "blank"]]),
+      blank: BOOKINGS_COLUMNS.indexOf("guest_name"),
+      data: false,
+    },
+  ];
+  for (const { name, layout, blank, data } of cases) {
+    const headers = layout.map((column, i) => (i === blank ? "" : column));
+    // What would be updated: a booking already on the tab that changed. What would be appended: one that is not.
+    for (const scenario of ["update", "append"] as const) {
+      const label = `${name} (${scenario})`;
+      await withWorld(
+        async (world) => {
+          const { db, sheet } = world;
+          const existing = await seedBooking(db, {
+            id: "bk-e",
+            ref: "OD-0001",
+            vehicle_plate: await world.vehicle("わ1001"),
+            model_id: world.modelId,
+          });
+          const staff = layout.filter((c) => !isSchemaColumn(c) && (data || c !== "blank"));
+          placeRow(sheet, layout, 1, {
+            ...expectedCells(existing),
+            ...Object.fromEntries(staff.map((c) => [c, `${c} of bk-e`])),
+          });
+          await change(db, existing.id, { status: "CANCELLED", updated_at: Date.UTC(2030, 6, 20, 0, 0) });
+          const fresh = await seedBooking(db, {
+            id: "bk-f",
+            ref: "OD-0002",
+            vehicle_plate: await world.vehicle("わ1002"),
+            model_id: world.modelId,
+          });
+          const before = sheet.grid("Bookings");
+          sheet.calls.length = 0;
+
+          const result = await world.sync(scenario === "update" ? [existing.id] : [fresh.id]);
+
+          assert.equal(result.ok, false, label);
+          assert.ok(!result.ok && result.retryable === false, `${label}: only staff can fix the tab`);
+          assert.ok(
+            !result.ok && new RegExp(`\\b${letter(blank)}\\b`).test(result.error),
+            `${label}: the error names column ${letter(blank)}, got: ${!result.ok && result.error}`,
+          );
+          assert.equal(sheet.count("batchUpdate"), 0, `${label}: no batchUpdate`);
+          assert.equal(sheet.count("append"), 0, `${label}: no append`);
+          assert.deepEqual(sheet.grid("Bookings"), before, `${label}: the tab is unchanged`);
+        },
+        { layout, headers },
+      );
+    }
   }
 });
 

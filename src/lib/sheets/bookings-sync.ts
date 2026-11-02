@@ -149,6 +149,12 @@ async function readTab(sheets: SheetsClient): Promise<TabLayout> {
   const header = grid[0] ?? [];
   if (!header.some((name) => headerKey(name) !== "")) throw new TabError(`${TAB}: the tab is missing or has no header row`);
 
+  // A values.append starts at the first column of the table Google detects, so a column with no name would shift what
+  // it writes. Every column up to the last header needs a name; trailing blanks are not columns.
+  const width = header.findLastIndex((name) => headerKey(name) !== "") + 1;
+  const unnamed = header.slice(0, width).findIndex((name) => headerKey(name) === "");
+  if (unnamed >= 0) throw new TabError(`${TAB}: column ${columnLetters(unnamed)} has no header`);
+
   const position = new Map<string, number>();
   header.forEach((name, index) => {
     const key = headerKey(name);
@@ -165,7 +171,7 @@ async function readTab(sheets: SheetsClient): Promise<TabLayout> {
     // Row 1 is the header.
     if (i > 0 && typeof id === "string" && id !== "" && !rows.has(id)) rows.set(id, i + 1);
   });
-  return { nameAt, width: header.length, rows };
+  return { nameAt, width, rows };
 }
 
 /** The runs of adjacent columns an update may write: every schema column but the overrides, as [first, last] pairs. */
