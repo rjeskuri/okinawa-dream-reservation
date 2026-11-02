@@ -1538,6 +1538,74 @@ test("a class whose own package returns on a closed date is not listed", async (
   assertResults(await listing(scooters), ["pcx-125", "today-50", "vino-50"], scooters);
 });
 
+test("a type whose every class returns on a closed date gets the closed-return message", async () => {
+  // Every car on car-two and every motorcycle on day-3, while the scooters keep a class on day-1.
+  const fixture = sheetCatalog((workbook) => {
+    ownPackages(workbook);
+    removeRow(workbook, "Prices", "car-k/car-same");
+    removeRow(workbook, "Prices", "bike-750/day-1");
+    appendRow(workbook, "Prices", { rate_class_id: "bike-750", package_id: "day-3", price_jpy: 31415 });
+  });
+  const catalog = { ...fixture, closedDates: [] };
+  const [pickup] = openDates(catalog);
+
+  // One type refused and the others searched on the same date, so a message over the whole date cannot pass.
+  const cases: { closedIn: number; type: string; packageId: string; others: Record<string, string[]> }[] = [
+    {
+      closedIn: 1,
+      type: "car",
+      packageId: "car-two",
+      others: { scooter: ["pcx-125", "today-50", "vino-50"], motorcycle: ["rebel-250", "hawk-750"] },
+    },
+    {
+      closedIn: 2,
+      type: "motorcycle",
+      packageId: "day-3",
+      others: { scooter: ["today-50", "vino-50"], car: ["note-1300", "nbox-660"] },
+    },
+  ];
+  for (const { closedIn, type, packageId, others } of cases) {
+    await publish({ ...catalog, closedDates: [addDaysToDate(pickup, closedIn)] });
+    for (const locale of LOCALES) {
+      const path = `/${locale}/rentals?${anyPackage(pickup, type)}`;
+      const main = await listing(path);
+      assertBrowsing(main, OWN_ACTIVE, path);
+      assertNotice(main, "data-search-error", locale, path);
+      assert.ok(!visibleText(main).includes(NO_VEHICLES[locale]), `${path}: says no vehicles match`);
+
+      // What the guest would get with the package chosen, except that the package stays theirs to choose.
+      const withPackage = `/${locale}/rentals?${anyPackage(pickup, type, { package: packageId })}`;
+      const expected = await listing(withPackage);
+      assert.equal(hookText(main, "data-search-error"), hookText(expected, "data-search-error"), `${path}: message`);
+      assert.equal(hookText(main, "data-search-prompt"), hookText(expected, "data-search-prompt"), `${path}: prompt`);
+      const form = filterForm(main, path);
+      assert.equal(dateInput(form, path).input.attributes.value, undefined, `${path}: the date stays in the form`);
+      assert.equal(chosen(form, "time"), "10:00", `${path}: time`);
+      assert.equal(chosen(form, "type"), type, `${path}: type`);
+      assert.equal(chosen(form, "package"), "", `${path}: a package was chosen for the guest`);
+      assert.equal(dateInput(form, path).picker.attributes["package-days"], undefined, `${path}: package-days`);
+
+      for (const [other, ids] of Object.entries(others)) {
+        const search = `/${locale}/rentals?${anyPackage(pickup, other)}`;
+        assertResults(await listing(search), ids, search);
+      }
+    }
+  }
+
+  // A class left out by the closed return is not sold out, and the classes that were searched truly are.
+  const scooters = `/en/rentals?${anyPackage(pickup, "scooter")}`;
+  for (const plate of ["わ1001", "わ1016"]) {
+    await seedBooking(worker.db, {
+      vehicle_plate: plate,
+      start_at: jstToEpoch(pickup, "10:00"),
+      end_at: jstToEpoch(pickup, "18:00"),
+    });
+  }
+  const soldOut = await listing(scooters);
+  assertResults(soldOut, [], scooters);
+  assert.ok(visibleText(soldOut).includes(NO_VEHICLES.en), `${scooters}: says nothing about the empty list`);
+});
+
 test("no package is invented by a search with a type", async () => {
   const catalog = sheetCatalog(ownPackages);
   await publish(catalog);
