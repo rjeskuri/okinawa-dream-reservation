@@ -1,0 +1,296 @@
+# Sheet schema
+
+Staff run inventory, prices, packages, deposits, refund tiers and shop settings in one Google Sheet. This page lists
+every tab, what each column accepts, and what `publish_status` tells you after a Publish. The checks are in
+`src/lib/catalog/sheet-schema.ts`, and `SHEET_TABS` there is the source of the headers.
+
+Every value in the examples is a placeholder, not a real price, deposit or plate.
+
+## Tabs at a glance
+
+| Tab | Who edits it | Read by |
+| --- | --- | --- |
+| Config, Types, Models, Vehicles, RateClasses, Packages, Prices, Options, Cancellation, ClosedDates | Staff | Publish replaces the site's catalog from these ten tabs. |
+| Blocks | Staff | The blocks step of Publish. |
+| Bookings | The Worker, except `override_plate` | Staff, and the assignments step of Publish. |
+| Reconciliation | The Worker | Staff. |
+| PublishLog | The Apps Script | Staff. |
+
+## Rules for every tab
+
+- **Headers.** Every column listed on this page must exist, also where the cell may stay empty. A header matches by name
+  in any column order, and upper or lower case and spaces around it do not matter. Extra columns are ignored, so you can
+  keep your own notes in one.
+- **Text.** Full-width characters become half-width and half-width katakana become full-width (Unicode NFKC), and spaces
+  around a value are removed, before any check. `ｐｃｘ－１２５` and `pcx-125` are the same id.
+- **Ids (slugs).** Lower-case letters, digits and single hyphens, at most 40 characters: `pcx-125`. Not `PCX_125`, not
+  `pcx--125`, not `-pcx`.
+- **Allowed values** are written exactly as shown, in lower case.
+- **Money.** Whole yen. `5000`, `5,000`, `¥5,000` and `5000円` all read as 5000.
+- **Whole numbers.** Digits only, with no decimals. `sort`, `odometer_km` and `base_usage_days` are 0 or more.
+- **TRUE/FALSE.** A checkbox, or the text `TRUE` or `FALSE`.
+- **Dates.** A date cell, or text as `2030-07-15`.
+- **Date and time.** A date-time cell, or text as `2030-07-15 09:00`. Times are Japan time.
+- **Times of day.** A time cell, or text as `09:00`.
+- **A number in a text column** is fine: plate `2002` is the text `2002`.
+- **Repeats.** Where an id must be unique, the first row owns it and each later row gets an error, even if the first row
+  itself has an error.
+- **Blank rows** are ignored and get no status. An unticked checkbox alone counts as blank. Rows below keep their real
+  row numbers.
+
+## Translations
+
+Columns ending `_ja`, `_en`, `_zh` and `_ko` hold the text of each site language; `_zh` is the site's `zh-cn`. A blank
+cell gets a warning and shows the English text, or the Japanese text if English is blank too, or else any language the
+row has. A row with no name in any language is an error. Summaries and descriptions may be blank in every language: the
+row still publishes, with a warning per cell.
+
+## publish_status
+
+Every tab from Config to Blocks ends with a `publish_status` column, which the tables below leave out. The Worker
+rewrites it on each Publish and ignores whatever is in it, so do not type there.
+
+| Shows | Meaning |
+| --- | --- |
+| `ok` | The row is published. |
+| A warning | The row is published, but check it: for example a missing translation. |
+| An error | The row is **not** published. The message names the column and the problem. |
+
+A row can have several messages.
+
+A bad row also skips the rows that depend on it, and each of those gets its own error. Fix the first row and the others
+clear on the next Publish.
+
+| When this row is skipped | These are skipped too |
+| --- | --- |
+| Types | The models of that type, and their vehicles. |
+| RateClasses | The models of that class, their vehicles, and the prices of that class. |
+| Packages | The prices of that package. |
+| Models | The vehicles of that model. |
+
+Some problems stop the whole Publish. Nothing changes on the site, nothing is written to the sheet, and the reasons are
+shown to you:
+
+- a required tab or a header is missing;
+- a Config key is missing, or its value is bad.
+
+## Config
+
+One setting per row. All eight keys are required. A bad value is an error on its row and also stops the Publish.
+
+| Column | Accepts |
+| --- | --- |
+| `key` | A key below. Any other key gets a warning and is ignored. |
+| `value` | As below. |
+
+| key | value | Example |
+| --- | --- | --- |
+| `shop_open` | Time of day | `09:00` |
+| `shop_close` | Time of day, after `shop_open`. The error appears on this row. | `18:00` |
+| `slot_minutes` | Whole number, 1 or more | `30` |
+| `turnaround_minutes` | Whole number, 0 or more | `60` |
+| `hold_minutes` | Whole number, 1 or more | `15` |
+| `min_lead_hours` | Whole number, 0 or more | `24` |
+| `max_days_ahead` | Whole number, 0 or more | `180` |
+| `photo_max_mb` | Whole number, 1 or more | `5` |
+
+## Types
+
+| Column | Required | Accepts |
+| --- | --- | --- |
+| `type_id` | Yes | `scooter`, `motorcycle` or `car`. One row each. |
+| `deposit_jpy` | Yes | Money, 0 or more |
+| `sort` | Yes | Whole number |
+| `name_ja`, `name_en`, `name_zh`, `name_ko` | At least one | Text |
+
+Example: `motorcycle`, `5,000`, `2`, `バイク`, `Motorcycle`, `摩托车`, `오토바이`.
+
+## RateClasses
+
+| Column | Required | Accepts |
+| --- | --- | --- |
+| `rate_class_id` | Yes | Slug, unique |
+| `group` | Yes | `bike` or `car` |
+| `sort` | Yes | Whole number |
+| `extension_per_hour_jpy` | No | Money, 0 or more |
+| `name_ja`, `name_en`, `name_zh`, `name_ko` | At least one | Text |
+
+Example: `bike-125`, `bike`, `2`, `700`, `125cc`, `125cc bike`, `125cc摩托车`, `125cc 오토바이`.
+
+## Packages
+
+| Column | Required | Accepts |
+| --- | --- | --- |
+| `package_id` | Yes | Slug, unique |
+| `days` | Exactly one of these two | Whole number, 1 to 60 |
+| `hours` | Exactly one of these two | Whole number, 1 to 72 |
+| `sort` | Yes | Whole number |
+| `name_ja`, `name_en`, `name_zh`, `name_ko` | At least one | Text |
+
+Examples: `day-3`, `3`, blank, `3`, `3日`, `3 days`, `3天`, `3일`. And `hours-6`, blank, `6`, `1`, `6時間`, `6 hours`,
+`6小时`, `6시간`.
+
+## Prices
+
+One row per rate class and package. A model takes the prices of its rate class, so adding a model or a vehicle needs no
+new rows here. Prices include tax.
+
+| Column | Required | Accepts |
+| --- | --- | --- |
+| `rate_class_id` | Yes | An id from RateClasses |
+| `package_id` | Yes | An id from Packages |
+| `price_jpy` | Yes | Money, 1 or more |
+
+Example: `bike-125`, `day-1`, `¥5,200`.
+
+## Models
+
+| Column | Required | Accepts |
+| --- | --- | --- |
+| `model_id` | Yes | Slug, unique |
+| `type_id` | Yes | An id from Types |
+| `rate_class_id` | Yes | An id from RateClasses |
+| `brand` | Yes | Text |
+| `seats` | No | Whole number, 1 or more |
+| `engine_cc` | Yes | Whole number, 1 or more |
+| `license_class` | No | Blank uses the default below, or an override: `moped`, `small`, `standard`, `large` or `car` |
+| `sort` | Yes | Whole number |
+| `active` | Yes | TRUE/FALSE |
+| `name_ja`, `name_en`, `name_zh`, `name_ko` | At least one | Text |
+| `summary_ja`, `summary_en`, `summary_zh`, `summary_ko` | No | Text |
+| `description_ja`, `description_en`, `description_zh`, `description_ko` | No | Text |
+| `photos` | No | Drive file names separated by either comma, `,` or `，`: `pcx-1.jpg, pcx-2.jpg`. Names are kept exactly as typed, with only the spaces around each one removed. |
+
+The default license class comes from the type and the engine:
+
+| Engine | Class |
+| --- | --- |
+| Up to 50 cc | `moped` |
+| 51 to 125 cc | `small` |
+| 126 to 400 cc | `standard` |
+| Over 400 cc | `large` |
+| Type `car`, any engine | `car` |
+
+An override on a scooter or motorcycle replaces the default. `moped` is allowed only up to 125 cc, and `car` is an error.
+On a car the class stays `car`: another of the five classes gets a warning and is ignored. Anything outside the five is
+an error on any type.
+
+Example: `cub-110`, `motorcycle`, `bike-125`, `Honda`, `1`, `110`, `moped`, `3`, `TRUE`, then the texts, then
+`cub-1.jpg`.
+
+## Vehicles
+
+| Column | Required | Accepts |
+| --- | --- | --- |
+| `plate` | Yes | Text, unique |
+| `model_id` | Yes | An id from Models |
+| `status` | Yes | `active`, `maintenance` or `retired` |
+| `odometer_km` | No | Whole number |
+| `base_usage_days` | No | Whole number. Blank is 0. |
+| `notes` | No | Text. Not published. |
+
+Example: `わ1234`, `pcx-125`, `active`, `8000`, `30`, `Scratch on the left mirror`.
+
+## Options
+
+| Column | Required | Accepts |
+| --- | --- | --- |
+| `option_id` | Yes | Slug, unique |
+| `group` | Yes | `bike` or `car` |
+| `base_jpy` | Yes | Money, 0 or more |
+| `extra_per_hour_jpy` | No | Money, 0 or more |
+| `extra_per_24h_jpy` | No | Money, 0 or more |
+| `sort` | Yes | Whole number |
+| `name_ja`, `name_en`, `name_zh`, `name_ko` | At least one | Text |
+
+Example: `child-seat`, `car`, `1,100`, `110`, `550`, `2`, `チャイルドシート`, `Child seat`, `儿童座椅`, `카시트`.
+
+## Cancellation
+
+One row per refund tier.
+
+| Column | Required | Accepts |
+| --- | --- | --- |
+| `min_days_before` | Yes | Whole number, unique |
+| `refund_percent` | Yes | Whole number, 0 to 100 |
+
+Example: `7`, `100`.
+
+## ClosedDates
+
+| Column | Required | Accepts |
+| --- | --- | --- |
+| `date` | Yes | A date, unique. A date cell and the same date as text count as the same date. |
+| `note` | No | Text. Not published. |
+
+Example: `2030-01-01`, `New Year`.
+
+## Blocks
+
+One row per booking taken elsewhere, such as an OTA or a walk-in. A block holds a vehicle like a booking does. It is
+checked against the published catalog, so publish a new model before blocking it. A block may name an inactive model, or
+a plate in maintenance or retired.
+
+| Column | Required | Accepts |
+| --- | --- | --- |
+| `block_id` | Yes | Text, unique. Do not reuse or change the id of a block. |
+| `model_id` | Yes | An id from Models |
+| `plate` | No | A plate of that model. Blank lets the site choose. |
+| `start` | Yes | Date and time |
+| `end` | Yes | Date and time, after `start` |
+| `channel` | No | Text, such as `Klook` |
+| `reference` | No | Text, the booking number on that channel |
+| `note` | No | Text |
+
+Example: `BLK-1`, `pcx-125`, blank, `2030-07-15 09:00`, `2030-07-16 18:00`, `Klook`, `KL-1234`, `Group of two`.
+
+A missing or empty Blocks tab, or a missing header, stops the blocks step: stored blocks stay as they are. A row with an
+error does not change the block already stored under its id, so fix the row and press Publish again.
+
+## Bookings
+
+The Worker writes this tab. **Use filter views, and never sort it**: a sort moves rows, and one that lands while the
+Worker is updating the tab can put a booking's update on the wrong row. A filter view moves nothing.
+
+Staff type in one column, `override_plate`, to move a booking to another bike. Publish moves it if that bike is active,
+of the same model and free for the booking's time. `override_status` then shows the result, and the booking keeps its
+bike if the move was refused.
+
+| Column | Holds |
+| --- | --- |
+| `booking_ref`, `booking_id` | The booking's reference and internal id |
+| `status`, `source` | The booking's status, and `web` or `block` |
+| `model_id`, `plate` | The model and the assigned vehicle |
+| `override_plate` | **Staff:** the plate to move the booking to |
+| `override_status` | The result of the last override |
+| `start`, `end` | When the rental starts and ends |
+| `package_id` | The package booked |
+| `guest_name`, `guest_email`, `guest_phone`, `locale` | The guest and their language |
+| `price_jpy`, `deposit_jpy`, `paid_jpy` | The price, the deposit and what has been paid |
+| `refund_jpy`, `refund_status` | The refund and how far it has got |
+| `created_at`, `updated_at` | When the booking was created and last changed |
+
+## Reconciliation
+
+The daily check of bookings against Square and this sheet rewrites the tab on each run, with the run time, the counts
+and one row per issue. Do not edit it.
+
+| Column | Holds |
+| --- | --- |
+| `run_at` | When the check ran |
+| `counts` | What the check counted |
+| `type` | The kind of issue |
+| `booking_ref`, `payment_id`, `refund_id` | What the issue is about, where it applies |
+| `expected_jpy`, `actual_jpy` | The two amounts that disagree, where it applies |
+| `detail` | The issue in words |
+
+## PublishLog
+
+The Apps Script adds one row per Publish: `time`, `user`, `version`, `counts`, `blocks`, `photos`, `assignments`,
+`message`. Do not edit it.
+
+## Keep the sheet in Japan time
+
+Keep the spreadsheet's time zone at **Asia/Tokyo** (File, then Settings). The site reads every date and time cell as
+Japan time, so under another setting anything the sheet or the Apps Script stamps with the current time is off by the
+difference.

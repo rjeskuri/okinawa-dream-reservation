@@ -1,0 +1,121 @@
+{
+  "Config": [
+    ["key", "value", "publish_status"],
+    ["shop_open", 0.375],
+    ["shop_close", "18:00"],
+    ["slot_minutes", 30, "error: a stale message from the last publish"],
+    ["turnaround_minutes", 60],
+    ["hold_minutes", 15],
+    ["min_lead_hours", 24],
+    ["max_days_ahead", 180],
+    ["photo_max_mb", 5]
+  ],
+  "Types": [
+    ["type_id", "deposit_jpy", "sort", "name_ja", "name_en", "name_zh", "name_ko", "publish_status"],
+    ["scooter", 3000, 1, "スクーター", "Scooter", "踏板车", "스쿠터", "ok"],
+    ["motorcycle", 5000, 2, "バイク", "Motorcycle", "摩托车", "오토바이"],
+    ["car", 10000, 3, "車", "Car", "汽车", "자동차"]
+  ],
+  "RateClasses": [
+    ["rate_class_id", "group", "sort", "extension_per_hour_jpy", "name_ja", "name_en", "name_zh", "name_ko", "publish_status"],
+    ["scooter-50", "bike", 1, 500, "50ccスクーター", "50cc scooter", "50cc踏板车", "50cc 스쿠터"],
+    ["bike-125", "bike", 2, 700, "125cc", "125cc bike", "125cc摩托车", "125cc 오토바이"],
+    ["bike-400", "bike", 3, 1000, "400cc", "400cc bike", "400cc摩托车", "400cc 오토바이"],
+    ["car-k", "car", 4, "", "軽自動車", "K-Car", "轻型车", "경차"]
+  ],
+  "Packages": [
+    ["package_id", "days", "hours", "sort", "name_ja", "name_en", "name_zh", "name_ko", "publish_status"],
+    ["hours-6", "", 6, 1, "6時間", "6 hours", "6小时", "6시간"],
+    ["day-1", 1, "", 2, "1日", "1 day", "1天", "1일"],
+    ["day-3", 3, "", 3, "3日", "3 days", "3天", "3일"]
+  ],
+  "Prices": [
+    ["rate_class_id", "package_id", "price_jpy", "publish_status"],
+    ["scooter-50", "hours-6", 2500],
+    ["scooter-50", "day-1", 3500],
+    ["scooter-50", "day-3", 9000],
+    ["bike-125", "hours-6", 3600],
+    ["bike-125", "day-1", 5200],
+    ["bike-125", "day-3", 13800],
+    ["bike-400", "hours-6", 6100],
+    ["bike-400", "day-1", 9100],
+    ["bike-400", "day-3", 24700],
+    ["car-k", "day-1", 7300],
+    ["car-k", "day-3", 18900]
+  ],
+  "Models": [
+    [
+      "model_id", "type_id", "rate_class_id", "brand", "seats", "engine_cc", "license_class", "sort", "active",
+      "name_ja", "name_en", "name_zh", "name_ko",
+      "summary_ja", "summary_en", "summary_zh", "summary_ko",
+      "description_ja", "description_en", "description_zh", "description_ko",
+      "photos", "publish_status"
+    ],
+    [
+      "today-50", "scooter", "scooter-50", "Honda", "", 50, "", 1, true,
+      "トゥデイ", "Today", "今日", "투데이",
+      "トゥデイの概要", "Today summary", "今日简介", "투데이 요약",
+      "トゥデイの説明", "Today description", "今日说明", "투데이 설명",
+      "today-1.jpg, today-2.jpg"
+    ],
+    [
+      "pcx-125", "scooter", "bike-125", "Honda", 2, 125, "", 2, true,
+      "ピーシーエックス", "PCX", "PCX踏板", "피씨엑스",
+      "PCXの概要", "PCX summary", "PCX简介", "PCX 요약",
+      "PCXの説明", "PCX description", "PCX说明", "PCX 설명",
+      "pcx-1.jpg,pcx-2.jpg,pcx-3.jpg"
+    ],
+    [
+      "cub-110", "motorcycle", "bike-125", "Honda", 1, 110, "moped", 3, "FALSE",
+      "カブ", "Cub", "幼兽", "커브",
+      "カブの概要", "Cub summary", "幼兽简介", "커브 요약",
+      "カブの説明", "Cub description", "幼兽说明", "커브 설명"
+    ],
+    [
+      "rebel-250", "motorcycle", "bike-400", "Honda", 2, 250, "", 4, "TRUE",
+      "レブル", "Rebel", "叛逆者", "레블",
+      "レブルの概要", "Rebel summary", "叛逆者简介", "레블 요약",
+      "レブルの説明", "Rebel description", "叛逆者说明", "레블 설명",
+      "rebel-1.jpg"
+    ],
+    [
+      "nbox-660", "car", "car-k", "Honda", 4, 660, "", 5, true,
+      "エヌボックス", "N-BOX", "N-BOX轻型车", "엔박스",
+      "N-BOXの概要", "N-BOX summary", "N-BOX简介", "N-BOX 요약",
+      "N-BOXの説明", "N-BOX description", "N-BOX说明", "N-BOX 설명",
+      "nbox-1.jpg"
+    ]
+  ],
+  "Vehicles": [
+    ["plate", "model_id", "status", "odometer_km", "base_usage_days", "notes", "publish_status"],
+    ["わ1001", "today-50", "active", 12000, 30, "Scratch on the left mirror"],
+    ["わ1002", "pcx-125", "active", 8000],
+    ["わ1003", "pcx-125", "maintenance", "", 5],
+    ["わ1004", "cub-110", "retired"],
+    ["わ1005", "rebel-250", "active", 21000, 90, "", "ok"],
+    ["わ1006", "nbox-660", "active", 45000, 120, "New tires"]
+  ],
+  "Options": [
+    ["option_id", "group", "base_jpy", "extra_per_hour_jpy", "extra_per_24h_jpy", "sort", "name_ja", "name_en", "name_zh", "name_ko", "publish_status"],
+    ["helmet", "bike", 0, "", "", 1, "ヘルメット", "Helmet", "头盔", "헬멧"],
+    ["child-seat", "car", 1100, 110, 550, 2, "チャイルドシート", "Child seat", "儿童座椅", "카시트"]
+  ],
+  "Cancellation": [
+    ["min_days_before", "refund_percent", "publish_status"],
+    [7, 100],
+    [3, 50],
+    [0, 0]
+  ],
+  "ClosedDates": [
+    ["date", "note", "publish_status"],
+    [46387, "Year end"],
+    ["2027-01-01", "New Year"],
+    [46389]
+  ],
+  "Blocks": [
+    ["block_id", "model_id", "plate", "start", "end", "channel", "reference", "note", "publish_status"],
+    ["BLK-1", "pcx-125", "", "2030-07-15 09:00", "2030-07-16 18:00", "Klook", "KL-1001", "Group of two"],
+    ["BLK-2", "rebel-250", "わ1005", 47696.416666666664, 47698.729166666664, "Rakuten", "RT-2002", "Two nights"],
+    ["BLK-3", "today-50", "わ1001", 47696.416666666664, "2030-08-02 09:00", "Walk-in", "WI-3003", "Paid at the shop"]
+  ]
+}
