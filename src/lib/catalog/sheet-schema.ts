@@ -68,7 +68,7 @@ export const SHEET_TABS = {
 type Tab = keyof typeof SHEET_TABS;
 
 /** What one publish reads, each tab after those it depends on. */
-const CATALOG_TABS = [
+export const CATALOG_TABS = [
   "Config", "Types", "RateClasses", "Packages", "Prices", "Models", "Vehicles", "Options", "Cancellation",
   "ClosedDates",
 ] as const;
@@ -105,6 +105,11 @@ function attempt<T>(parse: () => T): T | null {
 function readCell(value: unknown): Cell {
   if (typeof value === "string") return value.normalize("NFKC").trim();
   return typeof value === "number" || typeof value === "boolean" ? value : "";
+}
+
+/** A header as it is matched: normalized like any text, in lower case. */
+export function headerKey(value: unknown): string {
+  return String(readCell(value)).toLowerCase();
 }
 
 function wholeOf(cell: Cell): number {
@@ -285,7 +290,7 @@ function readTab(raw: Workbook, tab: Tab, fatal: string[]): Row[] | null {
 
   const indexes = new Map<string, number>();
   header.forEach((name, index) => {
-    const column = String(readCell(name)).toLowerCase();
+    const column = headerKey(name);
     if (!indexes.has(column)) indexes.set(column, index);
   });
   const columns: readonly string[] = SHEET_TABS[tab];
