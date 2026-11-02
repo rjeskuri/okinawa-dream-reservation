@@ -1,7 +1,8 @@
 ---
-// /{locale}/rentals: the filter form and the grid. A complete, valid search lists what searchAvailability returns. Anything
-// else lists the active models with a prompt, and type and cc wait for the search, since only class narrows without dates.
-// Rendered from D1 on every request, so prices match the latest publish.
+// /{locale}/rentals: the filter form and the grid. A complete, valid search, a date and time with a package or a type, lists
+// what searchAvailability returns: with a type and no package, each class on its own default package, and none is chosen for
+// the guest. Anything else lists the active models with a prompt, and type and cc wait for the search, since only class
+// narrows without dates. Rendered from D1 on every request, so prices match the latest publish.
 import { env } from "cloudflare:workers";
 import DatePicker from "../../../components/DatePicker.astro";
 import ModelCard from "../../../components/ModelCard.astro";
@@ -15,7 +16,7 @@ import { pickupSlots } from "../../../lib/booking/pickup-window.ts";
 import { photoUrl, readPhotoIndex } from "../../../lib/catalog/photos.ts";
 import { readCatalog, type PublishedCatalog } from "../../../lib/db/catalog-store.ts";
 import { isLocale } from "../../../lib/locale.ts";
-import { availabilityQuery, cardPrice, carriedQuery, chosenPackage, listedModels, parseSearch } from "../../../lib/search.ts";
+import { cardPrice, carriedQuery, chosenPackage, findModels, listedModels, parseSearch } from "../../../lib/search.ts";
 import { addDaysToDate, epochToJst, jstToday } from "../../../lib/time.ts";
 import type { Package } from "../../../lib/types.ts";
 
@@ -31,8 +32,7 @@ const now = Date.now();
 /** The page's view of a published catalog. searchAvailability throws before the first publish, so this needs one. */
 async function list(catalog: PublishedCatalog) {
   const search = parseSearch(Astro.url.searchParams, catalog, catalog.config, catalog.closedDates, now);
-  const query = availabilityQuery(search, now);
-  const found = query && (await searchAvailability(env.DB, query));
+  const found = await findModels(search, catalog.models, now, (query) => searchAvailability(env.DB, query));
   const pkg = chosenPackage(catalog.packages, search);
   const photos = await readPhotoIndex(env.DB);
   const carried = carriedQuery(search);
@@ -45,7 +45,7 @@ async function list(catalog: PublishedCatalog) {
     rateClass: catalog.rateClasses.find(({ id }) => id === model.rateClassId),
     depositJpy: catalog.vehicleTypes.find(({ id }) => id === model.typeId)?.depositJpy,
   }));
-  return { search, complete: query !== null, pkg, cards };
+  return { search, complete: found !== null, pkg, cards };
 }
 
 /** A card's package label: empty when no package was chosen and the class has no day package to name. */

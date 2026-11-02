@@ -30,6 +30,9 @@ credentials/
 # The shop's own photos for the local demo: rights unconfirmed, so never committed
 seed/photos-local/
 
+# PDFs of the mock for the customer, made by scripts/export-pdf.sh
+mock-pdfs/
+
 # Claude Code
 .claude/settings.local.json
 .claude/worktrees/

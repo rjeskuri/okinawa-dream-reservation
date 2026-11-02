@@ -25,6 +25,19 @@ Do these in the order below. Setting the GitHub secrets comes last, because the 
 
 The Astro adapter adds two more bindings at build time, so they are in `dist/server/wrangler.json` but not in `wrangler.jsonc`: `SESSION` (KV) and `IMAGES` (Cloudflare Images). There is nothing to create for `SESSION`: `npx wrangler deploy` creates the namespace on the first deploy, which is why the token in step 4 needs KV access. Check at go-live whether `IMAGES` needs anything on the Workers Free plan.
 
+### Mail web app
+
+Email goes out through the sheet's Apps Script, deployed as a web app (`apps-script/Mail.js`). Sign in as the staff Gmail account, which is the account that sends, and open the sheet's Extensions, Apps Script.
+
+1. Copy in `apps-script/Mail.js` and `apps-script/appsscript.json`, which adds the send-only `script.send_mail` scope. The editor shows the manifest once Project Settings, Show "appsscript.json", is on.
+2. Under Project Settings, Script Properties, add `MAIL_SECRET` with a new random value from `openssl rand -hex 32`. Step 3 sets the same value on the Worker.
+3. Choose Deploy, New deployment, type Web app. Set Execute as to Me, and Who has access to Anyone, not Anyone with Google account: the Worker cannot sign in, so the signature in each request is the only protection.
+4. Approve the authorization prompt. Put the web app URL, which ends in `/exec`, in `APPS_SCRIPT_MAIL_URL` in step 2.
+
+A later change to `Mail.js` goes live only with Deploy, Manage deployments, edit, Version: New version. The URL stays the same.
+
+If the authorization lapses, the web app answers with a Google login page and mail waits in the outbox. It waits for 8 attempts only, about 20 hours 36 minutes, and then the message goes dead, so restore the authorization before that.
+
 ## 2. Vars
 
 Replace the placeholders under `vars` in `wrangler.jsonc`. They are committed and are not secret.
@@ -38,7 +51,7 @@ Replace the placeholders under `vars` in `wrangler.jsonc`. They are committed an
 | `SQUARE_WEBHOOK_URL` | `https://<domain>/api/webhooks/square` |
 | `GOOGLE_SHEET_ID` | The production sheet's id. |
 | `GOOGLE_DRIVE_FOLDER_ID` | The photo folder's id. |
-| `APPS_SCRIPT_MAIL_URL` | The deployed mail web app's URL. |
+| `APPS_SCRIPT_MAIL_URL` | The deployed mail web app's URL, from step 1. |
 | `STAFF_EMAIL` | The shop's staff address. |
 | `ENABLE_GOOGLE_PAY`, `ENABLE_APPLE_PAY` | `false` unless task #47 ran. |
 

@@ -5,6 +5,7 @@ import { env } from "cloudflare:workers";
 import DatePicker from "../../components/DatePicker.astro";
 import { common } from "../../i18n/strings/common.ts";
 import { pages } from "../../i18n/strings/pages.ts";
+import { rentals } from "../../i18n/strings/rentals.ts";
 import { t } from "../../i18n/t.ts";
 import Base from "../../layouts/Base.astro";
 import { readCatalog } from "../../lib/db/catalog-store.ts";
@@ -73,6 +74,7 @@ const now = Date.now();
           <label>
             {t(locale, pages, "home.search.package")}
             <select name="package">
+              <option value="">{t(locale, rentals, "rentals.form.any")}</option>
               {dayPackages.map(({ id, texts }) => (
                 <option value={id}>{texts[locale].name}</option>
               ))}

@@ -846,6 +846,7 @@ test("an hours package shows its prices but finds no pickup yet", async () => {
 
 /** The package names the fixture and the split catalog below use, per locale, written out here. */
 const PACKAGE_NAMES: Record<string, Record<Locale, string>> = {
+  "hours-6": { ja: "6時間", en: "6 hours", "zh-cn": "6小时", ko: "6시간" },
   "day-1": { ja: "1日", en: "1 day", "zh-cn": "1天", ko: "1일" },
   "day-3": { ja: "3日", en: "3 days", "zh-cn": "3天", ko: "3일" },
   "car-same": { ja: "当日", en: "Same day", "zh-cn": "当天", ko: "당일" },
@@ -1086,6 +1087,14 @@ const NO_VEHICLES: Record<Locale, string> = {
   ko: "조건에 맞는 차량이 없습니다",
 };
 
+/** The sentence of a card with no price for the package, enough of it to tell it from the rest of the page. */
+const NOT_OFFERED: Record<Locale, string> = {
+  ja: "このプランはありません",
+  en: "Not offered on this package",
+  "zh-cn": "此套餐不提供",
+  ko: "이 패키지에는 없습니다",
+};
+
 /** The query a browser sends from the form as rendered, untouched: each named control's default, and the empty ones too. */
 function defaultsOf(form: string): URLSearchParams {
   const query = new URLSearchParams();
@@ -1255,6 +1264,455 @@ test("a valid cc with type=car is ignored", async () => {
   // A scooter search keeps its cc, so the band is ignored for cars only.
   const scooter = `/en/rentals?${searchQuery(date, { package: "day-1", type: "scooter", cc: "51to125" })}`;
   assertResults(await listing(scooter), ["pcx-125"], scooter);
+});
+
+// A search with a type and no package: each rate class of the type is checked on its own default package.
+
+/** A search with a type and the package left on "Any", which the form sends as an empty param. */
+function anyPackage(date: string, type: string, params: Record<string, string> = {}): string {
+  return new URLSearchParams({ date, time: "10:00", package: "", type, ...params }).toString();
+}
+
+/**
+ * The split catalog with classes of one type on different packages, so that no one package fits a whole type, and with
+ * model sort running against the order of those packages. Each model has one active vehicle:
+ *   scooter     pcx-125 (bike-125, day-3 only, わ1002), today-50 (scooter-50, day-1, わ1001), tied with pcx-125 on sort,
+ *               and vino-50 (scooter-50, わ1016)
+ *   motorcycle  rebel-250 (bike-400, day-3 only, わ1005), hawk-750 (bike-750, day-1, わ1017)
+ *   car         note-1300 (car-m, car-two only, わ1018), nbox-660 (car-k, car-same, わ1006)
+ */
+function ownPackages(workbook: Workbook): void {
+  splitPackages(workbook);
+  removeRow(workbook, "Prices", "bike-125/day-1");
+  removeRow(workbook, "Prices", "bike-400/day-1");
+  setCell(workbook, "Models", "pcx-125", "sort", 1);
+
+  appendCopy(workbook, "Models", "today-50", { model_id: "vino-50", sort: 3, photos: "" });
+  appendCopy(workbook, "Vehicles", "わ1001", { plate: "わ1016", model_id: "vino-50" });
+
+  appendCopy(workbook, "RateClasses", "bike-400", { rate_class_id: "bike-750", sort: 9 });
+  appendRow(workbook, "Prices", { rate_class_id: "bike-750", package_id: "day-1", price_jpy: 31415 });
+  appendCopy(workbook, "Models", "rebel-250", {
+    model_id: "hawk-750",
+    rate_class_id: "bike-750",
+    engine_cc: 750,
+    sort: 9,
+    photos: "",
+  });
+  appendCopy(workbook, "Vehicles", "わ1005", { plate: "わ1017", model_id: "hawk-750" });
+
+  appendCopy(workbook, "RateClasses", "car-k", { rate_class_id: "car-m", sort: 9 });
+  appendRow(workbook, "Prices", { rate_class_id: "car-m", package_id: "car-two", price_jpy: 21000 });
+  appendCopy(workbook, "Models", "nbox-660", {
+    model_id: "note-1300",
+    rate_class_id: "car-m",
+    engine_cc: 1300,
+    sort: 1,
+    photos: "",
+  });
+  appendCopy(workbook, "Vehicles", "わ1006", { plate: "わ1018", model_id: "note-1300" });
+}
+
+/** Everything ownPackages lists with nothing booked, by type, in the order of a search. */
+const OWN_RESULTS: Record<VehicleTypeId, { id: string; packageId: string; price: string; deposit: string }[]> = {
+  scooter: [
+    { id: "pcx-125", packageId: "day-3", price: "13,800", deposit: "3,000" },
+    { id: "today-50", packageId: "day-1", price: "3,500", deposit: "3,000" },
+    { id: "vino-50", packageId: "day-1", price: "3,500", deposit: "3,000" },
+  ],
+  motorcycle: [
+    { id: "rebel-250", packageId: "day-3", price: "24,700", deposit: "5,000" },
+    { id: "hawk-750", packageId: "day-1", price: "31,415", deposit: "5,000" },
+  ],
+  car: [
+    { id: "note-1300", packageId: "car-two", price: "21,000", deposit: "10,000" },
+    { id: "nbox-660", packageId: "car-same", price: "8,000", deposit: "10,000" },
+  ],
+};
+
+/** The active models of ownPackages, whatever their order. */
+const OWN_ACTIVE = Object.values(OWN_RESULTS).flatMap((models) => models.map(({ id }) => id));
+
+test("a type with a date and time and no package searches that type", async () => {
+  // Active with nothing to rent, and inactive with a free vehicle, so neither the fleet nor the flag decides alone.
+  const catalog = sheetCatalog((workbook) => {
+    splitPackages(workbook);
+    appendCopy(workbook, "Models", "pcx-125", { model_id: "no-bike-125", sort: 7, photos: "" });
+    setCell(workbook, "Vehicles", "わ1004", "status", "active");
+  });
+  await publish(catalog);
+  const [date] = openDates(catalog);
+
+  const expected: Record<VehicleTypeId, string[]> = {
+    scooter: ["today-50", "pcx-125"],
+    motorcycle: ["rebel-250"],
+    car: ["nbox-660"],
+  };
+  for (const locale of LOCALES) {
+    for (const [type, ids] of Object.entries(expected)) {
+      for (const time of ["09:30", "14:00"]) {
+        // Left on "Any" and left out, which a link may do.
+        for (const query of [anyPackage(date, type, { time }), `date=${date}&time=${time}&type=${type}`]) {
+          const path = `/${locale}/rentals?${query}`;
+          const main = await listing(path);
+          assertResults(main, ids, path);
+          for (const id of ids) {
+            const own = OWN[id] as (typeof OWN)[string];
+            const shown = card(main, id, path);
+            assertPriced(shown, locale, own.packageId, own.price, path);
+            assert.deepEqual(amounts(shown, "data-deposit"), [own.deposit], `${path}: deposit of ${id}`);
+          }
+          assert.ok(!visibleText(main).includes(NOT_OFFERED[locale]), `${path}: says not offered`);
+          assert.ok(!visibleText(main).includes(NO_VEHICLES[locale]), `${path}: says no vehicles match`);
+        }
+      }
+    }
+  }
+});
+
+test("each class of the type searches on its own package, and the models keep their sort", async () => {
+  const catalog = sheetCatalog(ownPackages);
+  await publish(catalog);
+  const [date] = openDates(catalog);
+
+  for (const locale of LOCALES) {
+    for (const [type, models] of Object.entries(OWN_RESULTS)) {
+      const path = `/${locale}/rentals?${anyPackage(date, type)}`;
+      const main = await listing(path);
+      assertResults(main, models.map(({ id }) => id), path);
+      for (const { id, packageId, price, deposit } of models) {
+        const shown = card(main, id, path);
+        assertPriced(shown, locale, packageId, price, path);
+        assert.deepEqual(amounts(shown, "data-deposit"), [deposit], `${path}: deposit of ${id}`);
+      }
+    }
+  }
+});
+
+test("a package's whole window decides whether its class is free", async () => {
+  const catalog = sheetCatalog(ownPackages);
+  await publish(catalog);
+  const open = openDates(catalog);
+  const date = open[0] as string;
+  const otherDay = open.at(-1) as string;
+
+  const results = async (type: string, expected: string[], label: string) => {
+    const path = `/en/rentals?${anyPackage(date, type)}`;
+    assertResults(await listing(path), expected, `${label}: ${path}`);
+  };
+  const book = (plate: string, days: number) =>
+    seedBooking(worker.db, {
+      vehicle_plate: plate,
+      start_at: jstToEpoch(addDaysToDate(date, days), "10:00"),
+      end_at: jstToEpoch(addDaysToDate(date, days), "18:00"),
+    });
+
+  // The third day is past today-50's one day, and it is the return day of pcx-125's three.
+  await book("わ1001", 2);
+  await results("scooter", ["pcx-125", "today-50", "vino-50"], "today-50 is booked after its rental");
+  await book("わ1002", 2);
+  await results("scooter", ["today-50", "vino-50"], "pcx-125 is booked on its last day");
+  await book("わ1001", 0);
+  await results("scooter", ["vino-50"], "today-50 is booked on the day");
+
+  // The same across the car packages, one day and two.
+  await book("わ1006", 1);
+  await results("car", ["note-1300", "nbox-660"], "nbox-660 is booked after its rental");
+  await book("わ1018", 1);
+  await results("car", ["nbox-660"], "note-1300 is booked on its last day");
+
+  // The class left over is no fallback for one that has nothing free: a type sold out is a search with no results.
+  await book("わ1006", 0);
+  await results("car", [], "every car is booked");
+  const path = `/en/rentals?${anyPackage(date, "car")}`;
+  assert.ok(visibleText(await listing(path)).includes(NO_VEHICLES.en), `${path}: says nothing about the empty list`);
+
+  // Sold out on those days alone.
+  const free = `/en/rentals?${anyPackage(otherDay, "car")}`;
+  assertResults(await listing(free), ["note-1300", "nbox-660"], free);
+});
+
+test("an hours package never stands in for a class's day package", async () => {
+  // hours-6 sorts first. bike-400 keeps its hours price alone here, and car-k gets one in front of its day packages.
+  const catalog = sheetCatalog((workbook) => {
+    ownPackages(workbook);
+    removeRow(workbook, "Prices", "bike-400/day-3");
+    appendRow(workbook, "Prices", { rate_class_id: "car-k", package_id: "hours-6", price_jpy: 4000 });
+  });
+  await publish(catalog);
+  const [date] = openDates(catalog);
+
+  for (const locale of LOCALES) {
+    // A class with no day package has nothing to search on.
+    const bikes = `/${locale}/rentals?${anyPackage(date, "motorcycle")}`;
+    const bikeResults = await listing(bikes);
+    assertResults(bikeResults, ["hawk-750"], bikes);
+    assertPriced(card(bikeResults, "hawk-750", bikes), locale, "day-1", "31,415", bikes);
+
+    const cars = `/${locale}/rentals?${anyPackage(date, "car")}`;
+    const carResults = await listing(cars);
+    assertResults(carResults, ["note-1300", "nbox-660"], cars);
+    assertPriced(card(carResults, "nbox-660", cars), locale, "car-same", "8,000", cars);
+  }
+});
+
+test("the pickup window holds with a type and no package", async () => {
+  const catalog = { ...sheetCatalog(ownPackages), closedDates: [] };
+  const [pickup] = openDates(catalog);
+  const closed = addDaysToDate(pickup, 5);
+  await publish({ ...catalog, closedDates: [closed] });
+  const today = jstToday(Date.now());
+
+  // Each spoils a good search, which then gets what the same search with a chosen package gets. The last ones are what a
+  // request can throw at the page.
+  const spoiled: Record<string, string>[] = [
+    { date: closed },
+    { date: today },
+    { date: addDaysToDate(today, -1) },
+    { date: addDaysToDate(today, 500) },
+    { date: "9999-12-31" },
+    { time: "10:15" },
+    { time: "08:00" },
+    { time: "18:00" },
+    { date: "2030-02-30" },
+    { date: "99999-01-01" },
+    { date: "not-a-date" },
+    { time: "25:00" },
+    { time: "noon" },
+    { type: "plane" },
+    { type: "toString" },
+    { package: "week" },
+    { cc: "all" },
+    { class: "nope" },
+  ];
+  for (const type of ["car", "scooter"]) {
+    for (const params of spoiled) {
+      const label = JSON.stringify({ type, ...params });
+      const path = `/en/rentals?${anyPackage(pickup, type, params)}`;
+      const main = await listing(path);
+      assertBrowsing(main, OWN_ACTIVE, path);
+      assertNotice(main, "data-search-error", "en", path);
+
+      const with1Day = `/en/rentals?${anyPackage(pickup, type, { package: "day-1", ...params })}`;
+      const expected = await listing(with1Day);
+      assert.equal(hookText(main, "data-search-error"), hookText(expected, "data-search-error"), `${label}: message`);
+      assert.deepEqual(idsIn(main), idsIn(expected), `${label}: list`);
+      const form = filterForm(main, path);
+      const formExpected = filterForm(expected, with1Day);
+      assert.equal(
+        dateInput(form, path).input.attributes.value,
+        dateInput(formExpected, with1Day).input.attributes.value,
+        `${label}: date`,
+      );
+      assert.equal(chosen(form, "time"), chosen(formExpected, "time"), `${label}: time`);
+    }
+  }
+
+  // The message comes in the reader's locale.
+  for (const locale of LOCALES) {
+    const path = `/${locale}/rentals?${anyPackage(closed, "car")}`;
+    const main = await listing(path);
+    assertBrowsing(main, OWN_ACTIVE, path);
+    assertNotice(main, "data-search-error", locale, path);
+  }
+});
+
+test("a class whose own package returns on a closed date is not listed", async () => {
+  const catalog = { ...sheetCatalog(ownPackages), closedDates: [] };
+  const [pickup] = openDates(catalog);
+
+  // A return the guest never chose is no error of theirs: the classes that can start here are still found.
+  await publish({ ...catalog, closedDates: [addDaysToDate(pickup, 2)] });
+  const scooters = `/en/rentals?${anyPackage(pickup, "scooter")}`;
+  assertResults(await listing(scooters), ["today-50", "vino-50"], scooters);
+  const bikes = `/en/rentals?${anyPackage(pickup, "motorcycle")}`;
+  assertResults(await listing(bikes), ["hawk-750"], bikes);
+  const cars = `/en/rentals?${anyPackage(pickup, "car")}`;
+  assertResults(await listing(cars), ["note-1300", "nbox-660"], cars);
+
+  await publish({ ...catalog, closedDates: [addDaysToDate(pickup, 1)] });
+  assertResults(await listing(cars), ["nbox-660"], cars);
+
+  // The closed date past every return stops nothing.
+  await publish({ ...catalog, closedDates: [addDaysToDate(pickup, 3)] });
+  assertResults(await listing(scooters), ["pcx-125", "today-50", "vino-50"], scooters);
+});
+
+test("a type whose every class returns on a closed date gets the closed-return message", async () => {
+  // Every car on car-two and every motorcycle on day-3, while the scooters keep a class on day-1.
+  const fixture = sheetCatalog((workbook) => {
+    ownPackages(workbook);
+    removeRow(workbook, "Prices", "car-k/car-same");
+    removeRow(workbook, "Prices", "bike-750/day-1");
+    appendRow(workbook, "Prices", { rate_class_id: "bike-750", package_id: "day-3", price_jpy: 31415 });
+  });
+  const catalog = { ...fixture, closedDates: [] };
+  const [pickup] = openDates(catalog);
+
+  // One type refused and the others searched on the same date, so a message over the whole date cannot pass.
+  const cases: { closedIn: number; type: string; packageId: string; others: Record<string, string[]> }[] = [
+    {
+      closedIn: 1,
+      type: "car",
+      packageId: "car-two",
+      others: { scooter: ["pcx-125", "today-50", "vino-50"], motorcycle: ["rebel-250", "hawk-750"] },
+    },
+    {
+      closedIn: 2,
+      type: "motorcycle",
+      packageId: "day-3",
+      others: { scooter: ["today-50", "vino-50"], car: ["note-1300", "nbox-660"] },
+    },
+  ];
+  for (const { closedIn, type, packageId, others } of cases) {
+    await publish({ ...catalog, closedDates: [addDaysToDate(pickup, closedIn)] });
+    for (const locale of LOCALES) {
+      const path = `/${locale}/rentals?${anyPackage(pickup, type)}`;
+      const main = await listing(path);
+      assertBrowsing(main, OWN_ACTIVE, path);
+      assertNotice(main, "data-search-error", locale, path);
+      assert.ok(!visibleText(main).includes(NO_VEHICLES[locale]), `${path}: says no vehicles match`);
+
+      // What the guest would get with the package chosen, except that the package stays theirs to choose.
+      const withPackage = `/${locale}/rentals?${anyPackage(pickup, type, { package: packageId })}`;
+      const expected = await listing(withPackage);
+      assert.equal(hookText(main, "data-search-error"), hookText(expected, "data-search-error"), `${path}: message`);
+      assert.equal(hookText(main, "data-search-prompt"), hookText(expected, "data-search-prompt"), `${path}: prompt`);
+      const form = filterForm(main, path);
+      assert.equal(dateInput(form, path).input.attributes.value, undefined, `${path}: the date stays in the form`);
+      assert.equal(chosen(form, "time"), "10:00", `${path}: time`);
+      assert.equal(chosen(form, "type"), type, `${path}: type`);
+      assert.equal(chosen(form, "package"), "", `${path}: a package was chosen for the guest`);
+      assert.equal(dateInput(form, path).picker.attributes["package-days"], undefined, `${path}: package-days`);
+
+      for (const [other, ids] of Object.entries(others)) {
+        const search = `/${locale}/rentals?${anyPackage(pickup, other)}`;
+        assertResults(await listing(search), ids, search);
+      }
+    }
+  }
+
+  // A class left out by the closed return is not sold out, and the classes that were searched truly are.
+  const scooters = `/en/rentals?${anyPackage(pickup, "scooter")}`;
+  for (const plate of ["わ1001", "わ1016"]) {
+    await seedBooking(worker.db, {
+      vehicle_plate: plate,
+      start_at: jstToEpoch(pickup, "10:00"),
+      end_at: jstToEpoch(pickup, "18:00"),
+    });
+  }
+  const soldOut = await listing(scooters);
+  assertResults(soldOut, [], scooters);
+  assert.ok(visibleText(soldOut).includes(NO_VEHICLES.en), `${scooters}: says nothing about the empty list`);
+});
+
+test("no package is invented by a search with a type", async () => {
+  const catalog = sheetCatalog(ownPackages);
+  await publish(catalog);
+  const [date] = openDates(catalog);
+
+  for (const locale of LOCALES) {
+    for (const [type, models] of Object.entries(OWN_RESULTS)) {
+      const path = `/${locale}/rentals?${anyPackage(date, type, { time: "11:30" })}`;
+      const main = await listing(path);
+      const ids = models.map(({ id }) => id);
+      assertResults(main, ids, path);
+
+      const form = filterForm(main, path);
+      assert.equal(chosen(form, "package"), "", `${path}: what the package select submits`);
+      assert.deepEqual(packageOptions(form).filter(({ selected }) => selected), [], `${path}: a package selected`);
+      assert.equal(packageOptions(form)[0]?.text, ANY[locale], `${path}: the first option's text`);
+      assert.equal(dateInput(form, path).picker.attributes["package-days"], undefined, `${path}: package-days`);
+      assert.equal(dateInput(form, path).input.attributes.value, date, `${path}: date`);
+      assert.equal(chosen(form, "time"), "11:30", `${path}: time`);
+      assert.equal(chosen(form, "type"), type, `${path}: type`);
+
+      // The form sent again as it stands is the same search.
+      const again = `/${locale}/rentals?${defaultsOf(form)}`;
+      assertResults(await listing(again), ids, again);
+    }
+  }
+});
+
+test("a card of a search with a type carries the search and no package", async () => {
+  const catalog = sheetCatalog(ownPackages);
+  await publish(catalog);
+  const [date] = openDates(catalog);
+
+  const cases: { params: Record<string, string>; expected: string[] }[] = [
+    { params: { date, time: "13:30", type: "scooter" }, expected: ["pcx-125", "today-50", "vino-50"] },
+    { params: { date, time: "09:00", type: "car" }, expected: ["note-1300", "nbox-660"] },
+    { params: { date, time: "10:00", type: "scooter", cc: "51to125" }, expected: ["pcx-125"] },
+    { params: { date, time: "10:00", type: "motorcycle", class: "bike-750" }, expected: ["hawk-750"] },
+  ];
+  for (const locale of LOCALES) {
+    for (const { params, expected } of cases) {
+      const path = `/${locale}/rentals?${new URLSearchParams(params)}`;
+      const main = await listing(path);
+      assertResults(main, expected, path);
+      for (const { id, tag } of cardsIn(main)) {
+        const target = new URL(tag.attributes.href ?? "", new URL(path, base));
+        assert.equal(target.pathname.replace(/\/$/, ""), `/${locale}/rentals/${id}`, `${path}: link of ${id}`);
+        assert.deepEqual(Object.fromEntries(target.searchParams), params, `${path}: search carried by ${id}`);
+        // The model page offers its own choice of package.
+        await pageHtml(`${target.pathname}${target.search}`);
+      }
+    }
+  }
+});
+
+test("class and engine narrow a search with a type, and a chosen package is searched alone", async () => {
+  const catalog = sheetCatalog(ownPackages);
+  await publish(catalog);
+  const [date] = openDates(catalog);
+
+  const narrowed: { type: string; filters: Record<string, string>; expected: string[] }[] = [
+    { type: "scooter", filters: { class: "bike-125" }, expected: ["pcx-125"] },
+    { type: "scooter", filters: { class: "scooter-50" }, expected: ["today-50", "vino-50"] },
+    { type: "motorcycle", filters: { class: "bike-750" }, expected: ["hawk-750"] },
+    { type: "car", filters: { class: "car-m" }, expected: ["note-1300"] },
+    { type: "car", filters: { class: "bike-125" }, expected: [] },
+    { type: "scooter", filters: { cc: "51to125" }, expected: ["pcx-125"] },
+    { type: "scooter", filters: { cc: "upto50" }, expected: ["today-50", "vino-50"] },
+    { type: "scooter", filters: { cc: "over400" }, expected: [] },
+    { type: "motorcycle", filters: { cc: "over400" }, expected: ["hawk-750"] },
+    { type: "motorcycle", filters: { cc: "126to400" }, expected: ["rebel-250"] },
+    // A band means nothing for a car.
+    { type: "car", filters: { cc: "upto50" }, expected: ["note-1300", "nbox-660"] },
+  ];
+  for (const locale of ["en", "ko"] as const) {
+    for (const { type, filters, expected } of narrowed) {
+      const path = `/${locale}/rentals?${anyPackage(date, type, filters)}`;
+      assertResults(await listing(path), expected, path);
+    }
+  }
+
+  // The same catalog with a package chosen: that package alone decides, for the models it prices, and so does its window.
+  const chosenSearches: { type: string; packageId: string; expected: string[] }[] = [
+    { type: "scooter", packageId: "day-1", expected: ["today-50", "vino-50"] },
+    { type: "scooter", packageId: "day-3", expected: ["pcx-125", "today-50", "vino-50"] },
+    { type: "motorcycle", packageId: "day-3", expected: ["rebel-250"] },
+    { type: "car", packageId: "car-same", expected: ["nbox-660"] },
+    { type: "car", packageId: "car-two", expected: ["note-1300", "nbox-660"] },
+    // What the guest chose stands, even across types.
+    { type: "scooter", packageId: "car-same", expected: [] },
+    { type: "car", packageId: "day-1", expected: [] },
+  ];
+  for (const { type, packageId, expected } of chosenSearches) {
+    const path = `/en/rentals?${anyPackage(date, type, { package: packageId })}`;
+    const main = await listing(path);
+    assertResults(main, expected, path);
+    assert.equal(chosen(filterForm(main, path), "package"), packageId, `${path}: package select`);
+    assertMoney(main, catalog, packageId, path);
+  }
+
+  // A search is still a date and a time: without either the type waits for it.
+  for (const query of [`type=car&date=${date}`, `type=car&date=${date}&time=&package=`, "type=car&time=10:00"]) {
+    const path = `/en/rentals?${query}`;
+    const main = await listing(path);
+    assertBrowsing(main, OWN_ACTIVE, path);
+    assertNotice(main, "data-search-prompt", "en", path);
+  }
 });
 
 // The card.
