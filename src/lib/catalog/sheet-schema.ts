@@ -34,6 +34,9 @@ function inEachLocale(field: string): string[] {
 
 const NAMES = inEachLocale("name");
 
+/** The columns guests read. They are published as typed, trimmed and nothing else: NFKC would turn `，` into `,`. */
+const DISPLAY_COLUMNS = new Set([...NAMES, ...inEachLocale("summary"), ...inEachLocale("description")]);
+
 const STATUS = "publish_status";
 
 export const BOOKINGS_COLUMNS = [
@@ -83,7 +86,7 @@ const SLUG_MAX_LENGTH = 40;
 const WHOLE_NUMBER = /^\d+$/;
 const YEN = /^¥?(\d{1,3}(?:,\d{3})+|\d+)円?$/;
 const DATE_TIME = /^(\S+) (\S+)$/;
-const COMMAS = /[,，]/;
+const COMMAS = /[,，、]/;
 const MINUTES_PER_DAY = 1440;
 const MOPED_OVERRIDE_MAX_CC = 125;
 
@@ -101,9 +104,12 @@ function attempt<T>(parse: () => T): T | null {
   }
 }
 
-/** Text is normalized before any check, and "" stands for every kind of empty cell. */
-function readCell(value: unknown): Cell {
-  if (typeof value === "string") return value.normalize("NFKC").trim();
+/**
+ * Text is normalized (NFKC) and trimmed before any check, and "" stands for every kind of empty cell. `asTyped` only
+ * trims, for the display text of DISPLAY_COLUMNS: a cell of only spaces, ideographic ones too, is still empty.
+ */
+function readCell(value: unknown, asTyped = false): Cell {
+  if (typeof value === "string") return asTyped ? value.trim() : value.normalize("NFKC").trim();
   return typeof value === "number" || typeof value === "boolean" ? value : "";
 }
 
@@ -297,7 +303,7 @@ function readTab(raw: Workbook, tab: Tab, fatal: string[]): Row[] | null {
   const rows: Row[] = [];
   body.forEach((cells, index) => {
     const raw = (column: string): unknown => cells[indexes.get(column) as number];
-    const read = new Map(dataColumns.map((column) => [column, readCell(raw(column))]));
+    const read = new Map(dataColumns.map((column) => [column, readCell(raw(column), DISPLAY_COLUMNS.has(column))]));
     if ([...read.values()].some((cell) => cell !== "" && cell !== false)) rows.push(new Row(tab, index + 2, read, raw));
   });
   return rows;
@@ -433,7 +439,8 @@ function readLicenseClass(row: Row, typeId: string, engineCc: number): LicenseCl
   return override ?? licenseClassOfCc(engineCc);
 }
 
-/** Drive file names, which #17 matches against the Drive listing, so text in this one column skips normalizing. */
+/** Drive file names, which #17 matches against the Drive listing, so text in this one column skips normalizing.
+ * A comma, the full-width comma and the Japanese 、 all separate names. */
 function readPhotos(row: Row): string[] {
   const cell = row.raw("photos");
   return (typeof cell === "string" ? cell : row.text("photos"))
