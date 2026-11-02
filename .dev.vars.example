@@ -1,8 +1,26 @@
-# Local secrets for `npm run dev` and wrangler. Copy to .dev.vars (gitignored, copied into worktrees) and fill in.
-SQUARE_ACCESS_TOKEN=
-SQUARE_WEBHOOK_SIGNATURE_KEY=
-GOOGLE_SA_EMAIL=
-GOOGLE_SA_PRIVATE_KEY=
-PUBLISH_SECRET=
-MAIL_SECRET=
-CANCEL_LINK_SECRET=
+# Local secrets for `npm run dev` and `wrangler dev`: exactly the secrets declared in src/env.d.ts.
+# Copy to .dev.vars (gitignored, copied into worktrees) and replace every placeholder. Never commit real values.
+# The non-secret vars live in wrangler.jsonc; a line here with the same name overrides it locally (docs/local-dev.md).
+# Dotenv syntax: one NAME=value per line, no spaces around =. Wrap a value in double quotes if it contains spaces or \n.
+
+# Square developer console > your application > Credentials > "Sandbox" Access token.
+SQUARE_ACCESS_TOKEN=replace-me-square-sandbox-access-token
+
+# Square developer console > your application > Webhooks > Subscriptions > the subscription's "Signature key".
+SQUARE_WEBHOOK_SIGNATURE_KEY=replace-me-square-webhook-signature-key
+
+# The "client_email" field of the Google service account's JSON key file.
+GOOGLE_SA_EMAIL=replace-me@replace-me.iam.gserviceaccount.com
+
+# The "private_key" field of the same JSON key file. It is a multi-line PEM, so keep it on ONE line in double
+# quotes with the line breaks written as \n, exactly as the JSON file has them (the "\n" escapes become real
+# newlines when wrangler reads the file). Paste the JSON string's content between the quotes.
+GOOGLE_SA_PRIVATE_KEY="replace-me-paste-the-private_key-value-here-with-its-backslash-n-escapes"
+
+# Random strings you generate yourself, one per secret: `openssl rand -hex 32`.
+# PUBLISH_SECRET: signs the sheet's Publish call to the Worker; set the same value in the Apps Script Script Properties.
+PUBLISH_SECRET=replace-me-openssl-rand-hex-32
+# MAIL_SECRET: signs the Worker's calls to the Apps Script mail web app; set the same value in its Script Properties.
+MAIL_SECRET=replace-me-openssl-rand-hex-32
+# CANCEL_LINK_SECRET: signs the guests' cancel links. Used only by the Worker, so it is not shared anywhere.
+CANCEL_LINK_SECRET=replace-me-openssl-rand-hex-32
