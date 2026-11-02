@@ -5,6 +5,7 @@ const JST_ = "Asia/Tokyo";
 const LOCK_WAIT_MS_ = 10000;
 const MAX_ROUNDS_ = 10;
 const DETAIL_LIMIT_ = 300;
+const NAMED_ERROR_LIMIT_ = 10;
 
 /** A copy of SHEET_TABS in src/lib/catalog/sheet-schema.ts, which this file cannot import. A test keeps them equal. */
 const SHEET_TABS_ = {
@@ -155,10 +156,12 @@ function count_(value) {
 /**
  * Calls a follow-up step while it reports work remaining and answers its PublishLog cell. The catalog is already
  * published by now, so a step that fails ends only that step: the next ones still have their own work to do.
+ * Work totals across rounds. Errors do not: every call reports them again until staff fix them, so the last answered
+ * round has the whole list.
  */
 function runStep_(run, name, path, doneField) {
   let done = 0;
-  let errors = 0;
+  let errors = [];
   let remaining = 0;
   let rounds = 0;
   let failed = false;
@@ -166,7 +169,7 @@ function runStep_(run, name, path, doneField) {
     do {
       const result = signedPost_(path, { requestedBy: run.user });
       done += count_(result[doneField]);
-      errors += count_(result.errors);
+      errors = result.errors;
       remaining = count_(result.remaining);
       rounds += 1;
     } while (remaining > 0 && rounds < MAX_ROUNDS_);
@@ -175,11 +178,23 @@ function runStep_(run, name, path, doneField) {
     run.messages.push(`${name} failed: ${error.message}`);
   }
   if (remaining > 0) run.messages.push(`${name}: ${remaining} still remain, press Publish again to finish them`);
+  run.messages.push(...namedErrorLines_(name, errors));
 
-  let cell = `${done} ${doneField}, ${errors} errors`;
+  let cell = `${done} ${doneField}, ${count_(errors)} errors`;
   if (remaining > 0) cell += `, ${remaining} remaining`;
   if (failed) cell += ", failed";
   return cell;
+}
+
+/** The `{ name, message }` entries of a step's errors, for staff. A step may send a count, or entries with no name. */
+function namedErrorLines_(stepName, errors) {
+  const named = Array.isArray(errors) ? errors.filter((error) => typeof error?.name === "string") : [];
+  if (named.length === 0) return [];
+
+  const listed = named.slice(0, NAMED_ERROR_LIMIT_);
+  const total = `${stepName} with errors: ${errors.length}`;
+  const heading = errors.length > listed.length ? `${total}, first ${listed.length} listed` : total;
+  return [heading, ...listed.map((error) => `${error.name}: ${error.message}`)];
 }
 
 /** Posts the envelope verifyEnvelope in src/lib/crypto.ts checks, and answers the JSON object the Worker sends back. */

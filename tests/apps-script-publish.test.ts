@@ -159,6 +159,127 @@ const SHAPES: { name: string; many(count: number, item: unknown): unknown }[] = 
   { name: "lists", many: (count, item) => Array.from({ length: count }, () => item) },
 ];
 
+/** Numbers the tests below never look for, so a count found in the alert can only be the step's under test. */
+const QUIET_ROUTES: Record<string, Route> = {
+  [PUBLISH]: { body: { ...REPORT, version: 9412, counts: { ok: 900, warning: 800, error: 700 } } },
+  [BLOCKS]: { body: { processed: 901, remaining: 0, errors: [] } },
+  [PHOTOS]: { body: { copied: 902, skipped: [], errors: [], remaining: 0 } },
+  [ASSIGNMENTS]: { body: { applied: 903, errors: [] } },
+};
+
+/** Work left after a round that is not the last, and no count these tests look for. */
+const LEFT_OVER = 500;
+
+// A few photo errors all reach staff. The cap is free up to MOST_PHOTO_ERRORS, and these tests do not pin it.
+const FEW_PHOTO_ERRORS = 3;
+const MOST_PHOTO_ERRORS = 10;
+
+type PhotoError = { name: string; message: string };
+
+/** Distinct entries with no digits, so a number in the alert can only be a count. Fewer is a prefix of more. */
+function photoErrors(count: number): PhotoError[] {
+  return Array.from({ length: count }, (_, i) => {
+    const code = String.fromCharCode(97 + Math.floor(i / 26), 97 + (i % 26));
+    return { name: `photo-${code}.jpg`, message: `Reason ${code} from Drive` };
+  });
+}
+
+type LoopedStep = {
+  label: string;
+  path: string;
+  column: "blocks" | "photos";
+  round(errors: number, remaining: number): Reply;
+  /** The entries a round with this many errors names. */
+  named(errors: number): PhotoError[];
+};
+
+const noNames = (): PhotoError[] => [];
+
+const PHOTO_LIST: LoopedStep = {
+  label: "photos with an error list",
+  path: PHOTOS,
+  column: "photos",
+  round: (errors, remaining) => ({ body: { copied: 300, skipped: [], errors: photoErrors(errors), remaining } }),
+  named: photoErrors,
+};
+
+/** Both steps report every problem on every call, so a problem nobody fixed comes back each round. */
+const LOOPED_STEPS: LoopedStep[] = [
+  {
+    label: "blocks with an error count",
+    path: BLOCKS,
+    column: "blocks",
+    round: (errors, remaining) => ({ body: { processed: 200, remaining, errors } }),
+    named: noNames,
+  },
+  {
+    label: "blocks with an error list",
+    path: BLOCKS,
+    column: "blocks",
+    round: (errors, remaining) => ({
+      body: { processed: 200, remaining, errors: Array.from({ length: errors }, () => ({ message: "overlaps" })) },
+    }),
+    named: noNames,
+  },
+  {
+    label: "photos with an error count",
+    path: PHOTOS,
+    column: "photos",
+    round: (errors, remaining) => ({ body: { copied: 300, skipped: 0, errors, remaining } }),
+    named: noNames,
+  },
+  PHOTO_LIST,
+];
+
+/** One step's replies, a reply per entry in `errors`, ending in `failure` when there is one. */
+function publishRounds(step: LoopedStep, errors: number[], failure?: Reply): { alert: string; row: unknown[] } {
+  const finished = errors.length - 1;
+  const answers = errors.map((count, i) => step.round(count, failure === undefined && i === finished ? 0 : LEFT_OVER));
+  const replies = failure === undefined ? answers : [...answers, failure];
+  const script = world({ routes: { ...QUIET_ROUTES, [step.path]: replies } });
+  script.call("publish");
+
+  const rounds = paths(script).filter((path) => path === step.path).length;
+  assert.equal(rounds, replies.length, `${step.label}: every round ran`);
+  assert.ok(paths(script).includes(ASSIGNMENTS), `${step.label}: the steps after it still ran`);
+  return settled(script);
+}
+
+/** All of a few, some of many, each once with its reason, and nothing only an earlier round reported. */
+function assertPhotoList(text: string, current: PhotoError[], stale: PhotoError[], what: string): void {
+  const shown = current.filter(({ name }) => text.includes(name));
+  const least = Math.min(current.length, FEW_PHOTO_ERRORS);
+  assert.ok(
+    shown.length >= least && shown.length <= MOST_PHOTO_ERRORS,
+    `${what} shows ${shown.length} of ${current.length} names: ${text}`,
+  );
+  for (const { name, message } of shown) {
+    assert.equal(text.split(name).length - 1, 1, `${what} shows ${name} once: ${text}`);
+    assert.ok(text.includes(message), `${what} shows why ${name} failed: ${text}`);
+  }
+  for (const { name } of stale) assert.ok(!text.includes(name), `${what} no longer lists ${name}: ${text}`);
+}
+
+type RoundsCase = { errors: number[]; shows: number; not: number[] };
+
+/** The alert and the log tell staff the last answered round's errors, whatever came before it. */
+function assertLastRoundReported(step: LoopedStep, rounds: RoundsCase, alert: string, row: unknown[]): void {
+  const { errors, shows, not } = rounds;
+  const what = `${step.label} over ${errors.join(", ")}`;
+  for (const [where, text] of [
+    ["alert", alert],
+    [`${step.column} cell`, cell(row, step.column)],
+  ]) {
+    assertHasNumbers(text, [shows], `the ${where} for ${what}`);
+    for (const value of not) assert.ok(!hasNumber(text, value), `the ${where} for ${what} omits ${value}: ${text}`);
+  }
+
+  const current = step.named(shows);
+  const stale = step.named(Math.max(...errors)).slice(shows);
+  assertPhotoList(alert, current, stale, `the alert for ${what}`);
+  assertPhotoList(cell(row, "message"), current, stale, `the message cell for ${what}`);
+}
+
 test("publish signs requests the Worker accepts", async () => {
   const cases = [
     { secret: SECRET, baseUrl: BASE_URL, user: USER },
@@ -377,6 +498,98 @@ test("errors from the follow-up steps reach the alert and the log", () => {
     assertHasNumbers(cell(row, "blocks"), [4], `the ${name} blocks cell`);
     assertHasNumbers(cell(row, "photos"), [6], `the ${name} photos cell`);
     assertHasNumbers(cell(row, "assignments"), [8], `the ${name} assignments cell`);
+  }
+});
+
+test("errors that come back every round count once", () => {
+  const cases: RoundsCase[] = [
+    { errors: [2, 2, 2], shows: 2, not: [6] },
+    { errors: [3, 3], shows: 3, not: [6] },
+    { errors: [3, 3, 3, 3], shows: 3, not: [12] },
+    { errors: [4, 4, 4], shows: 4, not: [12] },
+    { errors: [4], shows: 4, not: [] },
+    { errors: Array.from({ length: ROUND_CAP }, () => 2), shows: 2, not: [20] },
+  ];
+  for (const step of LOOPED_STEPS) {
+    for (const rounds of cases) {
+      const { alert, row } = publishRounds(step, rounds.errors);
+      // The cell, since a heading over the photo list may well say "failed". A count has no names to list, not a crash.
+      assert.doesNotMatch(cell(row, step.column), FAILED, `${step.label}: the step did not fail`);
+      assertLastRoundReported(step, rounds, alert, row);
+    }
+  }
+});
+
+test("errors that change between rounds show the last round's", () => {
+  const cases: RoundsCase[] = [
+    // Copy failures can clear on the next round, so the worst round is not the answer either.
+    { errors: [3, 1], shows: 1, not: [4, 3] },
+    { errors: [6, 4, 1], shows: 1, not: [11, 6] },
+    { errors: [2, 0], shows: 0, not: [2] },
+    { errors: [1, 3], shows: 3, not: [4] },
+  ];
+  for (const step of LOOPED_STEPS) {
+    for (const rounds of cases) {
+      const { alert, row } = publishRounds(step, rounds.errors);
+      assertLastRoundReported(step, rounds, alert, row);
+    }
+  }
+});
+
+test("a round that fails keeps the last answered round's errors", () => {
+  const failures: Reply[] = [
+    { status: 503, body: "upstream busy" },
+    { throws: "Timeout: reservation-one.example.dev" },
+    { body: "<html>Bad gateway</html>" },
+  ];
+  const cases: RoundsCase[] = [
+    { errors: [3, 1], shows: 1, not: [4, 3] },
+    { errors: [2, 2, 2], shows: 2, not: [6] },
+    { errors: [2, 0], shows: 0, not: [2] },
+    { errors: [7], shows: 7, not: [] },
+  ];
+  for (const step of LOOPED_STEPS) {
+    for (const rounds of cases) {
+      for (const failure of failures) {
+        const { alert, row } = publishRounds(step, rounds.errors, failure);
+        assert.match(alert, FAILED, `${step.label}: the alert says the step failed`);
+        assertLastRoundReported(step, rounds, alert, row);
+      }
+    }
+  }
+});
+
+test("photo errors reach staff with each name and reason", () => {
+  // The photos step writes nothing back to the sheet, so this is the only report staff get.
+  const problems: PhotoError[] = [
+    { name: "pcx125 front.jpg", message: "Not in the Drive folder" },
+    { name: "フォルツァ 横.png", message: "More than one file in the Drive folder has this name" },
+    { name: "n-van.webp", message: "7340032 bytes is over the limit of 5242880" },
+  ];
+  for (const count of [1, 2, FEW_PHOTO_ERRORS]) {
+    const errors = problems.slice(0, count);
+    const script = world({
+      routes: { ...QUIET_ROUTES, [PHOTOS]: { body: { copied: 904, skipped: [], errors, remaining: 0 } } },
+    });
+    script.call("publish");
+    const { alert, row } = settled(script);
+    assertHasNumbers(alert, [count], "the alert");
+    assertPhotoList(alert, errors, [], "the alert");
+    assertPhotoList(cell(row, "message"), errors, [], "the message cell");
+  }
+});
+
+test("a long list of photo errors is capped and states the total", () => {
+  const cases: RoundsCase[] = [
+    { errors: [MOST_PHOTO_ERRORS + 1], shows: MOST_PHOTO_ERRORS + 1, not: [] },
+    { errors: [25], shows: 25, not: [] },
+    { errors: [25, 25, 25], shows: 25, not: [75] },
+    { errors: [60, 60], shows: 60, not: [120] },
+    { errors: [60, 25], shows: 25, not: [85, 60] },
+  ];
+  for (const rounds of cases) {
+    const { alert, row } = publishRounds(PHOTO_LIST, rounds.errors);
+    assertLastRoundReported(PHOTO_LIST, rounds, alert, row);
   }
 });
 
