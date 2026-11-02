@@ -2,6 +2,7 @@
 // with fakes of the Google services the script reaches. The context has no Node globals, so Buffer, fetch and
 // TextEncoder are missing there as they are in Apps Script. Values crossing out of the context are copied into plain
 // arrays, because an array built in another realm fails assert's deepEqual on its prototype.
+// loadWebApp is the mail web app's side: each POST is a new execution, as on Google, sharing only what Google keeps.
 import { createHmac } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { createContext, Script } from "node:vm";
@@ -39,6 +40,41 @@ export type Options = {
   lockHeldElsewhere?: boolean;
   /** Replaces the digest, for checking the hex conversion on chosen bytes. */
   signatureBytes?: number[];
+  /** What Google keeps between web app executions. Given, it also sets the time the script sees. */
+  web?: WebState;
+};
+
+export type CacheEntry = { value: string; expiresAt: number };
+
+/** Google's state, and the time the script sees, moved by hand so that the 5-minute edge and 6-hour cache are exact. */
+export type WebState = {
+  now: number;
+  /** MailApp.getRemainingDailyQuota, which a sent email lowers. */
+  quota: number;
+  /** The messages MailApp.sendEmail took, copied. */
+  sent: Record<string, unknown>[];
+  /** Calls to MailApp.sendEmail, the ones that threw included. */
+  sendCalls: number;
+  /** The next calls to MailApp.sendEmail throw these, one each. */
+  sendFailures: string[];
+  cache: Map<string, CacheEntry>;
+};
+
+export type WebAppOptions = {
+  properties?: Record<string, string>;
+  now: number;
+  quota?: number;
+  sendFailures?: string[];
+};
+
+export type WebReply = { text: string; mimeType: unknown };
+
+export type WebApp = {
+  state: WebState;
+  /** A POST with this raw body. */
+  post(body: string): WebReply;
+  /** doPost with an event of the test's choosing, for a request that has no ordinary body. */
+  deliver(event?: unknown): WebReply;
 };
 
 export type AppsScriptWorld = {
@@ -141,6 +177,95 @@ function fakeRange(tab: FakeTab, row: number, column: number, numRows: number, n
   };
   return range;
 }
+
+function fakeTextOutput(initial: string) {
+  let content = initial;
+  let mimeType: unknown = "TEXT";
+  const output = {
+    getContent: () => content,
+    getMimeType: () => mimeType,
+    setContent(text: unknown) {
+      content = String(text);
+      return output;
+    },
+    append(text: unknown) {
+      content += String(text);
+      return output;
+    },
+    setMimeType(next: unknown) {
+      mimeType = next;
+      return output;
+    },
+  };
+  return output;
+}
+
+function fakeMailApp(web: WebState) {
+  return {
+    getRemainingDailyQuota: () => web.quota,
+    sendEmail(...args: unknown[]) {
+      const [message] = args;
+      if (args.length !== 1 || typeof message !== "object" || message === null) {
+        throw new Error("this fake's sendEmail takes one message object");
+      }
+      web.sendCalls += 1;
+      const failure = web.sendFailures.shift();
+      if (failure !== undefined) throw new Error(failure);
+      if (web.quota <= 0) throw new Error("Service invoked too many times for one day: email.");
+      web.quota -= 1;
+      web.sent.push({ ...message });
+    },
+  };
+}
+
+// CacheService's own limits: a value with no expiration lasts 10 minutes, and no value lasts past 6 hours. Keys have
+// Google's documented limit, "The maximum length of a key is 250 characters", which the reference states on put and
+// putAll and leaves unsaid for get and remove. This fake throws at all three: such a key can never have been stored, so
+// a get answering null would read as "not seen yet" and a remove as done, each hiding the bug behind a quiet miss.
+const CACHE_DEFAULT_SECONDS = 600;
+const CACHE_MAX_SECONDS = 21_600;
+const CACHE_MAX_KEY_LENGTH = 250;
+
+function assertCacheKey(key: string): void {
+  if (key.length > CACHE_MAX_KEY_LENGTH) {
+    throw new Error(`The cache key has ${key.length} characters, over the limit of ${CACHE_MAX_KEY_LENGTH}`);
+  }
+}
+
+function fakeCache(web: WebState) {
+  return {
+    get(key: string) {
+      assertCacheKey(key);
+      const entry = web.cache.get(key);
+      return entry !== undefined && web.now < entry.expiresAt ? entry.value : null;
+    },
+    put(key: string, value: string, seconds: number = CACHE_DEFAULT_SECONDS) {
+      assertCacheKey(key);
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > CACHE_MAX_SECONDS) {
+        throw new Error(`The cache expiration ${seconds} is outside 1 to ${CACHE_MAX_SECONDS} seconds`);
+      }
+      web.cache.set(key, { value: String(value), expiresAt: web.now + seconds * 1000 });
+    },
+    remove(key: string) {
+      assertCacheKey(key);
+      web.cache.delete(key);
+    },
+  };
+}
+
+// Run inside the context, so that both Date.now() and new Date() in the script read the test's clock.
+const SCRIPT_CLOCK = `(clock) => {
+  const RealDate = Date;
+  globalThis.Date = class extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) super(clock());
+      else super(...args);
+    }
+    static now() {
+      return clock();
+    }
+  };
+}`;
 
 function fakeSheet(name: string, tab: FakeTab) {
   const sheet = {
@@ -250,6 +375,7 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
   };
 
   const LockService = {
+    getScriptLock: () => LockService.getDocumentLock(),
     getDocumentLock() {
       const lock = {
         tryLock(timeoutMs: number) {
@@ -267,10 +393,19 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
     },
   };
 
+  const web = options.web ?? newWebState({ now: Date.now() });
+  const cache = fakeCache(web);
+
   const context: Record<string, unknown> = createContext({
     SpreadsheetApp: { getActive: () => spreadsheet, getActiveSpreadsheet: () => spreadsheet, getUi: () => ui },
     UrlFetchApp,
     Utilities,
+    MailApp: fakeMailApp(web),
+    CacheService: { getScriptCache: () => cache, getDocumentCache: () => cache, getUserCache: () => cache },
+    ContentService: {
+      MimeType: { JSON: "JSON", TEXT: "TEXT" },
+      createTextOutput: (content: unknown = "") => fakeTextOutput(String(content)),
+    },
     PropertiesService: {
       getScriptProperties: () => ({ getProperty: (name: string) => options.properties?.[name] ?? null }),
     },
@@ -288,6 +423,11 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
     Logger: { log() {} },
     console: { log() {}, info() {}, warn() {}, error() {} },
   });
+
+  if (options.web !== undefined) {
+    const useClock = new Script(SCRIPT_CLOCK).runInContext(context) as (clock: () => number) => void;
+    useClock(() => web.now);
+  }
 
   for (const name of scripts) {
     new Script(readFileSync(new URL(name, SCRIPT_DIR), "utf8"), { filename: `apps-script/${name}` }).runInContext(
@@ -309,4 +449,31 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
     timeZone: () => timeZone,
     lock: { held: () => lockOwner !== null, timeouts },
   };
+}
+
+function newWebState({ now, quota = 100, sendFailures = [] }: WebAppOptions): WebState {
+  return { now, quota, sent: [], sendCalls: 0, sendFailures: [...sendFailures], cache: new Map() };
+}
+
+/** The event Apps Script hands doPost for a POST with this body. */
+function postEvent(contents: string) {
+  const postData = { contents, length: contents.length, type: "application/json", name: "postData" };
+  return { parameter: {}, parameters: {}, queryString: "", contextPath: "", contentLength: contents.length, postData };
+}
+
+/**
+ * The deployed web app. Every request is a new execution with fresh globals, so nothing the script keeps in a variable
+ * reaches the next request. A throw out of doPost stays a throw here: on Google it is an HTML error page, no answer.
+ */
+export function loadWebApp(options: WebAppOptions): WebApp {
+  const state = newWebState(options);
+  const deliver = (event?: unknown): WebReply => {
+    const script = loadAppsScript({ properties: options.properties, web: state });
+    const output = script.call("doPost", event) as Partial<ReturnType<typeof fakeTextOutput>> | undefined;
+    if (typeof output?.getContent !== "function" || typeof output.getMimeType !== "function") {
+      throw new Error("doPost returned no ContentService output, which Google turns into an error page");
+    }
+    return { text: output.getContent(), mimeType: output.getMimeType() };
+  };
+  return { state, deliver, post: (body) => deliver(postEvent(body)) };
 }
