@@ -128,12 +128,12 @@ function percent(value: number): RegExp {
   return new RegExp(`(?<![\\d.,])${value}\\s*%`);
 }
 
-/** How a sentence may say "the pickup day" instead of 0 days. */
+/** How a sentence may say "the pickup day" or "the pickup time" instead of 0 days. */
 const pickupDay: Record<Locale, RegExp> = {
-  ja: /当日/,
-  en: /\bsame day\b|\bday of\b|\bon the day\b|\bpickup day\b/i,
-  "zh-cn": /当天|当日/,
-  ko: /당일/,
+  ja: /当日|受(?:け)?取(?:り)?時(?:刻|間)/,
+  en: /\bsame day\b|\bday of\b|\bon the day\b|\bpickup day\b|\bpickup time\b/i,
+  "zh-cn": /当天|当日|(?:取车|提车)时(?:间|刻)/,
+  ko: /당일|(?:픽업|인수)\s*시(?:간|각)/,
 };
 
 /** How a sentence may say "no refund" instead of 0%. */
@@ -210,6 +210,141 @@ test("tiers stored out of order are listed highest first", async () => {
 
   await publish(catalogWith({ cancellationTiers: stored }));
   for (const locale of LOCALES) await assertTiersListed(locale, highestFirst);
+});
+
+/** "Before the pickup time", in each locale. The pickup time must be named and the sentence must put the refund ahead of it. */
+const beforePickupTime: Record<Locale, RegExp> = {
+  ja: /受(?:け)?取(?:り)?時(?:刻|間)[^。]{0,10}(?:前|まで|以前)/,
+  en: /\b(?:before|until|till|up to|prior to)\b[^.:]{0,40}\bpickup time\b/i,
+  "zh-cn": /(?:取车|提车)时(?:间|刻)[^。，]{0,6}(?:前|截止|为止)/,
+  ko: /(?:픽업|인수)\s*시(?:간|각)[^.]{0,8}(?:전|까지)/,
+};
+
+/** What the page said before this ticket, or wording that reaches the pickup day or past the pickup time. */
+const upToAndIncludingPickupDay: Record<Locale, RegExp> = {
+  ja: /当日まで/,
+  en: /up to and including|\bincluding\b|\bor after\b|\band after\b/i,
+  "zh-cn": /直至取车当天|取车当天/,
+  ko: /당일까지/,
+};
+
+/** "If no line above applies" and "there is no refund", each in the locale. A closing line must say both. */
+const nothingApplies: Record<Locale, RegExp> = {
+  ja: /当てはまらない|当てはまりません|該当しない|該当しません|適用されない|適用されません|あてはまらない|あてはまりません/,
+  en: /\b(?:no|none|not|neither)\b[^.]*\b(?:appl|match|fit|cover)|\b(?:isn't|doesn't|don't)\b[^.]*\b(?:appl|match|fit)/i,
+  "zh-cn": /(?:没有|无|均不|都不|不)[^。，]{0,12}(?:符合|适用|匹配)|不符合|不适用|均不适用/,
+  ko: /(?:해당하는|맞는|적용되는|일치하는)[^.]*(?:없|않)|(?:해당|적용|일치)[^.]*(?:않|없)/,
+};
+
+const noRefundSaid: Record<Locale, RegExp> = {
+  ja: /返金[^。]*(?:ません|ない|なし|不可)/,
+  en: /\bno refund\b|\bnot (?:be )?refund|\bnon-?refundable\b|\brefund[^.]*\b(?:not|none|zero)\b/i,
+  "zh-cn": /不(?:予)?退(?:款|还)?|无退款|没有退款|不可退|不能退|无法退/,
+  ko: /환불[^.]*(?:않|없|불가)/,
+};
+
+/** The places of the blocks in the cancellation section that are the closing "no line applies, no refund" line. */
+function closingLines(blocks: string[], locale: Locale): number[] {
+  return blocks.flatMap((block, place) =>
+    nothingApplies[locale].test(block) && noRefundSaid[locale].test(block) ? [place] : [],
+  );
+}
+
+test("the pickup-day tier says before the pickup time in each locale", async () => {
+  // Percents differ per catalog, and the other tiers carry other percents, so one fixed sentence cannot stand in.
+  const catalogs: CancellationTier[][] = [
+    [
+      { minDaysBefore: 7, refundPercent: 100 },
+      { minDaysBefore: 3, refundPercent: 50 },
+      { minDaysBefore: 0, refundPercent: 25 },
+    ],
+    [
+      { minDaysBefore: 14, refundPercent: 90 },
+      { minDaysBefore: 1, refundPercent: 40 },
+      { minDaysBefore: 0, refundPercent: 60 },
+    ],
+    [
+      { minDaysBefore: 5, refundPercent: 80 },
+      { minDaysBefore: 0, refundPercent: 100 },
+    ],
+    [
+      { minDaysBefore: 2, refundPercent: 70 },
+      { minDaysBefore: 0, refundPercent: 0 },
+    ],
+  ];
+
+  for (const tiers of catalogs) {
+    await publish(catalogWith({ cancellationTiers: tiers }));
+    const pickup = tiers.find((tier) => tier.minDaysBefore === 0) as CancellationTier;
+    for (const locale of LOCALES) {
+      const blocks = blocksOf((await policySections(locale)).cancellation);
+      const label = `${locale} (0 days: ${pickup.refundPercent}%)`;
+      const sentences = blocks.filter((block) => beforePickupTime[locale].test(block));
+      assert.equal(sentences.length, 1, `${label}: expected one before-the-pickup-time sentence in\n${blocks.join("\n")}`);
+      const sentence = sentences[0] as string;
+      assert.ok(
+        percent(pickup.refundPercent).test(sentence) || (pickup.refundPercent === 0 && noRefund[locale].test(sentence)),
+        `${label}: the pickup-time sentence does not carry the percent: ${sentence}`,
+      );
+      for (const other of tiers.filter((tier) => tier !== pickup && tier.refundPercent !== pickup.refundPercent)) {
+        assert.doesNotMatch(sentence, percent(other.refundPercent), `${label}: carries another tier's percent: ${sentence}`);
+      }
+      assertLocaleText(sentence, locale, label);
+      // Nowhere in the section does the old "up to and including the pickup day" survive.
+      for (const block of blocks) {
+        assert.doesNotMatch(block, upToAndIncludingPickupDay[locale], `${label}: old pickup-day wording in: ${block}`);
+      }
+    }
+    for (const locale of LOCALES) await assertTiersListed(locale, tiers);
+  }
+});
+
+test("the no-refund line appears in each locale", async () => {
+  const withZeroDayRow: CancellationTier[] = [
+    { minDaysBefore: 7, refundPercent: 100 },
+    { minDaysBefore: 3, refundPercent: 50 },
+    { minDaysBefore: 0, refundPercent: 20 },
+  ];
+  // Staff may publish tiers with no 0-day row; the system then refunds nothing in the last days.
+  const withoutZeroDayRow: CancellationTier[] = [
+    { minDaysBefore: 10, refundPercent: 90 },
+    { minDaysBefore: 2, refundPercent: 45 },
+  ];
+  const single: CancellationTier[] = [{ minDaysBefore: 4, refundPercent: 35 }];
+
+  for (const tiers of [withZeroDayRow, withoutZeroDayRow, single]) {
+    await publish(catalogWith({ cancellationTiers: tiers }));
+    for (const locale of LOCALES) {
+      const blocks = blocksOf((await policySections(locale)).cancellation);
+      const label = `${locale} (${tiers.map((tier) => `${tier.minDaysBefore}d`).join(", ")})`;
+      const lines = closingLines(blocks, locale);
+      assert.equal(lines.length, 1, `${label}: expected one no-refund line in\n${blocks.join("\n")}`);
+      const place = lines[0] as number;
+      const line = blocks[place] as string;
+      assertLocaleText(line, locale, label);
+      assert.ok(
+        tiers.every((tier) => !holdsTier(line, tier, locale)),
+        `${label}: the no-refund line is taken for a tier: ${line}`,
+      );
+      // It closes the list: every tier stands above it.
+      const last = Math.max(...tiers.map((tier) => blocks.findIndex((block) => holdsTier(block, tier, locale))));
+      assert.ok(place > last, `${label}: the no-refund line is not after the tiers in\n${blocks.join("\n")}`);
+      await assertTiersListed(locale, tiers);
+      // No 0-day row, no pickup-time tier sentence: the closing line stands in for it.
+      if (!tiers.some((tier) => tier.minDaysBefore === 0)) {
+        const pickupTier = blocks.filter((block) => beforePickupTime[locale].test(block));
+        assert.deepEqual(pickupTier, [], `${label}: a pickup-time tier is listed with no 0-day row`);
+      }
+    }
+  }
+
+  // Nothing published to apply: the section lists no tier and quotes no number.
+  await publish(catalogWith({ cancellationTiers: [] }));
+  for (const locale of LOCALES) {
+    const section = (await policySections(locale)).cancellation;
+    assert.doesNotMatch(section, /<li\b/i, `${locale}: tier list with no tiers published`);
+    assert.doesNotMatch(visibleText(section), /\d/, `${locale}: numbers with no tiers published`);
+  }
 });
 
 /** Words that mark text as a draft. */
