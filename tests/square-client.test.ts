@@ -318,6 +318,24 @@ const ROWS: Row[] = [
   unknownRow(304, "not modified", null),
 ];
 
+/**
+ * Present values of a text field that hold no text, as [label, value]. #41 matches on reference_id, so reading one of
+ * these as no reference finds no payment and expires a paid booking. The falsy ones are here because reading the field
+ * by truthiness lets them through.
+ * Ruling: a present null or empty string is one of these and not an absent field, because Square omits an empty field.
+ */
+function nonTextValues(): [string, unknown][] {
+  return [
+    ["a number", randomInt(1, 1_000_000)],
+    ["a null", null],
+    ["a false", false],
+    ["an object", { value: randomUUID() }],
+    ["an array", [randomUUID()]],
+    // Right type, so a check of the type alone lets it through.
+    ["an empty string", ""],
+  ];
+}
+
 /** Each way one payment or refund cannot be used, as [label, field, value]. Single results and list rows share it. */
 function unusableFields(): [string, string, unknown][] {
   const amount = randomInt(1, 1_000_000);
@@ -328,6 +346,9 @@ function unusableFields(): [string, string, unknown][] {
     ["no amount", "amount_money", { currency: "JPY" }],
     ["no currency", "amount_money", { amount }],
     ["a string amount", "amount_money", { amount: String(amount), currency: "JPY" }],
+    ...["reference_id", "payment_id", "created_at"].flatMap((field) =>
+      nonTextValues().map(([label, value]): [string, string, unknown] => [`${field} as ${label}`, field, value]),
+    ),
   ];
 }
 
@@ -1273,8 +1294,9 @@ test("a failure on any page fails the whole listing", { timeout: 10_000 }, async
 });
 
 test("an unusable row on any page fails the whole listing", async () => {
-  // Reconciliation reads these lists. A 2xx with a row missing its id, status, or numeric amount and currency says
-  // nothing about that money, so the listing is unknown as a whole, with no list and no partial list.
+  // Reconciliation reads these lists. A 2xx with a row missing its id, status, or numeric amount and currency, or with
+  // a reference_id, payment_id or created_at present but holding no text, says nothing about that money, so the
+  // listing is unknown as a whole, with no list and no partial list.
   const layouts: ("good" | "bad")[][][] = [
     [["good", "bad"]],
     [["bad", "good"]],
@@ -1327,5 +1349,59 @@ test("an unusable row on any page fails the whole listing", async () => {
         assert.equal(result[listing.key], undefined, description);
       }
     }
+  }
+});
+
+test("an absent reference_id, payment_id or created_at leaves a record usable", async () => {
+  // The other side of the present-field rows in unusableFields. Square omits an empty field: a Dashboard payment has no
+  // reference_id and an unlinked refund has no payment_id. No other test sends a record without created_at or a refund
+  // without payment_id, so requiring either would otherwise pass.
+  const absences: ["payment" | "refund", string[]][] = [
+    ["payment", ["reference_id"]],
+    ["payment", ["created_at"]],
+    ["payment", ["reference_id", "created_at"]],
+    ["refund", ["payment_id"]],
+    ["refund", ["created_at"]],
+    ["refund", ["payment_id", "created_at"]],
+  ];
+  const assertRead = (actual: Json | undefined, wire: Json, label: string) => {
+    assert.ok(actual, `${label}: no record`);
+    for (const field of ["id", "status", "reference_id", "payment_id", "created_at"]) {
+      assert.equal(actual[field], wire[field], `${label}: ${field}`);
+    }
+    assert.deepEqual({ amount: actual.amount, currency: actual.currency }, wire.amount_money, label);
+  };
+
+  for (const [resource, fields] of absences) {
+    const key = resource === "payment" ? "payments" : "refunds";
+    const whole = (): Json => (resource === "payment" ? wirePayment() : wireRefund());
+    const partial = () => Object.fromEntries(Object.entries(whole()).filter(([field]) => !fields.includes(field)));
+
+    for (const method of SINGLE_RESULT_METHODS.filter((candidate) => candidate.resource === resource)) {
+      const label = `${method.name} without ${fields.join(" and ")}`;
+      const wire = partial();
+      const { fetch } = recordingFetch(() => json(200, { [resource]: wire }));
+      const result = (await method.call(clientWith({ fetch }))) as Result;
+      assert.equal(result.kind, "ok", label);
+      assertRead(result[resource], wire, label);
+    }
+
+    // Beside whole rows, across a page break, every row stays in order and keeps its own fields.
+    const listing = LISTINGS.find((candidate) => candidate.key === key);
+    assert.ok(listing);
+    const pages: Json[][] = [
+      [whole(), partial()],
+      [partial(), whole()],
+    ];
+    const { fetch } = pagesInTurn([
+      JSON.stringify({ [key]: pages[0], cursor: `next+/=${randomUUID()}` }),
+      JSON.stringify({ [key]: pages[1] }),
+    ]);
+    const label = `${listing.name} without ${fields.join(" and ")}`;
+    const result = (await listing.run(clientWith({ fetch }), randomWindow())) as Result;
+    assert.equal(result.kind, "ok", label);
+    const rows = pages.flat();
+    assert.equal(result[key]?.length, rows.length, label);
+    rows.forEach((row, index) => assertRead(result[key]?.[index], row, `${label}, row ${index}`));
   }
 });

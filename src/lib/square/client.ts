@@ -86,6 +86,10 @@ function isText(value: unknown): value is string {
   return typeof value === "string" && value !== "";
 }
 
+function isAbsentOrText(value: unknown): value is string | undefined {
+  return value === undefined || isText(value);
+}
+
 function parseJson(text: string): unknown {
   try {
     return JSON.parse(text);
@@ -110,8 +114,9 @@ function keyTooLong(): SquareFailure {
 
 /**
  * The one check of a payment or a refund, for single results and list rows alike. Null means it says nothing usable
- * about that money. A Dashboard payment has no reference_id and an unlinked refund has no payment_id, so those can be
- * missing.
+ * about that money. Square omits an empty field: a Dashboard payment has no reference_id and an unlinked refund has no
+ * payment_id, so reference_id, payment_id and created_at can be absent. One that is present must hold text: #41 matches
+ * on reference_id, so reading a malformed one as absent finds no payment and expires a paid booking.
  */
 function readRecord(value: unknown): SquareRecord | null {
   if (!isRecord(value) || !isRecord(value.amount_money)) return null;
@@ -119,15 +124,8 @@ function readRecord(value: unknown): SquareRecord | null {
   const { amount, currency } = value.amount_money;
   if (!isText(id) || !isText(status) || !isText(currency)) return null;
   if (typeof amount !== "number" || !Number.isSafeInteger(amount)) return null;
-  return {
-    id,
-    status,
-    amount,
-    currency,
-    reference_id: isText(reference_id) ? reference_id : undefined,
-    payment_id: isText(payment_id) ? payment_id : undefined,
-    created_at: isText(created_at) ? created_at : undefined,
-  };
+  if (!isAbsentOrText(reference_id) || !isAbsentOrText(payment_id) || !isAbsentOrText(created_at)) return null;
+  return { id, status, amount, currency, reference_id, payment_id, created_at };
 }
 
 /**
