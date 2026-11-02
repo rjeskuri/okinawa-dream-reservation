@@ -7,6 +7,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import { test, type TestContext } from "node:test";
 import { inspect } from "node:util";
 import { createSquareClient } from "../src/lib/square/client.ts";
+import { squareClient } from "../src/server/square.ts";
 
 // The release marked Latest when the ticket was checked. Moving a money seam to a new API version is a decision, so a
 // bump changes this line too.
@@ -44,6 +45,7 @@ interface Recorded {
   method: string;
   headers: Headers;
   text: string;
+  redirect: string;
 }
 
 interface ClientOptions {
@@ -68,6 +70,7 @@ function recordingFetch(reply: (call: Recorded, index: number) => Response | Pro
       method: request.method,
       headers: request.headers,
       text: await request.text(),
+      redirect: request.redirect,
     };
     calls.push(call);
     return reply(call, calls.length - 1);
@@ -1043,6 +1046,78 @@ test("sandbox and production base URLs", async () => {
   }
 });
 
+test("an unknown SQUARE_ENV throws rather than falling back", () => {
+  // SQUARE_ENV reaches the client through a cast, so this check is all that stands between a mistyped var and the
+  // production URL. The inherited property names are here because `in` or a truthy lookup in the URL table lets them by.
+  const values: unknown[] = [
+    "staging",
+    "",
+    undefined,
+    null,
+    "prod",
+    "Production",
+    "SANDBOX",
+    "production ",
+    "constructor",
+    "toString",
+    "__proto__",
+  ];
+
+  for (const env of values) {
+    const label = `env ${inspect(env)}`;
+    const { fetch, calls } = recordingFetch(() => json(200, { payment: wirePayment() }));
+    assert.throws(() => clientWith({ env: env as Env, fetch }), Error, label);
+    assert.equal(calls.length, 0, `${label}: a request went out`);
+
+    // The Worker's own way in, so a default added before the cast cannot get past this check either. No method is
+    // called, so the real fetch it is handed stays unused.
+    const vars = { SQUARE_ENV: env, SQUARE_ACCESS_TOKEN: TOKEN, SQUARE_LOCATION_ID: LOCATION };
+    assert.throws(() => squareClient(vars as Parameters<typeof squareClient>[0]), Error, `${label}, squareClient`);
+  }
+
+  for (const env of ENVS) {
+    const vars = { SQUARE_ENV: env, SQUARE_ACCESS_TOKEN: TOKEN, SQUARE_LOCATION_ID: LOCATION };
+    assert.doesNotThrow(() => squareClient(vars as Parameters<typeof squareClient>[0]), env);
+  }
+});
+
+test("requests are sent with redirect manual", async () => {
+  // A followed redirect could carry the bearer token to another host, and would hide the 3xx that maps to unknown.
+  for (const env of ENVS) {
+    for (const method of METHODS) {
+      const label = `${env} ${method.name}`;
+      const { fetch, calls } = recordingFetch(() => okReply(method.resource));
+
+      const result = (await method.call(clientWith({ env, fetch }))) as Result;
+
+      assert.equal(result.kind, "ok", label);
+      assert.deepEqual(
+        calls.map((call) => call.redirect),
+        ["manual"],
+        label,
+      );
+    }
+  }
+
+  // Every page of a walk is its own request, and each one carries the token.
+  for (const listing of LISTINGS) {
+    const { fetch, calls } = pagesInTurn([
+      JSON.stringify({ [listing.key]: [listing.row().wire], cursor: `next+/=${randomUUID()}` }),
+      JSON.stringify({ [listing.key]: [listing.row().wire], cursor: `next+/=${randomUUID()}` }),
+      JSON.stringify({ [listing.key]: [listing.row().wire] }),
+    ]);
+
+    const result = (await listing.run(clientWith({ fetch }), randomWindow())) as Result;
+
+    assert.equal(result.kind, "ok", listing.name);
+    assert.deepEqual(
+      calls.map((call) => call.redirect),
+      ["manual", "manual", "manual"],
+      listing.name,
+    );
+  }
+});
+
 test("errors never contain the access token", { timeout: 30_000 }, async (t) => {
   const logged: string[] = [];
   for (const level of ["debug", "error", "info", "log", "warn"] as const) {
@@ -1288,6 +1363,59 @@ test("a failure on any page fails the whole listing", { timeout: 10_000 }, async
         assert.equal(result.kind, kind, description);
         assert.equal(calls.length, failingPage + 1, description);
         assert.equal(result[listing.key], undefined, description);
+      }
+    }
+  }
+});
+
+test("a 408 is unknown, never error", async () => {
+  // Square stopped waiting, which says nothing about whether the charge or refund went through. Error means no money
+  // moved and #34 retries one with a new idempotency key, so reading a 408 as error would charge a guest twice.
+  const bodies: [string, string | null][] = [
+    ["no body", null],
+    ["an empty body", ""],
+    ["plain text", "Request Timeout"],
+    ["an HTML page", "<html><body>Request Timeout</body></html>"],
+    ["JSON without errors", "{}"],
+    ["an empty errors list", '{"errors":[]}'],
+    ["JSON null", "null"],
+    ["REQUEST_TIMEOUT", errorsBody({ category: "API_ERROR", code: "REQUEST_TIMEOUT", detail: "Timed out" })],
+    ["a rejected REQUEST_TIMEOUT", errorsBody({ category: "INVALID_REQUEST_ERROR", code: "REQUEST_TIMEOUT" })],
+    // The status decides, as it does on a 5xx: on any other 4xx these would read as a decline or a rejection.
+    ["PAYMENT_METHOD_ERROR", errorsBody({ category: "PAYMENT_METHOD_ERROR", code: "CARD_DECLINED", detail: "No" })],
+    ["PAYMENT_METHOD_ERROR REQUEST_TIMEOUT", errorsBody({ category: "PAYMENT_METHOD_ERROR", code: "REQUEST_TIMEOUT" })],
+    ["a decline with the FAILED payment", declineWithPayment],
+    ["INVALID_REQUEST_ERROR", errorsBody({ category: "INVALID_REQUEST_ERROR", code: "BAD_REQUEST", detail: "No" })],
+  ];
+
+  for (const method of METHODS) {
+    for (const [label, body] of bodies) {
+      const { fetch } = recordingFetch(() => new Response(body, { status: 408 }));
+
+      const result = (await method.call(clientWith({ fetch }))) as Result;
+
+      const description = `408 with ${label}, ${method.name}`;
+      assertUnknown(result, description);
+      assert.equal(result[method.resource], undefined, description);
+    }
+  }
+
+  // Past the first page it still decides for the whole walk: no partial list and no reading on.
+  for (const listing of LISTINGS) {
+    for (const failingPage of [1, 2]) {
+      for (const [label, body] of bodies) {
+        const { fetch, calls } = recordingFetch((_call, index) =>
+          index === failingPage
+            ? new Response(body, { status: 408 })
+            : json(200, { [listing.key]: [listing.row().wire], cursor: `next-${index}` }),
+        );
+
+        const result = (await listing.run(clientWith({ fetch }), randomWindow())) as Result;
+
+        const description = `408 with ${label} on request ${failingPage}, ${listing.name}`;
+        assertUnknown(result, description);
+        assert.equal(result[listing.key], undefined, description);
+        assert.equal(calls.length, failingPage + 1, description);
       }
     }
   }

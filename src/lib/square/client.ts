@@ -218,6 +218,8 @@ export function createSquareClient(options: SquareClientOptions): SquareClient {
     }
     const { status, text } = reply;
     if (status >= 200 && status < 300) return { kind: "ok", body: parseJson(text) };
+    // A 408 may follow the charge too, and #34 retries an error with a new idempotency key, which would charge twice.
+    if (status === 408) return unknown(`Square answered HTTP ${status}`);
     if (status >= 400 && status < 500) return clientFailure(status, text);
     // A 5xx may follow the charge, whatever its body claims, and nothing in a 3xx says that no money moved.
     return unknown(`Square answered HTTP ${status}`);
