@@ -41,6 +41,37 @@ npm run dev
 - Stop the server with Ctrl-C. If your shell is an AI agent's, `astro dev` detaches itself instead; stop it with
   `npx astro dev stop`.
 
+## Demo site
+
+One command runs the built site with the shop's line-up and rates, on local data only. It needs no Cloudflare login, no
+Google account and no `.dev.vars` beyond the example:
+
+```sh
+scripts/demo.sh
+```
+
+It installs dependencies if `node_modules` is missing, copies `.dev.vars.example` to `.dev.vars` if that is missing, builds
+the site, applies the migrations, loads `seed/demo.sql`, puts the photos in the local R2 bucket, and starts the Worker on
+http://localhost:8787 until you press Ctrl-C. Run it again whenever you like: nothing fails or doubles, and bookings you
+made stay. An existing `.dev.vars` is left alone.
+
+- `seed/demo.sql` is transcribed from the shop's site. Its header lists what is a placeholder, including every deposit,
+  refund tier, plate and closed date. Models and vehicles it does not name, such as those of `seed/local.sql`, end up
+  inactive and retired.
+- `seed/local.sql` uses plain INSERTs, so it fails on a database that holds the demo. Delete `.wrangler/state` first.
+- `seed/photos/` holds one placeholder per model, and the seed's `photos` rows describe those files. To see the shop's own
+  photos, put them in `seed/photos-local/` under the same file names (`honda-pcx125.jpg`) and run the script again. That
+  folder is gitignored because the rights to those photos are unconfirmed. A local file goes in under the placeholder's
+  key, so its `/media` URL does not change, and a browser that has already cached that URL needs a hard reload.
+
+Trigger a cron while it runs, from a second terminal:
+
+```sh
+curl 'http://localhost:8787/cdn-cgi/handler/scheduled?cron=*/10+*+*+*+*'
+```
+
+[Crons locally](#crons-locally) has the details.
+
 ## Crons locally
 
 `astro dev` does not run crons. Run the built Worker with scheduled triggers enabled. It serves `dist/server` via

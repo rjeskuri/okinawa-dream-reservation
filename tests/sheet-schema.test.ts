@@ -517,13 +517,6 @@ const TEXT_SPELLINGS: Spelling[] = [
     },
   },
   {
-    name: "half-width katakana in a name",
-    edit: ["Packages", "day-1", "name_ja", "ﾃﾞｲﾘｰ"],
-    change: (catalog) => {
-      textsOf(catalog, "Packages", "day-1").ja.name = "デイリー";
-    },
-  },
-  {
     name: "full-width letters in a brand",
     edit: ["Models", "pcx-125", "brand", "Ｙａｍａｈａ"],
     change: (catalog) => {
@@ -617,6 +610,155 @@ test("normalizes full-width digits and yen formatting", async (t) => {
   });
 });
 
+// Display text is published as typed (#78): NFKC only helps where a cell is parsed or matched, and here it would turn
+// the full-width punctuation and circled digits staff type on a Japanese keyboard into something else. (The old
+// "half-width katakana in a name" entry of the list above expected ﾃﾞｲﾘｰ to publish as デイリー; that is the rule this
+// ticket removes, and the same text is now pinned as kept below.)
+const LOCALE_COLUMNS: [string, string][] = [
+  ["ja", "ja"],
+  ["en", "en"],
+  ["zh", "zh-cn"],
+  ["ko", "ko"],
+];
+
+/** [tab, key, field] of every localized text column. */
+const TEXT_TARGETS: [string, string, string][] = [
+  ["Types", "car", "name"],
+  ["RateClasses", "bike-125", "name"],
+  ["Packages", "day-1", "name"],
+  ["Models", "rebel-250", "name"],
+  ["Models", "rebel-250", "summary"],
+  ["Models", "pcx-125", "description"],
+  ["Options", "child-seat", "name"],
+];
+
+// Each one changes under NFKC, in a different way.
+const TYPED_TEXTS = [
+  "价格含税，押金另付！",
+  "①免許証",
+  "Ｒｅｂｅｌ　２５０（赤）",
+  "ﾃﾞｲﾘｰ",
+  "㈱沖縄　㎏・Ⅳ～",
+  "ご予約は１２時まで：ｅｍａｉｌ？",
+];
+
+test("text columns keep what staff typed", async (t) => {
+  for (const [tab, key, field] of TEXT_TARGETS) {
+    for (const [index, first] of TYPED_TEXTS.entries()) {
+      await t.test(`${tab} ${key} ${field} from ${JSON.stringify(first)}`, () => {
+        const workbook = validWorkbook();
+        const expected = expectedCatalog();
+        const texts = textsOf(expected, tab, key);
+        // A different text in each locale, so a column cannot borrow another's.
+        LOCALE_COLUMNS.forEach(([suffix, locale], at) => {
+          const typed = TYPED_TEXTS[(index + at) % TYPED_TEXTS.length];
+          setCell(workbook, tab, key, `${field}_${suffix}`, typed);
+          texts[locale][field] = typed;
+        });
+        assertPublishes(workbook, expected);
+      });
+    }
+  }
+
+  await t.test("the two examples of the ticket", () => {
+    const workbook = validWorkbook();
+    setCell(workbook, "Models", "pcx-125", "description_zh", "价格含税，押金另付！");
+    setCell(workbook, "Models", "pcx-125", "name_ja", "①免許証");
+    const expected = expectedCatalog();
+    textsOf(expected, "Models", "pcx-125")["zh-cn"].description = "价格含税，押金另付！";
+    textsOf(expected, "Models", "pcx-125").ja.name = "①免許証";
+    assertPublishes(workbook, expected);
+  });
+
+  // Padding is the one change made to a text: ASCII, ideographic and no-break spaces, tabs and line breaks.
+  const PADDED: [string, string][] = [
+    ["  ①免許証  ", "①免許証"],
+    ["　価格含税，押金另付！　", "価格含税，押金另付！"],
+    ["　 　Ｒｅｂｅｌ　２５０\t", "Ｒｅｂｅｌ　２５０"],
+    [" ﾃﾞｲﾘｰ\n", "ﾃﾞｲﾘｰ"],
+    ["　内側　の　空白　　", "内側　の　空白"],
+  ];
+  for (const [tab, key, field] of TEXT_TARGETS) {
+    await t.test(`${tab} ${key} ${field} is trimmed and nothing else`, () => {
+      const workbook = validWorkbook();
+      const expected = expectedCatalog();
+      const texts = textsOf(expected, tab, key);
+      LOCALE_COLUMNS.forEach(([suffix, locale], at) => {
+        const [padded, trimmed] = PADDED[(at + key.length) % PADDED.length];
+        setCell(workbook, tab, key, `${field}_${suffix}`, padded);
+        texts[locale][field] = trimmed;
+      });
+      assertPublishes(workbook, expected);
+    });
+  }
+});
+
+test("columns that are parsed still normalize beside text that is kept", () => {
+  const workbook = validWorkbook();
+  setCell(workbook, "Models", "rebel-250", "engine_cc", "３９９");
+  setCell(workbook, "Models", "rebel-250", "active", "ＦＡＬＳＥ");
+  setCell(workbook, "Models", "rebel-250", "sort", "９");
+  setCell(workbook, "Models", "rebel-250", "seats", "２");
+  setCell(workbook, "Models", "rebel-250", "brand", "Ｈｏｎｄａ");
+  setCell(workbook, "Models", "rebel-250", "name_ja", "レブル　２５０（赤）①");
+  setCell(workbook, "Models", "rebel-250", "name_en", "Ｒｅｂｅｌ，２５０");
+  setCell(workbook, "Types", "car", "deposit_jpy", "￥１２，０００");
+  setCell(workbook, "Types", "car", "name_ko", "자동차，ＣＡＲ");
+  setCell(workbook, "Vehicles", "わ1002", "status", "ｍａｉｎｔｅｎａｎｃｅ");
+  setCell(workbook, "ClosedDates", "2027-01-01", "date", "２０２７－０３－０４");
+  setCell(workbook, "Config", "slot_minutes", "value", "４５");
+
+  const expected = expectedCatalog();
+  const model = modelOf(expected, "rebel-250");
+  model.engineCc = 399;
+  model.active = false;
+  model.sort = 9;
+  model.seats = 2;
+  model.brand = "Honda";
+  textsOf(expected, "Models", "rebel-250").ja.name = "レブル　２５０（赤）①";
+  textsOf(expected, "Models", "rebel-250").en.name = "Ｒｅｂｅｌ，２５０";
+  const car = expected.vehicleTypes.find(({ id }) => id === "car");
+  assert.ok(car);
+  car.depositJpy = 12000;
+  textsOf(expected, "Types", "car").ko.name = "자동차，ＣＡＲ";
+  const vehicle = expected.vehicles.find(({ plate }) => plate === "わ1002");
+  assert.ok(vehicle);
+  vehicle.status = "maintenance";
+  expected.closedDates = expected.closedDates.map((date) => (date === "2027-01-01" ? "2027-03-04" : date));
+  expected.config.slotMinutes = 45;
+  assertPublishes(workbook, expected);
+});
+
+// [the photos cell, the names it gives]. 、 is what a Japanese keyboard types between two file names.
+const JAPANESE_COMMA_CELLS: [string, string[]][] = [
+  ["a.jpg、b.jpg", ["a.jpg", "b.jpg"]],
+  ["front.jpg、side.jpg、rear.png", ["front.jpg", "side.jpg", "rear.png"]],
+  ["  a.jpg 、 b.jpg  ", ["a.jpg", "b.jpg"]],
+  ["　a.jpg　、　b.jpg　", ["a.jpg", "b.jpg"]],
+  ["a.jpg、b.jpg,c.jpg，d.jpg", ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]],
+  ["a.jpg,b.jpg，c.jpg、d.jpg、e.jpg", ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"]],
+  ["レブル（赤）１.jpg、ｐｃｘ（１）.jpg", ["レブル（赤）１.jpg", "ｐｃｘ（１）.jpg"]],
+  ["ﾚﾌﾞﾙ.jpg、赤　バイク １.jpg", ["ﾚﾌﾞﾙ.jpg", "赤　バイク １.jpg"]],
+  ["Ａ・Ｂ.jpg、c·d.jpg", ["Ａ・Ｂ.jpg", "c·d.jpg"]],
+  ["、、a.jpg、、b.jpg、", ["a.jpg", "b.jpg"]],
+  ["、a.jpg,，、", ["a.jpg"]],
+  ["、，,  、", []],
+  ["a.jpg", ["a.jpg"]],
+];
+
+test("the photos cell splits on the Japanese comma", async (t) => {
+  for (const [at, [cell, names]] of JAPANESE_COMMA_CELLS.entries()) {
+    const key = at % 2 === 0 ? "rebel-250" : "nbox-660";
+    await t.test(`${key} photos ${JSON.stringify(cell)}`, () => {
+      const workbook = validWorkbook();
+      setCell(workbook, "Models", key, "photos", cell);
+      const expected = expectedCatalog();
+      modelOf(expected, key).photos = names;
+      assertPublishes(workbook, expected);
+    });
+  }
+});
+
 // [tab, row, the columns left blank, and for each resulting text its locale, field and the locale it falls back to].
 const FALLBACKS: [string, string, string[], [string, string, string][]][] = [
   ["Models", "rebel-250", ["name_ko"], [["ko", "name", "en"]]],
@@ -684,6 +826,99 @@ test("missing translations warn and fall back to en then ja", async (t) => {
       for (const column of blanks) assertWarning(statuses, tab, row, column);
     });
   }
+});
+
+const BLANKS = ["　", " ", "　 　", "\t\n", " "];
+
+// [tab, key, field, the cells set by suffix, the text each locale ends up with].
+type TypedFallback = [string, string, string, Record<string, string>, Record<string, string>];
+const TYPED_FALLBACKS: TypedFallback[] = [
+  [
+    "Models",
+    "rebel-250",
+    "name",
+    { ja: "レブル　２５０", en: "Ｒｅｂｅｌ，２５０", zh: "　", ko: "" },
+    { ja: "レブル　２５０", en: "Ｒｅｂｅｌ，２５０", "zh-cn": "Ｒｅｂｅｌ，２５０", ko: "Ｒｅｂｅｌ，２５０" },
+  ],
+  [
+    "Models",
+    "rebel-250",
+    "summary",
+    { ja: "①免許証が必要", en: "　", zh: "简介", ko: "" },
+    { ja: "①免許証が必要", en: "①免許証が必要", "zh-cn": "简介", ko: "①免許証が必要" },
+  ],
+  [
+    "Packages",
+    "day-1",
+    "name",
+    { ja: " ", en: "", zh: "", ko: "ｋｏ　名前！" },
+    { ja: "ｋｏ　名前！", en: "ｋｏ　名前！", "zh-cn": "ｋｏ　名前！", ko: "ｋｏ　名前！" },
+  ],
+  [
+    "Options",
+    "child-seat",
+    "name",
+    { ja: "チャイルドシート（１歳～）", en: "", zh: "儿童座椅，１岁起", ko: "" },
+    {
+      ja: "チャイルドシート（１歳～）",
+      en: "チャイルドシート（１歳～）",
+      "zh-cn": "儿童座椅，１岁起",
+      ko: "チャイルドシート（１歳～）",
+    },
+  ],
+];
+
+test("a text cell of only whitespace is blank, and a fallback is kept as typed", async (t) => {
+  for (const [tab, key, blanks, fallbacks] of FALLBACKS) {
+    await t.test(`${tab} ${key} with ${blanks.join(" and ")} left as spaces`, () => {
+      const workbook = validWorkbook();
+      blanks.forEach((column, at) => setCell(workbook, tab, key, column, BLANKS[at % BLANKS.length]));
+      const row = sheetRow(workbook, tab, key);
+
+      const expected = expectedCatalog();
+      const texts = textsOf(expected, tab, key);
+      for (const [locale, field, from] of fallbacks) texts[locale][field] = texts[from][field];
+
+      const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
+      assert.deepEqual(fatal, []);
+      assert.deepEqual(canonical(catalog), canonical(expected));
+      assert.deepEqual(notOk(statuses), [`${tab} ${row}`]);
+      assert.deepEqual(errors(statuses), []);
+      for (const column of blanks) assertWarning(statuses, tab, row, column);
+    });
+  }
+
+  for (const [tab, key, field, cells, want] of TYPED_FALLBACKS) {
+    await t.test(`${tab} ${key} ${field} falls back to the text as typed`, () => {
+      const workbook = validWorkbook();
+      for (const [suffix, value] of Object.entries(cells)) setCell(workbook, tab, key, `${field}_${suffix}`, value);
+      const row = sheetRow(workbook, tab, key);
+      const expected = expectedCatalog();
+      const texts = textsOf(expected, tab, key);
+      for (const [locale, text] of Object.entries(want)) texts[locale][field] = text;
+
+      const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
+      assert.deepEqual(fatal, []);
+      assert.deepEqual(canonical(catalog), canonical(expected));
+      assert.deepEqual(errors(statuses), []);
+      for (const [suffix, value] of Object.entries(cells)) {
+        if (value.trim() === "") assertWarning(statuses, tab, row, `${field}_${suffix}`);
+      }
+    });
+  }
+
+  await t.test("a name of only whitespace in every language is still an error", () => {
+    const workbook = validWorkbook();
+    const row = sheetRow(workbook, "Models", "pcx-125");
+    LOCALE_COLUMNS.forEach(([suffix], at) => setCell(workbook, "Models", "pcx-125", `name_${suffix}`, BLANKS[at]));
+    const { catalog, statuses } = validateCatalog(workbook, CATALOG_NOW);
+    assertError(statuses, "Models", row, ["name_ja", "name_en"]);
+    assert.ok(catalog);
+    assert.equal(
+      catalog.models.some((model) => model.id === "pcx-125"),
+      false,
+    );
+  });
 });
 
 // [type, cc, override, the class that results].

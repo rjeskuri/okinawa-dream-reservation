@@ -1,0 +1,74 @@
+---
+// /{locale}/access: shop hours and the closed dates ahead from the published catalog, and draft address and map text until
+// the shop supplies the real text.
+import { env } from "cloudflare:workers";
+import DraftNote from "../../components/DraftNote.astro";
+import { htmlLang } from "../../i18n/locales.ts";
+import { common } from "../../i18n/strings/common.ts";
+import { pages } from "../../i18n/strings/pages.ts";
+import { t } from "../../i18n/t.ts";
+import Base from "../../layouts/Base.astro";
+import { readCatalog } from "../../lib/db/catalog-store.ts";
+import { isLocale } from "../../lib/locale.ts";
+import { addDaysToDate, jstToday } from "../../lib/time.ts";
+
+const CLOSED_DATES_DAYS = 60;
+
+const { locale } = Astro.params;
+// Astro's own check ignores case and sees any segment of the path, so it passes /JA/.
+if (!isLocale(locale)) return new Response(null, { status: 404 });
+
+const heading = t(locale, common, "nav.access");
+const catalog = await readCatalog(env.DB);
+
+// Today through today + 60, both included.
+const today = jstToday(Date.now());
+const last = addDaysToDate(today, CLOSED_DATES_DAYS);
+const closedDates = catalog?.closedDates.filter((date) => date >= today && date <= last) ?? [];
+
+// Formatted in UTC from a UTC midnight, so no zone can shift the day.
+const dateFormat = new Intl.DateTimeFormat(htmlLang(locale), { dateStyle: "full", timeZone: "UTC" });
+const dateText = (date: string) => dateFormat.format(new Date(`${date}T00:00:00Z`));
+---
+
+<Base locale={locale} title={`${heading} | ${t(locale, common, "site.name")}`}>
+  <h1>{heading}</h1>
+  <p>{t(locale, pages, "access.oneShop")}</p>
+  {
+    catalog === null ? (
+      <p>{t(locale, pages, "access.unpublished")}</p>
+    ) : (
+      <>
+        <section>
+          <h2>{t(locale, pages, "access.hours.heading")}</h2>
+          <p>
+            {t(locale, pages, "access.hours.value")
+              .replace("{open}", catalog.config.shopOpen)
+              .replace("{close}", catalog.config.shopClose)}
+          </p>
+        </section>
+        <section>
+          <h2>{t(locale, pages, "access.closed.heading").replace("{days}", String(CLOSED_DATES_DAYS))}</h2>
+          {closedDates.length === 0 ? (
+            <p>{t(locale, pages, "access.closed.none")}</p>
+          ) : (
+            <ul>
+              {closedDates.map((date) => (
+                <li>
+                  <time datetime={date}>{dateText(date)}</time>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </>
+    )
+  }
+  <section>
+    <h2>{t(locale, pages, "access.address.heading")}</h2>
+    <DraftNote locale={locale}>
+      <p>{t(locale, pages, "access.address.body")}</p>
+      <p>{t(locale, pages, "access.map.body")}</p>
+    </DraftNote>
+  </section>
+</Base>
