@@ -52,7 +52,7 @@ type ReconcileIssue = {
 type ReconcileReport = { runAt: number; issues: ReconcileIssue[] };
 
 /** The wording a refund status reads as, under `email.refund.` and `email.staff.refund.`. */
-export const REFUND_WORDING: Record<RefundStatus, string> = {
+const REFUND_WORDING: Record<RefundStatus, string> = {
   NONE: "none",
   PENDING: "pending",
   RETRY: "pending",
