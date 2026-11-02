@@ -95,6 +95,12 @@ textarea {
   color: var(--color-text);
 }
 
+/* Browsers dim placeholders (or use their own grey); pin a checked token at full opacity. */
+::placeholder {
+  color: var(--color-text-muted);
+  opacity: 1;
+}
+
 label {
   display: block;
   margin-bottom: var(--space-1);

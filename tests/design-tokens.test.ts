@@ -491,3 +491,32 @@ test("no rule removes the focus outline without replacing it", () => {
   }
   assert.deepEqual(removed, []);
 });
+
+/** Does this one selector target the placeholder of every input/textarea (bare, `*`, or on input/textarea)? */
+function placeholderCovers(part: string): boolean {
+  if (!part.endsWith("::placeholder")) return false;
+  const head = part.slice(0, -"::placeholder".length);
+  const last = head.split(/\s+/).pop()!;
+  return (
+    last === "" ||
+    /^(?:\*|input|textarea)(?:\[[^\]]*\]|\.[\w-]+|:[\w-]+(?:\([^)]*\))?)*$/.test(
+      last,
+    )
+  );
+}
+
+test("placeholder text uses a checked text token at full opacity", () => {
+  // tokens.css pairs --color-text and --color-text-muted with the background at 4.5:1 (pair test above);
+  // an unset placeholder falls back to a browser default outside the tokens, and opacity < 1 would blend
+  // the colour below the checked ratio.
+  const matching = rules(read(globalPath)).filter(
+    ({ selector, decls }) =>
+      selectorParts(selector).some(placeholderCovers) &&
+      /^var\(\s*--color-text(?:-muted)?\s*\)$/.test(decls.get("color") ?? "") &&
+      /^(?:1(?:\.0+)?|100%)$/.test(decls.get("opacity") ?? ""),
+  );
+  assert.ok(
+    matching.length > 0,
+    "global.css needs a ::placeholder rule with color: var(--color-text-muted) (or var(--color-text)) and opacity: 1",
+  );
+});
