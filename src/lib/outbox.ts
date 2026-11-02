@@ -52,6 +52,12 @@ const INSERT_SQL =
   "INSERT OR IGNORE INTO outbox (kind, dedupe_key, payload, status, next_attempt_at, created_at) " +
   "VALUES (?1, ?2, ?3, 'pending', ?4, ?4)";
 
+// The items are one parameter, a JSON array, so their number never meets D1's 100 parameters per statement.
+const INSERT_EACH_SQL =
+  "INSERT OR IGNORE INTO outbox (kind, dedupe_key, payload, status, next_attempt_at, created_at) " +
+  "SELECT json_extract(value, '$.kind'), json_extract(value, '$.dedupeKey'), json_extract(value, '$.payload'), " +
+  "'pending', ?2, ?2 FROM json_each(?1)";
+
 const RECOVER_SQL = "UPDATE outbox SET status = 'pending' WHERE status = 'sending' AND claimed_at < ?1";
 
 // One statement, so concurrent drains are serialized by D1 and no two can return the same row.
@@ -69,6 +75,11 @@ const SETTLE_SQL =
 export function enqueueStatements(db: D1Database, items: OutboxItem[], now: number): D1PreparedStatement[] {
   const insert = db.prepare(INSERT_SQL);
   return items.map((item) => insert.bind(item.kind, item.dedupeKey, JSON.stringify(item.payload), now));
+}
+
+/** As enqueueStatements, but a single statement whatever the number of items, for a caller counting its statements. */
+export function enqueueInOneStatement(db: D1Database, items: OutboxItem[], now: number): D1PreparedStatement {
+  return db.prepare(INSERT_EACH_SQL).bind(JSON.stringify(items), now);
 }
 
 /** What an outcome makes of a claim with `attempts` made before it. A null nextAttemptAt keeps the row's time. */
