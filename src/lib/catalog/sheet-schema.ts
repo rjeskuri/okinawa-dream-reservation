@@ -83,6 +83,7 @@ const SLUG_MAX_LENGTH = 40;
 const WHOLE_NUMBER = /^\d+$/;
 const YEN = /^¥?(\d{1,3}(?:,\d{3})+|\d+)円?$/;
 const DATE_TIME = /^(\S+) (\S+)$/;
+const COMMAS = /[,，]/;
 const MINUTES_PER_DAY = 1440;
 const MOPED_OVERRIDE_MAX_CC = 125;
 
@@ -124,13 +125,15 @@ class Row {
   readonly tab: string;
   readonly sheetRow: number;
   readonly cells: Map<string, Cell>;
+  readonly raw: (column: string) => unknown;
   readonly statuses: RowStatus[] = [];
   ok = true;
 
-  constructor(tab: string, sheetRow: number, cells: Map<string, Cell>) {
+  constructor(tab: string, sheetRow: number, cells: Map<string, Cell>, raw: (column: string) => unknown) {
     this.tab = tab;
     this.sheetRow = sheetRow;
     this.cells = cells;
+    this.raw = raw;
   }
 
   error(message: string): void {
@@ -269,8 +272,9 @@ class Row {
 
 /**
  * The data rows of `tab`, or null with the reasons in `fatal` when its header row is missing or short. Blank rows are
- * left out, keeping the sheet numbers of the rows below them. publish_status is never read: a stale message there
- * neither fails a row nor keeps an otherwise blank one.
+ * left out, keeping the sheet numbers of the rows below them. Boolean false does not count as data, because Insert >
+ * Checkbox on a whole column stores it in every empty row. publish_status is never read: a stale message there neither
+ * fails a row nor keeps an otherwise blank one.
  */
 function readTab(raw: Workbook, tab: Tab, fatal: string[]): Row[] | null {
   const [header, ...body] = raw[tab] ?? [];
@@ -292,8 +296,9 @@ function readTab(raw: Workbook, tab: Tab, fatal: string[]): Row[] | null {
   const dataColumns = columns.filter((column) => column !== STATUS);
   const rows: Row[] = [];
   body.forEach((cells, index) => {
-    const read = new Map(dataColumns.map((column) => [column, readCell(cells[indexes.get(column) as number])]));
-    if ([...read.values()].some((cell) => cell !== "")) rows.push(new Row(tab, index + 2, read));
+    const raw = (column: string): unknown => cells[indexes.get(column) as number];
+    const read = new Map(dataColumns.map((column) => [column, readCell(raw(column))]));
+    if ([...read.values()].some((cell) => cell !== "" && cell !== false)) rows.push(new Row(tab, index + 2, read, raw));
   });
   return rows;
 }
@@ -428,6 +433,15 @@ function readLicenseClass(row: Row, typeId: string, engineCc: number): LicenseCl
   return override ?? licenseClassOfCc(engineCc);
 }
 
+/** Drive file names, which #17 matches against the Drive listing, so text in this one column skips normalizing. */
+function readPhotos(row: Row): string[] {
+  const cell = row.raw("photos");
+  return (typeof cell === "string" ? cell : row.text("photos"))
+    .split(COMMAS)
+    .map((name) => name.trim())
+    .filter((name) => name !== "");
+}
+
 function readModels(rows: Row[], typeIds: Set<string>, rateClassIds: Set<string>): Model[] {
   const seen = new Set<string>();
   return keep(rows, (row) => {
@@ -445,11 +459,7 @@ function readModels(rows: Row[], typeIds: Set<string>, rateClassIds: Set<string>
       brand: row.required("brand"),
       seats: row.blank("seats") ? null : row.whole("seats", 1),
       texts: row.texts(["name", "summary", "description"]),
-      photos: row
-        .text("photos")
-        .split(",")
-        .map((name) => name.trim())
-        .filter((name) => name !== ""),
+      photos: readPhotos(row),
     };
   });
 }

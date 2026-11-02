@@ -35,7 +35,8 @@ Every value in the examples is a placeholder, not a real price, deposit or plate
 - **A number in a text column** is fine: plate `2002` is the text `2002`.
 - **Repeats.** Where an id must be unique, the first row owns it and each later row gets an error, even if the first row
   itself has an error.
-- **Blank rows** are ignored and get no status. Rows below keep their real row numbers.
+- **Blank rows** are ignored and get no status. An unticked checkbox alone counts as blank. Rows below keep their real
+  row numbers.
 
 ## Translations
 
@@ -158,7 +159,7 @@ Example: `bike-125`, `day-1`, `¥5,200`.
 | `name_ja`, `name_en`, `name_zh`, `name_ko` | At least one | Text |
 | `summary_ja`, `summary_en`, `summary_zh`, `summary_ko` | No | Text |
 | `description_ja`, `description_en`, `description_zh`, `description_ko` | No | Text |
-| `photos` | No | Drive file names separated by commas: `pcx-1.jpg, pcx-2.jpg` |
+| `photos` | No | Drive file names separated by either comma, `,` or `，`: `pcx-1.jpg, pcx-2.jpg`. Names are kept exactly as typed, with only the spaces around each one removed. |
 
 The default license class comes from the type and the engine:
 

@@ -91,11 +91,16 @@ export function setCell(workbook: Workbook, tab: string, key: string, column: st
   workbook[tab][index] = batchGetRow(row);
 }
 
-/** Adds a row below the last, its cells named by column. */
-export function appendRow(workbook: Workbook, tab: string, cells: Record<string, unknown>): void {
+/** A row of `tab` as batchGet returns it, its cells named by column. */
+export function rowWith(workbook: Workbook, tab: string, cells: Record<string, unknown>): unknown[] {
   const row: unknown[] = [];
   for (const [column, value] of Object.entries(cells)) row[columnIndex(workbook, tab, column)] = value;
-  workbook[tab].push(batchGetRow(row));
+  return batchGetRow(row);
+}
+
+/** Adds a row below the last, its cells named by column. */
+export function appendRow(workbook: Workbook, tab: string, cells: Record<string, unknown>): void {
+  workbook[tab].push(rowWith(workbook, tab, cells));
 }
 
 /** Adds a copy of the row named `key` below the last, with `changes` over its cells. */

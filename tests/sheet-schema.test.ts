@@ -16,6 +16,7 @@ import {
   rearrangeColumns,
   removeColumn,
   removeRow,
+  rowWith,
   setCell,
   sheetRow,
   sheetSerial,
@@ -540,6 +541,21 @@ const TEXT_SPELLINGS: Spelling[] = [
   },
 ];
 
+// [the photos cell, the names it gives]. These are Drive file names, which #17 matches against the Drive listing, so
+// they keep their exact spelling. Only whitespace around a name goes, and both commas separate: staff type either.
+const PHOTO_CELLS: [string, string[]][] = [
+  ["レブル（赤）１.jpg, ｐｃｘ.jpg", ["レブル（赤）１.jpg", "ｐｃｘ.jpg"]],
+  ["ﾚﾌﾞﾙ.jpg", ["ﾚﾌﾞﾙ.jpg"]],
+  ["バイク.jpg", ["バイク.jpg"]],
+  ["赤　バイク １.jpg", ["赤　バイク １.jpg"]],
+  ["Ａ.jpg，Ｂ.jpg", ["Ａ.jpg", "Ｂ.jpg"]],
+  ["a.jpg，b.jpg,c.jpg", ["a.jpg", "b.jpg", "c.jpg"]],
+  ["  ａ.jpg  ,　ｂ.jpg　", ["ａ.jpg", "ｂ.jpg"]],
+  ["ａ.jpg,,ｂ.jpg，，ｃ.jpg,", ["ａ.jpg", "ｂ.jpg", "ｃ.jpg"]],
+  ["，,  ，", []],
+  ["", []],
+];
+
 test("normalizes full-width digits and yen formatting", async (t) => {
   for (const [tab, key, column, read] of MONEY_CELLS) {
     for (const [spelling, amount] of MONEY_SPELLINGS) {
@@ -574,6 +590,26 @@ test("normalizes full-width digits and yen formatting", async (t) => {
       assertPublishes(workbook, expected);
     });
   }
+
+  for (const [cell, names] of PHOTO_CELLS) {
+    await t.test(`photos ${JSON.stringify(cell)}`, () => {
+      const workbook = validWorkbook();
+      setCell(workbook, "Models", "rebel-250", "photos", cell);
+      const expected = expectedCatalog();
+      modelOf(expected, "rebel-250").photos = names;
+      assertPublishes(workbook, expected);
+    });
+  }
+
+  await t.test("photos keep their spelling beside a brand that is normalized", () => {
+    const workbook = validWorkbook();
+    setCell(workbook, "Models", "pcx-125", "brand", "Ｙａｍａｈａ");
+    setCell(workbook, "Models", "pcx-125", "photos", "ｐｃｘ（１）.jpg");
+    const expected = expectedCatalog();
+    modelOf(expected, "pcx-125").brand = "Yamaha";
+    modelOf(expected, "pcx-125").photos = ["ｐｃｘ（１）.jpg"];
+    assertPublishes(workbook, expected);
+  });
 });
 
 // [tab, row, the columns left blank, and for each resulting text its locale, field and the locale it falls back to].
@@ -1154,7 +1190,13 @@ test("validateBlocks checks dates, model, optional plate and duplicate ids", asy
   });
 });
 
-test("row numbers in statuses are 1-based sheet rows, past a blank row too", () => {
+// What Insert > Checkbox on a whole column leaves in a row nobody filled in: boolean false there, and nothing else.
+const UNTICKED_ROWS: [string, Record<string, unknown>][] = [
+  ["only an unticked box", { active: false }],
+  ["an unticked box and a stale publish_status", { active: false, publish_status: "error: a stale message" }],
+];
+
+test("row numbers in statuses are 1-based sheet rows, past a blank row too", async (t) => {
   const workbook = validWorkbook();
   // Sheet row 3 left blank, which batchGet returns as an empty row, so the last model moves down to row 7.
   workbook.Models.splice(2, 0, []);
@@ -1168,6 +1210,74 @@ test("row numbers in statuses are 1-based sheet rows, past a blank row too", () 
     rowsWhere(statuses, ({ tab, level }) => tab === "Models" && level === "ok").filter((row) => row !== "Models 3"),
     ["Models 2", "Models 4", "Models 5", "Models 6"],
   );
+
+  for (const [name, cells] of UNTICKED_ROWS) {
+    for (const count of [1, 3]) {
+      await t.test(`${count} of a row with ${name}: ignored, and later rows keep their numbers`, () => {
+        const workbook = validWorkbook();
+        const rows = Array.from({ length: count }, () => rowWith(workbook, "Models", cells));
+        workbook.Models.splice(2, 0, ...rows);
+
+        const { catalog, statuses, fatal } = validateCatalog(workbook);
+
+        assert.deepEqual(fatal, []);
+        assert.deepEqual(canonical(catalog), canonical(expectedCatalog()));
+        assert.deepEqual(notOk(statuses), []);
+        // Row 2 is today-50. The other four models sit below the blank rows.
+        const numbers = [2, 3 + count, 4 + count, 5 + count, 6 + count];
+        assert.deepEqual(
+          rowsWhere(statuses, ({ tab }) => tab === "Models"),
+          numbers.map((row) => `Models ${row}`),
+        );
+      });
+    }
+  }
+
+  await t.test("a run of unticked boxes gives the same statuses as none at all", () => {
+    const workbook = validWorkbook();
+    for (let row = 0; row < 20; row += 1) appendRow(workbook, "Models", { active: false });
+
+    const { catalog, statuses, fatal } = validateCatalog(workbook);
+
+    assert.deepEqual(fatal, []);
+    assert.deepEqual(statuses, validateCatalog(validWorkbook()).statuses);
+    assert.deepEqual(canonical(catalog), canonical(expectedCatalog()));
+  });
+
+  await t.test("an unticked box counts as blank on any tab", () => {
+    const workbook = validWorkbook();
+    appendRow(workbook, "Vehicles", { notes: false });
+    appendRow(workbook, "Blocks", { note: false });
+
+    assert.deepEqual(validateCatalog(workbook).statuses, validateCatalog(validWorkbook()).statuses);
+    assert.deepEqual(
+      validateBlocks(workbook, expectedCatalog()).statuses,
+      validateBlocks(validWorkbook(), expectedCatalog()).statuses,
+    );
+  });
+
+  await t.test("a real row with active false stays an inactive model", () => {
+    const workbook = validWorkbook();
+    setCell(workbook, "Models", "pcx-125", "active", false);
+    const expected = expectedCatalog();
+    modelOf(expected, "pcx-125").active = false;
+    assertPublishes(workbook, expected);
+  });
+
+  // A ticked box is a staff action, and only the boolean false is a checkbox's empty state.
+  for (const cell of [true, "FALSE"]) {
+    await t.test(`a row holding only ${JSON.stringify(cell)} is data and gets errors`, () => {
+      const workbook = validWorkbook();
+      workbook.Models.splice(2, 0, rowWith(workbook, "Models", { active: cell }));
+
+      const { catalog, statuses, fatal } = validateCatalog(workbook);
+
+      assert.deepEqual(fatal, []);
+      assertError(statuses, "Models", 3, ["model_id"]);
+      assert.deepEqual(errors(statuses), ["Models 3"]);
+      assert.deepEqual(canonical(catalog), canonical(expectedCatalog()));
+    });
+  }
 });
 
 test("SHEET_TABS names every tab's headers and BOOKINGS_COLUMNS the Bookings columns", () => {
