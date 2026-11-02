@@ -25,12 +25,14 @@ function parseNumber(key: string, value: string, pattern: RegExp): number {
   return parsed;
 }
 
-/** The config table as a ShopConfig. Throws CatalogNotPublished when it is empty, and an Error on a bad or missing key. */
-export async function readShopConfig(db: D1Database): Promise<ShopConfig> {
-  const { results } = await db.prepare("SELECT key, value FROM config").all<{ key: string; value: string }>();
-  if (results.length === 0) throw new CatalogNotPublished();
+/**
+ * The config table's rows as a ShopConfig, for callers that read them in a batch of their own. Throws CatalogNotPublished
+ * when there are none, and an Error on a bad or missing key.
+ */
+export function parseShopConfig(rows: { key: string; value: string }[]): ShopConfig {
+  if (rows.length === 0) throw new CatalogNotPublished();
 
-  const stored = new Map(results.map(({ key, value }) => [key, value]));
+  const stored = new Map(rows.map(({ key, value }) => [key, value]));
   const text = (key: string): string => {
     const value = stored.get(key);
     if (value === undefined) throw new Error(`config has no ${key}`);
@@ -53,6 +55,12 @@ export async function readShopConfig(db: D1Database): Promise<ShopConfig> {
     maxDaysAhead: whole("max_days_ahead"),
     photoMaxMb: parseNumber("photo_max_mb", text("photo_max_mb"), DECIMAL_NUMBER),
   };
+}
+
+/** The config table as a ShopConfig, or the errors of parseShopConfig. */
+export async function readShopConfig(db: D1Database): Promise<ShopConfig> {
+  const { results } = await db.prepare("SELECT key, value FROM config").all<{ key: string; value: string }>();
+  return parseShopConfig(results);
 }
 
 /** The closed dates from `from` to `to`, both YYYY-MM-DD and both included, earliest first. */
