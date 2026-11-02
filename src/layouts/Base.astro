@@ -4,6 +4,8 @@ import { htmlLang, localePath } from "../i18n/locales.ts";
 import { common } from "../i18n/strings/common.ts";
 import { t } from "../i18n/t.ts";
 import { LOCALES, type Locale } from "../lib/locale.ts";
+import "../styles/tokens.css";
+import "../styles/global.css";
 
 interface Props {
   locale: Locale;
@@ -78,7 +80,7 @@ const sections = ["rentals", "faq", "policies", "access"];
   nav {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.75rem;
+    gap: var(--space-3);
   }
   header {
     justify-content: space-between;
