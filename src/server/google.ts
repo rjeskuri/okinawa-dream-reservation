@@ -1,6 +1,7 @@
-// The Google auth and Sheets clients, built from `env`, with the access token shared across requests through D1.
+// The Google auth, Sheets and Drive clients, built from `env`, with the access token shared across requests through D1.
 import { env } from "cloudflare:workers";
 import { createGoogleAuth, type TokenCache } from "../lib/google/auth.ts";
+import { createDriveClient } from "../lib/google/drive.ts";
 import { createSheetsClient } from "../lib/google/sheets.ts";
 
 // The Sheets client needs the first, the Drive photo copy of task #17 the second, and both use the one token.
@@ -28,7 +29,7 @@ function d1TokenCache(db: D1Database): TokenCache {
 }
 
 /**
- * Builds both clients for one request or cron run. They are not kept at module level: a token request in flight belongs
+ * Builds the clients for one request or cron run. They are not kept at module level: a token request in flight belongs
  * to the request that started it in workerd, and a shared one would hang any other request if that one were cancelled.
  */
 export function createGoogleClients() {
@@ -41,5 +42,6 @@ export function createGoogleClients() {
     cache: d1TokenCache(env.DB),
   });
   const sheets = createSheetsClient({ getToken: auth.getToken, fetch, spreadsheetId: env.GOOGLE_SHEET_ID });
-  return { auth, sheets };
+  const drive = createDriveClient({ getToken: auth.getToken, fetch });
+  return { auth, sheets, drive };
 }
