@@ -9,14 +9,14 @@ CREATE TABLE catalog_meta (
   version INTEGER NOT NULL,
   published_at INTEGER NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('sheet','admin'))
-);
+) STRICT;
 
 CREATE TABLE vehicle_types (
   id TEXT PRIMARY KEY CHECK (id IN ('scooter','motorcycle','car')),
   deposit_jpy INTEGER NOT NULL CHECK (deposit_jpy >= 0),
   sort INTEGER NOT NULL,
   texts TEXT NOT NULL
-);
+) STRICT;
 
 -- The rows of the shop's fee schedule, for example 125cc or K-Car.
 CREATE TABLE rate_classes (
@@ -25,7 +25,7 @@ CREATE TABLE rate_classes (
   sort INTEGER NOT NULL,
   extension_per_hour_jpy INTEGER CHECK (extension_per_hour_jpy >= 0),
   texts TEXT NOT NULL
-);
+) STRICT;
 
 -- Models carry no prices: a model inherits them from its rate class. photos is a JSON array of Drive file names.
 CREATE TABLE models (
@@ -40,7 +40,7 @@ CREATE TABLE models (
   seats INTEGER CHECK (seats > 0),
   texts TEXT NOT NULL,
   photos TEXT NOT NULL
-);
+) STRICT;
 
 CREATE TABLE packages (
   id TEXT PRIMARY KEY,
@@ -49,14 +49,14 @@ CREATE TABLE packages (
   sort INTEGER NOT NULL,
   texts TEXT NOT NULL,
   CHECK ((days IS NULL) <> (hours IS NULL))
-);
+) STRICT;
 
 CREATE TABLE prices (
   rate_class_id TEXT NOT NULL REFERENCES rate_classes(id),
   package_id TEXT NOT NULL REFERENCES packages(id),
   price_jpy INTEGER NOT NULL CHECK (price_jpy > 0),
   PRIMARY KEY (rate_class_id, package_id)
-);
+) STRICT;
 
 -- Priced extras shown on the fee schedule. Choosing them while booking is out of scope.
 CREATE TABLE options (
@@ -67,7 +67,7 @@ CREATE TABLE options (
   extra_per_hour_jpy INTEGER CHECK (extra_per_hour_jpy >= 0),
   extra_per_24h_jpy INTEGER CHECK (extra_per_24h_jpy >= 0),
   texts TEXT NOT NULL
-);
+) STRICT;
 
 CREATE TABLE vehicles (
   plate TEXT PRIMARY KEY,
@@ -75,21 +75,21 @@ CREATE TABLE vehicles (
   status TEXT NOT NULL CHECK (status IN ('active','maintenance','retired')),
   odometer_km INTEGER,
   base_usage_days INTEGER NOT NULL DEFAULT 0
-);
+) STRICT;
 
 CREATE TABLE config (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
-);
+) STRICT;
 
 CREATE TABLE cancellation_tiers (
   min_days_before INTEGER PRIMARY KEY CHECK (min_days_before >= 0),
   refund_percent INTEGER NOT NULL CHECK (refund_percent BETWEEN 0 AND 100)
-);
+) STRICT;
 
 CREATE TABLE closed_dates (
   date TEXT PRIMARY KEY
-);
+) STRICT;
 
 -- package_id is deliberately not a foreign key: a package can leave the catalog while bookings of it remain.
 CREATE TABLE bookings (
@@ -123,7 +123,7 @@ CREATE TABLE bookings (
   confirmed_at INTEGER,
   cancelled_at INTEGER,
   CHECK (end_at > start_at)
-);
+) STRICT;
 
 CREATE INDEX idx_bookings_vehicle_start ON bookings (vehicle_plate, start_at);
 
@@ -143,7 +143,7 @@ CREATE TABLE refunds (
   idempotency_key TEXT UNIQUE,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
-);
+) STRICT;
 
 CREATE TABLE outbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -156,13 +156,13 @@ CREATE TABLE outbox (
   claimed_at INTEGER,
   last_error TEXT,
   created_at INTEGER NOT NULL
-);
+) STRICT;
 
 CREATE TABLE webhook_events (
   event_id TEXT PRIMARY KEY,
   type TEXT NOT NULL,
   received_at INTEGER NOT NULL
-);
+) STRICT;
 
 CREATE TABLE photos (
   name TEXT PRIMARY KEY,
@@ -172,10 +172,10 @@ CREATE TABLE photos (
   content_type TEXT NOT NULL,
   bytes INTEGER NOT NULL,
   copied_at INTEGER NOT NULL
-);
+) STRICT;
 
 CREATE TABLE kv_cache (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
   expires_at INTEGER NOT NULL
-);
+) STRICT;

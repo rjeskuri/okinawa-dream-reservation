@@ -21,6 +21,8 @@ PAYMENT_PENDING and EXPIRED are used internally.
 
 ## Tables
 
+Every table is `STRICT`, so SQLite refuses a value that is not of the column's declared type: text or a fraction in a money, time or count column fails the insert instead of being stored.
+
 ### Catalog
 
 Staff publish these from the Google Sheet, and one publish replaces them together.

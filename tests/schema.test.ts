@@ -833,3 +833,194 @@ test("seed helpers fill defaults, create their parents and return the stored row
     await dispose();
   }
 });
+
+// STRICT tables (ticket #72): the database itself refuses text and fractions in integer columns, so whole yen and
+// whole epoch ms hold even if validation upstream misses a value.
+
+/** `table.column` for every INTEGER column of migrations/0002_core.sql whose name says money (_jpy) or time (_at). */
+function declaredMoneyAndTimeColumns(kind: "money" | "time"): string[] {
+  const sql = readFileSync(new URL("../migrations/0002_core.sql", import.meta.url), "utf8");
+  const suffix = kind === "money" ? /_jpy$/ : /_at$/;
+  const found: string[] = [];
+  let table = "";
+  for (const line of sql.split("\n")) {
+    const create = /^CREATE TABLE (\w+)/.exec(line);
+    if (create) table = create[1];
+    const columnDef = /^\s+(\w+)\s+INTEGER\b/.exec(line);
+    if (columnDef && suffix.test(columnDef[1])) found.push(`${table}.${columnDef[1]}`);
+  }
+  return found.sort();
+}
+
+interface TypedColumn {
+  table: string;
+  column: string;
+  /** Changes to the table's valid row besides the column under test, for a table whose valid row needs them. */
+  base?: SqlRow;
+  /** A whole value the column accepts. Its fraction `valid + 0.5` is otherwise acceptable to every CHECK. */
+  valid: number;
+}
+
+// Written out by hand from the ticket's table definitions. The guard in each test compares it with the migration, so a
+// money or time column added there and missed here fails loudly.
+const MONEY_COLUMNS: TypedColumn[] = [
+  { table: "vehicle_types", column: "deposit_jpy", valid: 3000 },
+  { table: "rate_classes", column: "extension_per_hour_jpy", valid: 1000 },
+  { table: "prices", column: "price_jpy", valid: 8000 },
+  { table: "options", column: "base_jpy", valid: 500 },
+  { table: "options", column: "extra_per_hour_jpy", valid: 200 },
+  { table: "options", column: "extra_per_24h_jpy", valid: 900 },
+  { table: "bookings", column: "price_jpy", valid: 12000 },
+  { table: "bookings", column: "deposit_jpy", valid: 5000 },
+  { table: "bookings", column: "paid_jpy", valid: 5000 },
+  { table: "refunds", column: "amount_jpy", valid: 1000 },
+];
+
+const TIME_COLUMNS: TypedColumn[] = [
+  { table: "catalog_meta", column: "published_at", valid: START },
+  { table: "bookings", column: "start_at", valid: START },
+  { table: "bookings", column: "end_at", valid: END },
+  { table: "bookings", column: "expires_at", valid: START - 900_000 },
+  { table: "bookings", column: "created_at", valid: START - 86_400_000 },
+  { table: "bookings", column: "updated_at", valid: START - 3_600_000 },
+  { table: "bookings", column: "confirmed_at", valid: START - 7_200_000 },
+  { table: "bookings", column: "cancelled_at", valid: START - 10_800_000 },
+  { table: "refunds", column: "created_at", valid: START },
+  { table: "refunds", column: "updated_at", valid: START + 60_000 },
+  { table: "outbox", column: "next_attempt_at", valid: START },
+  { table: "outbox", column: "claimed_at", valid: START + 1000 },
+  { table: "outbox", column: "created_at", valid: START },
+  { table: "webhook_events", column: "received_at", valid: START },
+  { table: "photos", column: "copied_at", valid: START },
+  { table: "kv_cache", column: "expires_at", valid: END },
+];
+
+/** The valid rows of the tables VALID does not cover. */
+const EXTRA_VALID: Record<string, { key: string[]; row: SqlRow }> = {
+  webhook_events: { key: ["event_id"], row: { event_id: "case-event", type: "payment.updated", received_at: START } },
+  photos: {
+    key: ["name"],
+    row: {
+      name: "case.jpg",
+      drive_file_id: "drive-1",
+      md5: "d41d8cd98f00b204e9800998ecf8427e",
+      r2_key: "photos/case.jpg",
+      content_type: "image/jpeg",
+      bytes: 1234,
+      copied_at: START,
+    },
+  },
+  kv_cache: { key: ["key"], row: { key: "case-key", value: "{}", expires_at: END } },
+};
+
+function validRow(table: string): { key: string[]; row: SqlRow } {
+  return VALID[table] ?? EXTRA_VALID[table];
+}
+
+/**
+ * Proves a STRICT type rejection for one integer column: the same row goes in with a whole `valid` value, and is
+ * refused with SQLite's own type error, not a CHECK or any other constraint, for 'abc' and for `valid + 0.5`.
+ */
+async function proveTypeRejection(db: D1Database, spec: TypedColumn): Promise<void> {
+  const { table, column } = spec;
+  const { key, row } = validRow(table);
+  const label = `${table}.${column}`;
+  const base: SqlRow = { ...row, ...spec.base };
+  const before = await countRows(db, table);
+
+  const whole = { ...base, [column]: spec.valid };
+  const stored = await insertRow<SqlRow>(db, table, whole);
+  assert.equal(stored[column], spec.valid, `${label} takes the whole value ${spec.valid}`);
+  assert.equal(await countRows(db, table), (before ?? 0) + 1);
+  await deleteRow(db, table, key, whole);
+
+  const attempts: [SqlValue, "TEXT" | "REAL"][] = [
+    ["abc", "TEXT"],
+    [spec.valid + 0.5, "REAL"],
+  ];
+  for (const [value, kind] of attempts) {
+    const candidate = { ...base, [column]: value };
+    let message: string | null = null;
+    try {
+      await insertRow(db, table, candidate);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    if (message === null) {
+      await deleteRow(db, table, key, candidate);
+      assert.fail(`${label} stored ${JSON.stringify(value)} instead of refusing it`);
+    }
+    assert.match(
+      message,
+      new RegExp(`cannot store ${kind} value in INTEGER column ${table}\\.${column}`),
+      `${label} ${JSON.stringify(value)} was refused for another reason`,
+    );
+    assert.equal(await countRows(db, table), before, `${label} ${JSON.stringify(value)} left a row behind`);
+  }
+}
+
+async function proveTypedColumns(specs: TypedColumn[]): Promise<void> {
+  const { db, dispose } = await createTestDb();
+  try {
+    await seedParents(db);
+    for (const spec of specs) {
+      try {
+        await proveTypeRejection(db, spec);
+      } catch (error) {
+        (error as Error).message = `${spec.table}.${spec.column}: ${(error as Error).message}`;
+        throw error;
+      }
+    }
+  } finally {
+    await dispose();
+  }
+}
+
+test("money columns reject text and fractions", async () => {
+  assert.deepEqual(
+    MONEY_COLUMNS.map((spec) => `${spec.table}.${spec.column}`).sort(),
+    declaredMoneyAndTimeColumns("money"),
+    "the money column list differs from migrations/0002_core.sql",
+  );
+  await proveTypedColumns(MONEY_COLUMNS);
+});
+
+test("time columns reject text and fractions", async () => {
+  assert.deepEqual(
+    TIME_COLUMNS.map((spec) => `${spec.table}.${spec.column}`).sort(),
+    declaredMoneyAndTimeColumns("time"),
+    "the time column list differs from migrations/0002_core.sql",
+  );
+  await proveTypedColumns(TIME_COLUMNS);
+});
+
+test("packages reject fractional days and hours", async () => {
+  await proveTypedColumns([
+    { table: "packages", column: "days", valid: 3, base: { hours: null } },
+    { table: "packages", column: "hours", valid: 24, base: { days: null } },
+  ]);
+});
+
+test("every table is STRICT", async () => {
+  const sql = readFileSync(new URL("../migrations/0002_core.sql", import.meta.url), "utf8");
+  const earlier = readFileSync(new URL("../migrations/0001_init.sql", import.meta.url), "utf8");
+  const tablesOf = (text: string) => [...text.matchAll(/^CREATE TABLE (\w+)/gm)].map((match) => match[1]);
+  const fromCore = tablesOf(sql);
+  const fromInit = tablesOf(earlier);
+  assert.ok(fromCore.length > 0, "found no tables in 0002");
+  assert.deepEqual([...fromCore].sort(), Object.keys(TABLES).sort(), "0002 and the TABLES list disagree");
+
+  const { db, dispose } = await createTestDb();
+  try {
+    const list = await db.prepare("PRAGMA table_list").all<{ schema: string; name: string; type: string; strict: number }>();
+    const user = list.results.filter(
+      (row) =>
+        row.schema === "main" && row.type === "table" && !/^(sqlite_|_cf_|d1_)/.test(row.name) && !fromInit.includes(row.name),
+    );
+    assert.deepEqual(user.map((row) => row.name).sort(), [...fromCore].sort(), "tables beyond 0001 are exactly the ones in 0002");
+    const loose = user.filter((row) => row.strict !== 1).map((row) => row.name);
+    assert.deepEqual(loose, [], `tables that are not STRICT: ${loose.join(", ")}`);
+  } finally {
+    await dispose();
+  }
+});
