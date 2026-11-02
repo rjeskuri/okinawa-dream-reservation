@@ -49,7 +49,7 @@ const yen = (jpy: number) => t(locale, rentals, "rentals.amount").replace("{amou
   <div class="details">
     <div>{t(locale, rentals, `rentals.license.${model.licenseClass}`)}</div>
     <div>
-      {packageName}:{" "}
+      {packageName && <>{packageName}: </>}
       {
         priceJpy === undefined ? (
           t(locale, rentals, "rentals.card.noPrice")

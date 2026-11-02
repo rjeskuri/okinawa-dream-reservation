@@ -16,7 +16,15 @@ import { addDaysToDate, epochToJst, formatHHmm, jstToday, jstToEpoch, parseHHmm 
 import type { Catalog, ShopConfig, VehicleTypeId } from "../../src/lib/types.ts";
 import { mainOf, tagsIn, visibleText, type Tag } from "../helpers/html.ts";
 import { insertRow, seedBooking } from "../helpers/seed.ts";
-import { appendCopy, expectedCatalog, setCell, validWorkbook, type Workbook } from "../helpers/sheet-workbook.ts";
+import {
+  appendCopy,
+  appendRow,
+  expectedCatalog,
+  removeRow,
+  setCell,
+  validWorkbook,
+  type Workbook,
+} from "../helpers/sheet-workbook.ts";
 import { startWorker, type TestWorker } from "../helpers/worker.ts";
 
 const HOUR_MS = 3_600_000;
@@ -43,7 +51,8 @@ beforeEach(async () => {
 function sheetCatalog(edit: (workbook: Workbook) => void = () => {}): Catalog {
   const workbook = validWorkbook();
   edit(workbook);
-  const { catalog, fatal } = validateCatalog(workbook);
+  // The date of the fixture's closed dates, fixed so that they stay plausible whatever day this runs.
+  const { catalog, fatal } = validateCatalog(workbook, Date.parse("2026-11-02T12:00:00+09:00"));
   assert.deepEqual(fatal, []);
   assert.ok(catalog, "the fixture does not validate");
   return catalog;
@@ -831,6 +840,421 @@ test("an hours package shows its prices but finds no pickup yet", async () => {
   // searchAvailability finds nothing for an hours package until task #50.
   const path = `/en/rentals?${searchQuery(date, { package: "hours-6" })}`;
   assertResults(await listing(path), [], path);
+});
+
+// Each card's own price.
+
+/** The package names the fixture and the split catalog below use, per locale, written out here. */
+const PACKAGE_NAMES: Record<string, Record<Locale, string>> = {
+  "day-1": { ja: "1日", en: "1 day", "zh-cn": "1天", ko: "1일" },
+  "day-3": { ja: "3日", en: "3 days", "zh-cn": "3天", ko: "3일" },
+  "car-same": { ja: "当日", en: "Same day", "zh-cn": "当天", ko: "당일" },
+  "car-two": { ja: "2日", en: "2 days", "zh-cn": "2天", ko: "2일" },
+};
+
+/**
+ * Bikes and cars on separate day packages, as the shop's sheet has them: the cars have no day-1 or day-3 price, and have
+ * car-same (sort 4) and car-two (sort 5) instead. The car rows are written in the opposite order to their sort.
+ */
+function splitPackages(workbook: Workbook): void {
+  removeRow(workbook, "Prices", "car-k/day-1");
+  removeRow(workbook, "Prices", "car-k/day-3");
+  const row = (id: string, days: number, sort: number) => ({
+    package_id: id,
+    days,
+    sort,
+    name_ja: PACKAGE_NAMES[id]["ja"],
+    name_en: PACKAGE_NAMES[id]["en"],
+    name_zh: PACKAGE_NAMES[id]["zh-cn"],
+    name_ko: PACKAGE_NAMES[id]["ko"],
+  });
+  appendRow(workbook, "Packages", row("car-two", 2, 5));
+  appendRow(workbook, "Packages", row("car-same", 1, 4));
+  appendRow(workbook, "Prices", {
+    rate_class_id: "car-k",
+    package_id: "car-two",
+    price_jpy: 15500,
+  });
+  appendRow(workbook, "Prices", {
+    rate_class_id: "car-k",
+    package_id: "car-same",
+    price_jpy: 8000,
+  });
+}
+
+/** The package and price each model shows on the split catalog with no package chosen, and its deposit. */
+const OWN: Record<string, { packageId: string; price: string; deposit: string }> = {
+  "today-50": { packageId: "day-1", price: "3,500", deposit: "3,000" },
+  "pcx-125": { packageId: "day-1", price: "5,200", deposit: "3,000" },
+  "rebel-250": { packageId: "day-1", price: "9,100", deposit: "5,000" },
+  "nbox-660": { packageId: "car-same", price: "8,000", deposit: "10,000" },
+};
+
+/** The card shows `price` and the name of `packageId` in this locale, and no other package's name. */
+function assertPriced(shown: Card, locale: Locale, packageId: string, price: string, label: string): void {
+  const name = PACKAGE_NAMES[packageId]?.[locale] as string;
+  assert.deepEqual(amounts(shown, "data-price"), [price], `${label}: price of ${shown.id}`);
+  assert.ok(shown.text.includes(name), `${label}: ${shown.id} does not name ${packageId} (${name}): ${shown.text}`);
+  for (const [other, names] of Object.entries(PACKAGE_NAMES)) {
+    if (other === packageId) continue;
+    assert.ok(!shown.text.includes(names[locale]), `${label}: ${shown.id} names ${other} too: ${shown.text}`);
+  }
+}
+
+test("with no package chosen every card shows its own class's price", async () => {
+  await publish(sheetCatalog(splitPackages));
+
+  const queries: { query: string; expected: string[] }[] = [
+    { query: "", expected: ACTIVE },
+    { query: "?class=car-k", expected: ["nbox-660"] },
+    { query: "?class=bike-125", expected: ["pcx-125"] },
+    { query: "?class=bike-400", expected: ["rebel-250"] },
+    { query: "?class=scooter-50", expected: ["today-50"] },
+    { query: "?type=car", expected: ACTIVE },
+  ];
+  for (const locale of LOCALES) {
+    for (const { query, expected } of queries) {
+      const path = `/${locale}/rentals${query}`;
+      const main = await listing(path);
+      assertBrowsing(main, expected, path);
+      for (const id of expected) {
+        const own = OWN[id] as (typeof OWN)[string];
+        const shown = card(main, id, path);
+        assertPriced(shown, locale, own.packageId, own.price, path);
+        assert.deepEqual(amounts(shown, "data-deposit"), [own.deposit], `${path}: deposit of ${id}`);
+      }
+    }
+  }
+});
+
+test("with no package chosen a class takes the first day package it has a price for", async () => {
+  // bike-400 has no day-1 price, so its first day package is day-3 (the hours package does not count), and car-k has
+  // no car-same price, so its first is car-two.
+  await publish(
+    sheetCatalog((workbook) => {
+      splitPackages(workbook);
+      removeRow(workbook, "Prices", "bike-400/day-1");
+      removeRow(workbook, "Prices", "car-k/car-same");
+    }),
+  );
+
+  const main = await listing("/en/rentals");
+  assertBrowsing(main, ACTIVE, "first priced day package");
+  assertPriced(card(main, "today-50", "first"), "en", "day-1", "3,500", "today-50");
+  assertPriced(card(main, "rebel-250", "first"), "en", "day-3", "24,700", "rebel-250");
+  assertPriced(card(main, "nbox-660", "first"), "en", "car-two", "15,500", "nbox-660");
+
+  // The same holds in the other locales, and for a class that is listed alone.
+  const alone = await listing("/ko/rentals?class=bike-400");
+  assertPriced(card(alone, "rebel-250", "alone"), "ko", "day-3", "24,700", "ko rebel-250");
+});
+
+test("a chosen package prices every card from that package, or from none", async () => {
+  const catalog = sheetCatalog(splitPackages);
+  await publish(catalog);
+
+  // Every package that has a price, the hours one included, including those that only the other type has.
+  const chosenPrices: Record<string, Record<string, string | undefined>> = {
+    "day-1": {
+      "today-50": "3,500",
+      "pcx-125": "5,200",
+      "rebel-250": "9,100",
+      "nbox-660": undefined,
+    },
+    "day-3": {
+      "today-50": "9,000",
+      "pcx-125": "13,800",
+      "rebel-250": "24,700",
+      "nbox-660": undefined,
+    },
+    "car-same": {
+      "today-50": undefined,
+      "pcx-125": undefined,
+      "rebel-250": undefined,
+      "nbox-660": "8,000",
+    },
+    "car-two": {
+      "today-50": undefined,
+      "pcx-125": undefined,
+      "rebel-250": undefined,
+      "nbox-660": "15,500",
+    },
+    "hours-6": {
+      "today-50": "2,500",
+      "pcx-125": "3,600",
+      "rebel-250": "6,100",
+      "nbox-660": undefined,
+    },
+  };
+  for (const locale of LOCALES) {
+    for (const [packageId, expected] of Object.entries(chosenPrices)) {
+      const path = `/${locale}/rentals?package=${packageId}`;
+      const main = await listing(path);
+      assertBrowsing(main, ACTIVE, path);
+      assert.equal(chosen(filterForm(main, path), "package"), packageId, `${path}: package select`);
+      for (const [id, price] of Object.entries(expected)) {
+        const shown = card(main, id, path);
+        if (price === undefined) {
+          assert.deepEqual(amounts(shown, "data-price"), [], `${path}: a price on ${id}`);
+          // The deposit is the only amount on a card without a price.
+          assert.deepEqual(yenIn(shown.text), amounts(shown, "data-deposit"), `${path}: amounts on ${id}`);
+        } else {
+          assert.deepEqual(amounts(shown, "data-price"), [price], `${path}: price of ${id}`);
+          // No other package's price shows beside it: the amounts are the price and the deposit.
+          assert.equal(yenIn(shown.text).length, 2, `${path}: amounts on ${id}: ${shown.text}`);
+        }
+      }
+    }
+  }
+
+  // With dates the package is required, and the cards are for it.
+  const [date] = openDates(catalog);
+  const path = `/en/rentals?${searchQuery(date, { package: "car-same", type: "car" })}`;
+  const main = await listing(path);
+  assertResults(main, ["nbox-660"], path);
+  assertPriced(card(main, "nbox-660", path), "en", "car-same", "8,000", path);
+});
+
+test("a class with no priced day package shows no price", async () => {
+  // The class that is left with its hours price only, which is no day package, and the deposit its card shows. The other
+  // classes keep the prices of the split catalog.
+  const scenarios: {
+    bare: string;
+    deposit: string;
+    edit: (workbook: Workbook) => void;
+  }[] = [
+    {
+      bare: "rebel-250",
+      deposit: "5,000",
+      edit: (workbook) => {
+        removeRow(workbook, "Prices", "bike-400/day-1");
+        removeRow(workbook, "Prices", "bike-400/day-3");
+      },
+    },
+    {
+      bare: "nbox-660",
+      deposit: "10,000",
+      edit: (workbook) => {
+        removeRow(workbook, "Prices", "car-k/car-same");
+        removeRow(workbook, "Prices", "car-k/car-two");
+        appendRow(workbook, "Prices", {
+          rate_class_id: "car-k",
+          package_id: "hours-6",
+          price_jpy: 4000,
+        });
+      },
+    },
+  ];
+  for (const { bare, deposit, edit } of scenarios) {
+    await publish(
+      sheetCatalog((workbook) => {
+        splitPackages(workbook);
+        edit(workbook);
+      }),
+    );
+    for (const locale of LOCALES) {
+      for (const query of ["", "?class=bike-400", "?class=car-k", "?type=car"]) {
+        const path = `/${locale}/rentals${query}`;
+        const main = await listing(path);
+        for (const id of idsIn(main)) {
+          const shown = card(main, id, path);
+          if (id === bare) {
+            assert.deepEqual(amounts(shown, "data-price"), [], `${path}: a price on ${id}`);
+            // Not the hours price and not a zero: the deposit is the only amount.
+            assert.deepEqual(yenIn(shown.text), [deposit], `${path}: amounts on ${id}: ${shown.text}`);
+            assert.deepEqual(amounts(shown, "data-deposit"), [deposit], `${path}: deposit of ${id}`);
+          } else {
+            const own = OWN[id] as (typeof OWN)[string];
+            assertPriced(shown, locale, own.packageId, own.price, path);
+          }
+        }
+      }
+    }
+  }
+});
+
+// What a guest gets who presses Search without touching the form.
+
+/** The text of the package select's "any" option per locale, written out here. */
+const ANY: Record<Locale, string> = { ja: "すべて", en: "Any", "zh-cn": "全部", ko: "전체" };
+
+/** The no-results sentence per locale, enough of it to tell it from the rest of the page. */
+const NO_VEHICLES: Record<Locale, string> = {
+  ja: "条件に合う車両はありません",
+  en: "No vehicles match",
+  "zh-cn": "没有符合条件的车辆",
+  ko: "조건에 맞는 차량이 없습니다",
+};
+
+/** The query a browser sends from the form as rendered, untouched: each named control's default, and the empty ones too. */
+function defaultsOf(form: string): URLSearchParams {
+  const query = new URLSearchParams();
+  for (const { name, attributes } of tagsIn(form)) {
+    const field = attributes.name;
+    if (field === undefined || query.has(field)) continue;
+    if (name === "select") query.append(field, chosen(form, field) ?? "");
+    else if (name === "input" && !["submit", "button", "checkbox", "radio"].includes(attributes.type ?? "text")) {
+      query.append(field, attributes.value ?? "");
+    }
+  }
+  return query;
+}
+
+/** The package select's options with their text, in order. */
+function packageOptions(form: string): { value: string | undefined; selected: boolean; text: string }[] {
+  const select = tagsIn(form).find((tag) => tag.name === "select" && tag.attributes.name === "package");
+  assert.ok(select, "no package select");
+  const html = elementAt(form, select);
+  return tagsIn(html)
+    .filter((tag) => tag.name === "option")
+    .map((tag) => ({
+      value: tag.attributes.value,
+      selected: "selected" in tag.attributes,
+      text: visibleText(elementAt(html, tag)),
+    }));
+}
+
+test("searching with the form's own defaults keeps every card priced from its own class", async () => {
+  await publish(sheetCatalog(splitPackages));
+
+  const queries: { query: string; expected: string[] }[] = [
+    { query: "", expected: ACTIVE },
+    { query: "?class=car-k", expected: ["nbox-660"] },
+    { query: "?type=car", expected: ACTIVE },
+    { query: "?class=bike-125", expected: ["pcx-125"] },
+  ];
+  for (const locale of LOCALES) {
+    for (const { query, expected } of queries) {
+      const first = `/${locale}/rentals${query}`;
+      const sent = defaultsOf(filterForm(await listing(first), first));
+      const path = `/${locale}/rentals?${sent}`;
+      const main = await listing(path);
+      assertBrowsing(main, expected, `${path} (from ${first})`);
+      assert.equal(hookText(main, "data-search-error"), undefined, `${path}: a message`);
+      for (const id of expected) {
+        const own = OWN[id] as (typeof OWN)[string];
+        const shown = card(main, id, path);
+        assertPriced(shown, locale, own.packageId, own.price, `${path} (from ${first})`);
+        assert.deepEqual(amounts(shown, "data-deposit"), [own.deposit], `${path}: deposit of ${id}`);
+      }
+    }
+  }
+});
+
+test("the package select offers an empty choice, selected when no package is chosen", async () => {
+  await publish(sheetCatalog(splitPackages));
+
+  for (const locale of LOCALES) {
+    for (const query of ["", "?class=car-k", "?type=car", "?time=10:00", "?package="]) {
+      const path = `/${locale}/rentals${query}`;
+      const form = filterForm(await listing(path), path);
+      const [first, ...rest] = packageOptions(form);
+      assert.equal(first?.value, "", `${path}: the first option`);
+      assert.equal(first?.text, ANY[locale], `${path}: the first option's text`);
+      assert.equal(chosen(form, "package"), "", `${path}: what is submitted`);
+      // Every package is still offered, and none of them is the default.
+      assert.deepEqual(
+        rest.map(({ value }) => value).sort(),
+        ["car-same", "car-two", "day-1", "day-3", "hours-6"],
+        `${path}: packages`,
+      );
+      assert.deepEqual(rest.filter(({ selected }) => selected), [], `${path}: a package selected by default`);
+    }
+
+    // A chosen package is the selected one, and the empty choice is not.
+    for (const packageId of ["day-1", "car-same", "car-two", "hours-6"]) {
+      const path = `/${locale}/rentals?package=${packageId}`;
+      const form = filterForm(await listing(path), path);
+      assert.equal(chosen(form, "package"), packageId, `${path}: what is submitted`);
+      const selected = packageOptions(form).filter(({ selected }) => selected);
+      assert.deepEqual(selected.map(({ value }) => value), [packageId], `${path}: selected options`);
+    }
+  }
+});
+
+test("searching with the form's defaults and a date and time browses, with the prompt", async () => {
+  const catalog = sheetCatalog(splitPackages);
+  await publish(catalog);
+  const [date] = openDates(catalog);
+
+  const queries: { query: string; expected: string[] }[] = [
+    { query: "", expected: ACTIVE },
+    { query: "?class=car-k", expected: ["nbox-660"] },
+  ];
+  for (const locale of LOCALES) {
+    for (const { query, expected } of queries) {
+      const first = `/${locale}/rentals${query}`;
+      const sent = defaultsOf(filterForm(await listing(first), first));
+      sent.set("date", date);
+      sent.set("time", "10:00");
+      const path = `/${locale}/rentals?${sent}`;
+      const main = await listing(path);
+      assertBrowsing(main, expected, path);
+      assertNotice(main, "data-search-prompt", locale, path);
+      assert.equal(hookText(main, "data-search-error"), undefined, `${path}: a message`);
+      assert.ok(!visibleText(main).includes(NO_VEHICLES[locale]), `${path}: says no vehicles match`);
+      assert.ok(idsIn(main).includes("nbox-660"), `${path}: the car is not listed`);
+      // The search keeps what the guest chose.
+      const form = filterForm(main, path);
+      assert.equal(dateInput(form, path).input.attributes.value, date, `${path}: date`);
+      assert.equal(chosen(form, "time"), "10:00", `${path}: time`);
+    }
+  }
+});
+
+test("the date picker takes its package's days, and none when no package is chosen", async () => {
+  await publish(sheetCatalog(splitPackages));
+
+  for (const locale of LOCALES) {
+    for (const query of ["", "?class=car-k", "?type=car", "?package="]) {
+      const path = `/${locale}/rentals${query}`;
+      const { picker } = dateInput(filterForm(await listing(path), path), path);
+      assert.equal(picker.attributes["package-days"], undefined, `${path}: package-days`);
+    }
+    // Day packages of 1, 3, 1 and 2 days, so a fixed value cannot pass.
+    const days: Record<string, string> = { "day-1": "1", "day-3": "3", "car-same": "1", "car-two": "2" };
+    for (const [packageId, expected] of Object.entries(days)) {
+      const path = `/${locale}/rentals?package=${packageId}`;
+      const { picker } = dateInput(filterForm(await listing(path), path), path);
+      assert.equal(picker.attributes["package-days"], expected, `${path}: package-days`);
+    }
+  }
+});
+
+test("a valid cc with type=car is ignored", async () => {
+  const catalog = sheetCatalog(splitPackages);
+  await publish(catalog);
+  const [date] = openDates(catalog);
+
+  // None of these bands fits the 660 cc car, so a cc that was applied would empty the list or hide the car's price.
+  const bands = ["upto50", "51to125", "126to400", "over400"];
+  for (const band of bands) {
+    for (const locale of ["en", "ja"] as const) {
+      const complete = `/${locale}/rentals?${searchQuery(date, { package: "car-same", type: "car", cc: band })}`;
+      const main = await listing(complete);
+      assertResults(main, ["nbox-660"], complete);
+      const shown = card(main, "nbox-660", complete);
+      assertPriced(shown, locale, "car-same", "8,000", complete);
+      assert.deepEqual(amounts(shown, "data-deposit"), ["10,000"], `${complete}: deposit`);
+      // The band is not selected in the form and is not carried to the model page.
+      assert.ok(!bands.includes(chosen(filterForm(main, complete), "cc") ?? ""), `${complete}: the band is selected`);
+      const href = shown.tag.attributes["href"] ?? "";
+      assert.ok(!href.includes("cc="), `${complete}: the card carries the band: ${href}`);
+      assert.ok(href.includes("type=car"), `${complete}: the card drops the type: ${href}`);
+      assert.equal(hookText(main, "data-search-error"), undefined, `${complete}: a message for the ignored cc`);
+
+      // Browsing the car's class with no package: the cc changes nothing about the car's own price.
+      const browsing = `/${locale}/rentals?type=car&cc=${band}&class=car-k`;
+      const listed = await listing(browsing);
+      assertBrowsing(listed, ["nbox-660"], browsing);
+      assertPriced(card(listed, "nbox-660", browsing), locale, "car-same", "8,000", browsing);
+      assert.equal(hookText(listed, "data-search-error"), undefined, `${browsing}: a message for the ignored cc`);
+    }
+  }
+
+  // A scooter search keeps its cc, so the band is ignored for cars only.
+  const scooter = `/en/rentals?${searchQuery(date, { package: "day-1", type: "scooter", cc: "51to125" })}`;
+  assertResults(await listing(scooter), ["pcx-125"], scooter);
 });
 
 // The card.

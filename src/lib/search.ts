@@ -3,7 +3,7 @@
 import { CC_BANDS, type AvailabilityQuery, type AvailableModel, type CcBand } from "./booking/availability.ts";
 import { pickupWindowError, type PickupWindowReason } from "./booking/pickup-window.ts";
 import { jstToEpoch, parseHHmm } from "./time.ts";
-import type { Catalog, Model, Package, ShopConfig, VehicleTypeId } from "./types.ts";
+import type { Catalog, Model, Package, Price, ShopConfig, VehicleTypeId } from "./types.ts";
 
 /** Each is the name of a query param. */
 export type SearchField = "date" | "time" | "package" | "type" | "cc" | "class";
@@ -98,12 +98,28 @@ export function listedModels(models: Model[], search: ParsedSearch, found: Avail
     : listed.filter((model) => model.rateClassId === rateClassId);
 }
 
+/** The package the guest chose, or undefined when none: the select starts on "Any", so no default is invented. */
+export function chosenPackage(packages: Package[], search: ParsedSearch): Package | undefined {
+  return packages.find(({ id }) => id === search.packageId);
+}
+
 /**
- * The package the select shows and the cards price, so the two cannot disagree: the chosen one, else the first the search
- * can find something for. Hours packages sort first on the sheet, and a default that finds nothing would empty every search.
+ * The package and price a card shows for its rate class. A chosen package prices every card, and a class without a price for
+ * it gets none. With none chosen, each class takes its own first day package that has a price: bikes and cars have separate
+ * packages, and an hours package never stands in. `packages` is in sort order, as readCatalog returns it.
  */
-export function shownPackage(packages: Package[], search: ParsedSearch): Package | undefined {
-  return packages.find(({ id }) => id === search.packageId) ?? packages.find(({ days }) => days !== null) ?? packages[0];
+export function cardPrice(
+  packages: Package[],
+  prices: Price[],
+  rateClassId: string,
+  search: ParsedSearch,
+): { pkg: Package; priceJpy: number } | undefined {
+  const chosen = chosenPackage(packages, search);
+  for (const pkg of chosen ? [chosen] : packages.filter(({ days }) => days !== null)) {
+    const price = prices.find((entry) => entry.rateClassId === rateClassId && entry.packageId === pkg.id);
+    if (price !== undefined) return { pkg, priceJpy: price.priceJpy };
+  }
+  return undefined;
 }
 
 /** The search for a card to carry, `?` included, or "" when there is none. An invalid request carries nothing. */

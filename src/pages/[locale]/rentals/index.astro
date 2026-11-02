@@ -15,8 +15,9 @@ import { pickupSlots } from "../../../lib/booking/pickup-window.ts";
 import { photoUrl, readPhotoIndex } from "../../../lib/catalog/photos.ts";
 import { readCatalog, type PublishedCatalog } from "../../../lib/db/catalog-store.ts";
 import { isLocale } from "../../../lib/locale.ts";
-import { availabilityQuery, carriedQuery, listedModels, parseSearch, shownPackage } from "../../../lib/search.ts";
+import { availabilityQuery, cardPrice, carriedQuery, chosenPackage, listedModels, parseSearch } from "../../../lib/search.ts";
 import { addDaysToDate, epochToJst, jstToday } from "../../../lib/time.ts";
+import type { Package } from "../../../lib/types.ts";
 
 const HOUR_MS = 3_600_000;
 
@@ -32,21 +33,23 @@ async function list(catalog: PublishedCatalog) {
   const search = parseSearch(Astro.url.searchParams, catalog, catalog.config, catalog.closedDates, now);
   const query = availabilityQuery(search, now);
   const found = query && (await searchAvailability(env.DB, query));
-  const pkg = shownPackage(catalog.packages, search);
+  const pkg = chosenPackage(catalog.packages, search);
   const photos = await readPhotoIndex(env.DB);
   const carried = carriedQuery(search);
 
   const cards = listedModels(catalog.models, search, found).map((model) => ({
     model,
     href: `/${locale}/rentals/${model.id}${carried}`,
+    priced: cardPrice(catalog.packages, catalog.prices, model.rateClassId, search),
     photo: model.photos.map((name) => photoUrl(name, photos)).find((url) => url !== null) ?? null,
     rateClass: catalog.rateClasses.find(({ id }) => id === model.rateClassId),
-    priceJpy: catalog.prices.find(({ rateClassId, packageId }) => rateClassId === model.rateClassId && packageId === pkg?.id)
-      ?.priceJpy,
     depositJpy: catalog.vehicleTypes.find(({ id }) => id === model.typeId)?.depositJpy,
   }));
   return { search, complete: query !== null, pkg, cards };
 }
+
+/** A card's package label: empty when no package was chosen and the class has no day package to name. */
+const packageName = (pkg: Package | undefined) => (pkg ? sheetName(pkg.texts, locale) : "");
 
 const catalog = await readCatalog(env.DB);
 const listing = catalog && (await list(catalog));
@@ -82,6 +85,7 @@ const listing = catalog && (await list(catalog));
           <label>
             {t(locale, rentals, "rentals.form.package")}
             <select name="package">
+              <option value="">{t(locale, rentals, "rentals.form.any")}</option>
               {catalog.packages.map((pkg) => (
                 <option value={pkg.id} data-days={pkg.days ?? undefined} selected={pkg.id === listing.pkg?.id}>
                   {sheetName(pkg.texts, locale)}
@@ -127,7 +131,7 @@ const listing = catalog && (await list(catalog));
         {listing.cards.length === 0 && <p>{t(locale, rentals, "rentals.empty")}</p>}
 
         <div class="grid">
-          {listing.cards.map(({ model, href, photo, rateClass, priceJpy, depositJpy }) => (
+          {listing.cards.map(({ model, href, photo, rateClass, priced, depositJpy }) => (
             <ModelCard
               locale={locale}
               model={model}
@@ -135,8 +139,8 @@ const listing = catalog && (await list(catalog));
               available={listing.complete}
               photo={photo}
               rateClassName={rateClass ? sheetName(rateClass.texts, locale) : ""}
-              packageName={listing.pkg ? sheetName(listing.pkg.texts, locale) : ""}
-              priceJpy={priceJpy}
+              packageName={packageName(priced?.pkg ?? listing.pkg)}
+              priceJpy={priced?.priceJpy}
               depositJpy={depositJpy}
             />
           ))}
