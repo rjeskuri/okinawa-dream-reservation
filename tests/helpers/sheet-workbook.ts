@@ -1,10 +1,15 @@
 // The valid sheet fixture as a fresh workbook for each test, and small edits that keep the shape values.batchGet
 // returns: the header row first, "" for an empty cell inside a row, and trailing empty cells left off. A row is named
 // by its key cell, so a test never counts rows by hand, and the sheet row of a key is its index in the tab plus one.
+// Below those, what a publish sends back: the ranges of a batchUpdate, read the way Google reads them.
+import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import type { Catalog } from "../../src/lib/types.ts";
 
 export type Workbook = Record<string, unknown[][]>;
+
+/** One entry of a batchUpdate. */
+export type StatusWrite = { range: string; values: unknown[][] };
 
 /** The tabs one publish reads. Blocks has its own endpoint, and the Worker writes the others. */
 export const CATALOG_TABS = [
@@ -132,4 +137,52 @@ export function rearrangeColumns(
     order.map((index) => respell(String(header[index]))),
     ...rows.map((row) => batchGetRow(order.map((index) => row[index]))),
   ];
+}
+
+// A1 notation for one column, with the tab quoted or not. A range that names no last row is refused, because the ticket
+// has each write end at the tab's last data row.
+const STATUS_RANGE = /^'?([^'!]+)'?!([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/;
+
+export function parseStatusRange(range: string): { tab: string; column: string; firstRow: number; lastRow: number } {
+  const match = STATUS_RANGE.exec(range);
+  assert.ok(match, `${range} is not a range of one column`);
+  const [, tab, column, firstRow, lastColumn = column, lastRow = firstRow] = match;
+  assert.equal(lastColumn, column, `${range} spans more than one column`);
+  return { tab, column, firstRow: Number(firstRow), lastRow: Number(lastRow) };
+}
+
+/** The one range written to `tab`, with one cell per row of the range, top to bottom. */
+export function statusWrite(
+  data: StatusWrite[],
+  tab: string,
+): { column: string; firstRow: number; lastRow: number; cells: unknown[] } {
+  const writes = data.filter(({ range }) => parseStatusRange(range).tab === tab);
+  assert.equal(writes.length, 1, `${tab} takes one range, got ${writes.map(({ range }) => range).join(", ") || "none"}`);
+  const [{ range, values }] = writes;
+  const { column, firstRow, lastRow } = parseStatusRange(range);
+  assert.equal(values.length, lastRow - firstRow + 1, `${range} takes one value per row`);
+  for (const row of values) assert.equal(row.length, 1, `${range} takes one cell per row, got ${JSON.stringify(row)}`);
+  return { column, firstRow, lastRow, cells: values.map(([cell]) => cell) };
+}
+
+function sortedBy<T>(rows: T[], key: (row: T) => string | number): T[] {
+  return [...rows].sort((a, b) => String(key(a)).localeCompare(String(key(b))));
+}
+
+/** A catalog, stored or expected, with its lists sorted by key: row order is not part of the contract. */
+export function canonicalCatalog(stored: (Catalog & { version?: number; publishedAt?: number }) | null): Catalog {
+  assert.ok(stored, "no catalog was stored");
+  const { version: _version, publishedAt: _publishedAt, ...catalog } = stored;
+  return {
+    ...catalog,
+    vehicleTypes: sortedBy(catalog.vehicleTypes, (type) => type.id),
+    rateClasses: sortedBy(catalog.rateClasses, (rateClass) => rateClass.id),
+    models: sortedBy(catalog.models, (model) => model.id),
+    vehicles: sortedBy(catalog.vehicles, (vehicle) => vehicle.plate),
+    packages: sortedBy(catalog.packages, (pack) => pack.id),
+    prices: sortedBy(catalog.prices, (price) => `${price.rateClassId}/${price.packageId}`),
+    options: sortedBy(catalog.options, (option) => option.id),
+    cancellationTiers: sortedBy(catalog.cancellationTiers, (tier) => tier.minDaysBefore),
+    closedDates: [...catalog.closedDates].sort(),
+  };
 }

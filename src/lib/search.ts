@@ -3,7 +3,7 @@
 import { CC_BANDS, type AvailabilityQuery, type AvailableModel, type CcBand } from "./booking/availability.ts";
 import { pickupWindowError, type PickupWindowReason } from "./booking/pickup-window.ts";
 import { jstToEpoch, parseHHmm } from "./time.ts";
-import type { Catalog, Model, Package, ShopConfig, VehicleTypeId } from "./types.ts";
+import type { Catalog, Model, Package, Price, ShopConfig, VehicleTypeId } from "./types.ts";
 
 /** Each is the name of a query param. */
 export type SearchField = "date" | "time" | "package" | "type" | "cc" | "class";
@@ -18,8 +18,15 @@ export type ParsedSearch = {
   typeId?: VehicleTypeId;
   ccBand?: CcBand;
   rateClassId?: string;
+  /**
+   * With a type and no package, a pickup the window accepts sets this: each class to search, by id, with the id of its
+   * default package. It can be empty, a search that finds nothing.
+   */
+  classPackages?: Map<string, string>;
   errors: SearchError[];
 };
+
+type DayPackage = Package & { days: number };
 
 const TIME_FIELD_REASONS: readonly PickupWindowReason[] = ["OFF_SLOT", "OUTSIDE_HOURS"];
 
@@ -32,15 +39,49 @@ function parses(parse: (value: string) => unknown, value: string): boolean {
   }
 }
 
+/** A class's default package, the one its card is priced on with none chosen: its first day package with a price. */
+function defaultPackage(packages: Package[], prices: Price[], rateClassId: string): DayPackage | undefined {
+  const priced = ({ id }: Package) => prices.some((entry) => entry.rateClassId === rateClassId && entry.packageId === id);
+  return packages.filter((pkg): pkg is DayPackage => pkg.days !== null).find(priced);
+}
+
 /**
- * The params of a listing request. An empty param counts as absent. The pickup window is checked only for a date, time and
- * day package that are each valid, and the date or time it refuses comes back undefined like any other invalid param. An
- * hours package has no return day until task #50, so it has no window to check. cc means nothing for a car (the guest may
- * have left a band behind when switching type), so it is dropped.
+ * The window of a pickup with a type and no package. Only the return date depends on a package, so everything else refuses
+ * the pickup as it would with one. A class whose default package returns on a closed date is left out, and only a type with
+ * no class left to search for that reason is refused, since a type with no class to begin with has no return to blame.
+ */
+function typeWindow(
+  { packages, prices, models }: Pick<Catalog, "packages" | "prices" | "models">,
+  typeId: VehicleTypeId,
+  config: ShopConfig,
+  closedDates: string[],
+  startAt: number,
+  now: number,
+): { refusal: PickupWindowReason | null; classPackages?: Map<string, string> } {
+  // A one-day rental returns on the pickup day, so this is every check but the return. It comes first because the calendar
+  // helpers throw on a start the clock checks refuse.
+  const refusal = pickupWindowError(config, closedDates, startAt, 1, now);
+  if (refusal !== null) return { refusal };
+
+  const classIds = new Set(models.filter((m) => m.active && m.typeId === typeId).map(({ rateClassId }) => rateClassId));
+  const defaults = [...classIds].flatMap((rateClassId) => {
+    const pkg = defaultPackage(packages, prices, rateClassId);
+    return pkg === undefined ? [] : [{ rateClassId, pkg }];
+  });
+  const open = defaults.filter(({ pkg }) => pickupWindowError(config, closedDates, startAt, pkg.days, now) === null);
+  if (defaults.length > 0 && open.length === 0) return { refusal: "CLOSED_RETURN" };
+  return { refusal: null, classPackages: new Map(open.map(({ rateClassId, pkg }) => [rateClassId, pkg.id])) };
+}
+
+/**
+ * The params of a listing request. An empty param counts as absent. The pickup window is checked only for a valid date and
+ * time with a valid day package, or with a valid type and no package at all, and the date or time it refuses comes back
+ * undefined like any other invalid param. An hours package has no return day until task #50, so it has no window to check.
+ * cc means nothing for a car (the guest may have left a band behind when switching type), so it is dropped.
  */
 export function parseSearch(
   params: URLSearchParams,
-  catalog: Pick<Catalog, "packages" | "vehicleTypes" | "rateClasses">,
+  catalog: Pick<Catalog, "packages" | "prices" | "models" | "vehicleTypes" | "rateClasses">,
   config: ShopConfig,
   closedDates: string[],
   now: number,
@@ -62,25 +103,61 @@ export function parseSearch(
   const ccBand = read("cc", (value) => (Object.hasOwn(CC_BANDS, value) ? (value as CcBand) : undefined));
   const rateClassId = read("class", (value) => catalog.rateClasses.find(({ id }) => id === value)?.id);
 
-  if (date !== undefined && time !== undefined && pkg !== undefined && pkg.days !== null) {
-    const reason = pickupWindowError(config, closedDates, jstToEpoch(date, time), pkg.days, now);
-    if (reason !== null && TIME_FIELD_REASONS.includes(reason)) {
-      errors.push({ field: "time", reason });
-      time = undefined;
-    } else if (reason !== null) {
-      errors.push({ field: "date", reason });
-      date = undefined;
+  let refusal: PickupWindowReason | null = null;
+  let classPackages: Map<string, string> | undefined;
+  if (date !== undefined && time !== undefined) {
+    const startAt = jstToEpoch(date, time);
+    if (pkg !== undefined && pkg.days !== null) {
+      refusal = pickupWindowError(config, closedDates, startAt, pkg.days, now);
+    } else if (pkg === undefined && typeId !== undefined && !errors.some(({ field }) => field === "package")) {
+      ({ refusal, classPackages } = typeWindow(catalog, typeId, config, closedDates, startAt, now));
     }
   }
+  if (refusal !== null && TIME_FIELD_REASONS.includes(refusal)) {
+    errors.push({ field: "time", reason: refusal });
+    time = undefined;
+  } else if (refusal !== null) {
+    errors.push({ field: "date", reason: refusal });
+    date = undefined;
+  }
 
-  return { date, time, packageId: pkg?.id, typeId, ccBand: typeId === "car" ? undefined : ccBand, rateClassId, errors };
+  const band = typeId === "car" ? undefined : ccBand;
+  return { date, time, packageId: pkg?.id, typeId, ccBand: band, rateClassId, classPackages, errors };
 }
 
-/** The search to run, or null without a complete and valid one. */
-export function availabilityQuery(search: ParsedSearch, now: number): AvailabilityQuery | null {
-  const { date, time, packageId, typeId, ccBand, errors } = search;
-  if (errors.length > 0 || date === undefined || time === undefined || packageId === undefined) return null;
-  return { startAt: jstToEpoch(date, time), packageId, typeId, ccBand, now };
+/**
+ * The searches to run, or null without a complete and valid one: a date and time with a package, which is one search, or
+ * with classPackages, which is one search for each package the classes default to.
+ */
+function availabilityQueries(search: ParsedSearch, now: number): AvailabilityQuery[] | null {
+  const { date, time, packageId, classPackages, typeId, ccBand, errors } = search;
+  const packageIds = packageId === undefined ? classPackages && new Set(classPackages.values()) : [packageId];
+  if (errors.length > 0 || date === undefined || time === undefined || packageIds === undefined) return null;
+  return [...packageIds].map((id) => ({ startAt: jstToEpoch(date, time), packageId: id, typeId, ccBand, now }));
+}
+
+/**
+ * What a complete, valid search finds, or null without one. `find` runs one search. With classPackages a model counts only in
+ * the search of its own class's package, and the result follows `models`, not the searches: readCatalog returns them by sort,
+ * then id, the order of one search.
+ */
+export async function findModels(
+  search: ParsedSearch,
+  models: Model[],
+  now: number,
+  find: (query: AvailabilityQuery) => Promise<AvailableModel[]>,
+): Promise<AvailableModel[] | null> {
+  const queries = availabilityQueries(search, now);
+  if (queries === null) return null;
+  const searched = await Promise.all(queries.map(async (query) => [query.packageId, await find(query)] as const));
+  const { classPackages } = search;
+  if (classPackages === undefined) return searched.flatMap(([, found]) => found);
+
+  const foundOn = new Map(searched);
+  return models.flatMap(({ id, rateClassId }) => {
+    const found = foundOn.get(classPackages.get(rateClassId) ?? "");
+    return found?.find(({ modelId }) => modelId === id) ?? [];
+  });
 }
 
 /**
@@ -99,11 +176,28 @@ export function listedModels(models: Model[], search: ParsedSearch, found: Avail
 }
 
 /**
- * The package the select shows and the cards price, so the two cannot disagree: the chosen one, else the first the search
- * can find something for. Hours packages sort first on the sheet, and a default that finds nothing would empty every search.
+ * The package the guest chose, or undefined when none: the select starts on "Any", so no default is invented, not even for a
+ * search that ran on each class's default package.
  */
-export function shownPackage(packages: Package[], search: ParsedSearch): Package | undefined {
-  return packages.find(({ id }) => id === search.packageId) ?? packages.find(({ days }) => days !== null) ?? packages[0];
+export function chosenPackage(packages: Package[], search: ParsedSearch): Package | undefined {
+  return packages.find(({ id }) => id === search.packageId);
+}
+
+/**
+ * The package and price a card shows for its rate class. A chosen package prices every card, and a class without a price for
+ * it gets none. With none chosen, each class takes its own first day package that has a price: bikes and cars have separate
+ * packages, and an hours package never stands in. `packages` is in sort order, as readCatalog returns it.
+ */
+export function cardPrice(
+  packages: Package[],
+  prices: Price[],
+  rateClassId: string,
+  search: ParsedSearch,
+): { pkg: Package; priceJpy: number } | undefined {
+  const pkg = chosenPackage(packages, search) ?? defaultPackage(packages, prices, rateClassId);
+  if (pkg === undefined) return undefined;
+  const price = prices.find((entry) => entry.rateClassId === rateClassId && entry.packageId === pkg.id);
+  return price && { pkg, priceJpy: price.priceJpy };
 }
 
 /** The search for a card to carry, `?` included, or "" when there is none. An invalid request carries nothing. */
