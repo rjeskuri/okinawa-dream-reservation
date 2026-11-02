@@ -1,0 +1,19 @@
+---
+// /{locale}/: a placeholder home page until task #28 fills it.
+import { common } from "../../i18n/strings/common.ts";
+import { t } from "../../i18n/t.ts";
+import Base from "../../layouts/Base.astro";
+import { isLocale } from "../../lib/locale.ts";
+
+const { locale } = Astro.params;
+// Astro's own check ignores case and sees any segment of the path, so it passes /JA/.
+if (!isLocale(locale)) return new Response(null, { status: 404 });
+
+const name = t(locale, common, "site.name");
+const tagline = t(locale, common, "site.tagline");
+---
+
+<Base locale={locale} title={`${name} | ${tagline}`}>
+  <h1>{name}</h1>
+  <p>{tagline}</p>
+</Base>
