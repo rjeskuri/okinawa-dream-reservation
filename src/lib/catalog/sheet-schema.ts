@@ -113,6 +113,11 @@ function readCell(value: unknown, asTyped = false): Cell {
   return typeof value === "number" || typeof value === "boolean" ? value : "";
 }
 
+/** A header as it is matched: normalized like any text, in lower case. */
+export function headerKey(value: unknown): string {
+  return String(readCell(value)).toLowerCase();
+}
+
 function wholeOf(cell: Cell): number {
   if (typeof cell === "number") return cell;
   return typeof cell === "string" && WHOLE_NUMBER.test(cell) ? Number(cell) : NaN;
@@ -291,7 +296,7 @@ function readTab(raw: Workbook, tab: Tab, fatal: string[]): Row[] | null {
 
   const indexes = new Map<string, number>();
   header.forEach((name, index) => {
-    const column = String(readCell(name)).toLowerCase();
+    const column = headerKey(name);
     if (!indexes.has(column)) indexes.set(column, index);
   });
   const columns: readonly string[] = SHEET_TABS[tab];

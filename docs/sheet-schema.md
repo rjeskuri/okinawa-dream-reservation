@@ -273,6 +273,9 @@ accident cannot free bikes that an OTA has sold.
 The Worker writes this tab. **Use filter views, and never sort it**: a sort moves rows, and one that lands while the
 Worker is updating the tab can put a booking's update on the wrong row. A filter view moves nothing.
 
+Every column up to the last one needs a header, because a column with no header stops the Worker writing to this tab
+until it is named or removed.
+
 Staff type in one column, `override_plate`, to move a booking to another bike. Publish moves it if that bike is active,
 of the same model and free for the booking's time. `override_status` then shows the result, and the booking keeps its
 bike if the move was refused.
