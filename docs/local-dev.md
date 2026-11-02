@@ -82,7 +82,8 @@ scripts/export-pdf.sh
 
 It prints each page through headless Chrome (the macOS install at `/Applications/Google Chrome.app`, or set `CHROME`),
 in English and Japanese, into `mock-pdfs/` (gitignored), as `en-home.pdf`, `ja-rentals-search.pdf` and so on. Rerunning
-overwrites. The pages are home, rentals with a search two weeks out, a model page, the fee schedule in full and filtered
+replaces each PDF and removes the one of a page that fails or is skipped, so the folder holds only this run's output.
+The pages are home, rentals with a search two weeks out, a model page, the fee schedule in full and filtered
 to one class, FAQ, policies and access. Checkout joins once it renders from a seeded hold.
 
 - The script checks `/api/health` first and stops with a message when the site is down. If another session holds port

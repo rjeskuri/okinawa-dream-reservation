@@ -25,7 +25,29 @@ fi
 mkdir -p "$OUT"
 WORK=$(mktemp -d)
 # Chrome gets its own profile, so that it never collides with the Chrome that is open on this machine.
-trap 'rm -rf "$WORK"' EXIT INT TERM
+trap 'rm -rf "$WORK"' EXIT
+
+# The pids of the Chrome that is printing now and of its watchdog, empty between pages, so that a signal can stop them.
+CHROME_PID=""
+WATCH_PID=""
+
+# abort CODE: stops the running Chrome and its watchdog and exits, which runs the cleanup on EXIT. Without it INT and
+# TERM would delete $WORK and carry on with the next page.
+abort() {
+  trap '' INT TERM
+  for pid in $WATCH_PID $CHROME_PID; do
+    kill "$pid" 2>/dev/null || true
+  done
+  # Wait until Chrome is gone: one that is still shutting down writes into $WORK/profile while the cleanup deletes it,
+  # and leaves the directory behind.
+  for pid in $WATCH_PID $CHROME_PID; do
+    wait "$pid" 2>/dev/null || true
+  done
+  echo "interrupted, stopped" >&2
+  exit "$1"
+}
+trap 'abort 130' INT
+trap 'abort 143' TERM
 
 # A date two weeks out, so that the search is never in the past. The demo's closed dates are at the turn of the year.
 SEARCH="date=$(date -v+14d +%F)&time=09:00&package=bike-same-day"
@@ -44,6 +66,8 @@ print_page() {
   label="$locale-$name"
   url="$BASE/$locale$path"
 
+  # The folder must hold only what this run produced, never a PDF an earlier run left for a page that now fails or skips.
+  rm -f "$OUT/$label.pdf"
   status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$url") || status=000
   if [ "$status" = 404 ] && [ "$optional" = optional ]; then
     echo "warning: $label skipped, $url answers 404" >&2
@@ -62,19 +86,23 @@ print_page() {
   "$CHROME" --headless --disable-gpu --no-first-run --no-default-browser-check \
     --user-data-dir="$WORK/profile" --no-pdf-header-footer --virtual-time-budget=10000 \
     --print-to-pdf="$tmp" "$url" >/dev/null 2>&1 &
-  chrome_pid=$!
+  CHROME_PID=$!
   (
     waited=0
-    while [ "$waited" -lt "$PAGE_TIMEOUT" ] && kill -0 "$chrome_pid" 2>/dev/null; do
+    while [ "$waited" -lt "$PAGE_TIMEOUT" ] && kill -0 "$CHROME_PID" 2>/dev/null; do
       sleep 1
       waited=$((waited + 1))
     done
     if [ "$waited" -ge "$PAGE_TIMEOUT" ]; then
-      kill "$chrome_pid" 2>/dev/null || true
+      kill "$CHROME_PID" 2>/dev/null || true
     fi
   ) &
+  WATCH_PID=$!
   rc=0
-  wait "$chrome_pid" || rc=$?
+  wait "$CHROME_PID" || rc=$?
+  kill "$WATCH_PID" 2>/dev/null || true
+  CHROME_PID=""
+  WATCH_PID=""
 
   if [ "$rc" != 0 ] || [ ! -s "$tmp" ] || [ "$(head -c 4 "$tmp")" != "%PDF" ]; then
     echo "error: $label failed, Chrome did not write a PDF for $url (exit $rc)" >&2
