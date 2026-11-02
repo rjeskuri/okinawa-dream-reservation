@@ -87,6 +87,13 @@ The other paths:
 - `ON_HOLD -> EXPIRED`: the hold passes `expires_at` unpaid. It stops blocking at that moment, with no cleanup job.
 - `PAYMENT_PENDING -> ON_HOLD`: the card was declined, so the hold returns with its original expiry and the guest can retry.
 - `PAYMENT_PENDING -> EXPIRED`: no payment found in Square for a booking stuck in PAYMENT_PENDING.
+- `CANCELLED -> CONFIRMED`: a block's row returns to the sheet before the block's end and the overlap rule still lets it.
+  Web bookings have no way back.
+
+`syncBlocks` in `src/lib/booking/blocks.ts` writes block bookings. `content_hash` is the row as last synced, so an
+unchanged row costs no write. Any write that takes a vehicle picks it inside that one conditional statement, as a hold
+does. Blocks that have ended are never written again, and at most 20 changes run per call. `docs/sheet-schema.md` says
+what staff see.
 
 ## The overlap rule
 

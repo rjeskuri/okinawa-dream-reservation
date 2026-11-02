@@ -43,7 +43,7 @@ beforeEach(async () => {
 function sheetCatalog(edit: (workbook: Workbook) => void = () => {}): Catalog {
   const workbook = validWorkbook();
   edit(workbook);
-  const { catalog, fatal } = validateCatalog(workbook);
+  const { catalog, fatal } = validateCatalog(workbook, Date.parse("2026-11-02T12:00:00+09:00"));
   assert.deepEqual(fatal, []);
   assert.ok(catalog, "the fixture does not validate");
   return catalog;

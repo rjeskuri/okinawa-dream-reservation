@@ -249,6 +249,25 @@ const READ_CATALOG_SQL = [
   "SELECT date FROM closed_dates ORDER BY date",
 ];
 
+/**
+ * What a Blocks row is checked against, or null before the first publish: every model and vehicle, as readCatalog holds
+ * them. Three statements to its eleven, because the block sync needs nearly all of D1's 50 queries per invocation.
+ */
+export async function readCatalogKeys(
+  db: D1Database,
+): Promise<{ models: { id: string }[]; vehicles: { plate: string; modelId: string }[] } | null> {
+  const [meta, models, vehicles] = await db.batch([
+    db.prepare("SELECT version FROM catalog_meta"),
+    db.prepare("SELECT id FROM models"),
+    db.prepare("SELECT plate, model_id AS modelId FROM vehicles"),
+  ]);
+  if (meta.results.length === 0) return null;
+  return {
+    models: models.results as { id: string }[],
+    vehicles: vehicles.results as { plate: string; modelId: string }[],
+  };
+}
+
 /** A result's rows with their `texts` JSON decoded. */
 function decodeTexts<T>(result: D1Result): T[] {
   return (result.results as { texts: string }[]).map((row) => ({ ...row, texts: JSON.parse(row.texts) }) as T);
