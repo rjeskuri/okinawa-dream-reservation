@@ -52,7 +52,11 @@ export function monthGrid(year: number, month: number, opts: MonthGridOptions): 
   );
 }
 
-/** The date a package of `days` days ends: a plain addition, so 0 days returns the pickup date itself. */
+/**
+ * The package's last day. A package returns by closing on that day (the owner's decision on ticket #11), so the rule is
+ * pickup + days - 1 and a 1 day package returns the day it was picked up. Below 1 day is a RangeError.
+ */
 export function returnDate(pickup: string, days: number): string {
-  return addDaysToDate(pickup, days);
+  if (days < 1) throw new RangeError(`a package lasts at least 1 day: ${days}`);
+  return addDaysToDate(pickup, days - 1);
 }

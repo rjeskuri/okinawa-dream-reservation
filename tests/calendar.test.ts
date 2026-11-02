@@ -372,42 +372,56 @@ test("min date follows the JST day", () => {
 });
 
 test("returnDate crosses month and year ends", () => {
-  // [pickup, days, return], written out from a calendar. A plain addition: a 3 day package from the 1st returns the 4th.
+  // [pickup, days, return], written out from a calendar. The package's last day, so pickup + (days - 1): a 3 day package
+  // from the 1st returns the 3rd, and a 1 day package returns the day it was picked up (ticket #11).
   const table: [string, number, string][] = [
-    ["2026-11-01", 3, "2026-11-04"],
-    ["2026-11-10", 7, "2026-11-17"],
+    ["2026-11-01", 3, "2026-11-03"],
+    ["2026-11-10", 7, "2026-11-16"],
     // Month ends.
-    ["2026-01-31", 1, "2026-02-01"],
-    ["2026-04-30", 1, "2026-05-01"],
-    ["2026-10-30", 3, "2026-11-02"],
-    ["2026-07-31", 31, "2026-08-31"],
-    ["2026-01-30", 30, "2026-03-01"],
+    ["2026-01-31", 2, "2026-02-01"],
+    ["2026-04-30", 2, "2026-05-01"],
+    ["2026-10-30", 3, "2026-11-01"],
+    ["2026-07-31", 31, "2026-08-30"],
+    ["2026-01-30", 31, "2026-03-01"],
     // Year ends.
-    ["2026-12-31", 1, "2027-01-01"],
-    ["2026-12-30", 7, "2027-01-06"],
-    ["2026-12-15", 30, "2027-01-14"],
+    ["2026-12-31", 2, "2027-01-01"],
+    ["2026-12-30", 7, "2027-01-05"],
+    ["2026-12-15", 30, "2027-01-13"],
     // Leap years: the century that has a leap day, the one that does not, and an ordinary year either side.
-    ["2028-02-28", 1, "2028-02-29"],
-    ["2028-02-29", 1, "2028-03-01"],
-    ["2028-02-25", 7, "2028-03-03"],
-    ["2000-02-28", 2, "2000-03-01"],
-    ["2026-02-28", 1, "2026-03-01"],
-    ["2027-02-25", 7, "2027-03-04"],
-    ["2100-02-28", 1, "2100-03-01"],
-    // Zero days adds nothing, on a month end as anywhere.
-    ["2026-11-02", 0, "2026-11-02"],
-    ["2026-12-31", 0, "2026-12-31"],
-    ["2028-02-29", 0, "2028-02-29"],
+    ["2028-02-28", 2, "2028-02-29"],
+    ["2028-02-29", 2, "2028-03-01"],
+    ["2028-02-25", 7, "2028-03-02"],
+    ["2000-02-28", 2, "2000-02-29"],
+    ["2000-02-28", 3, "2000-03-01"],
+    ["2026-02-28", 2, "2026-03-01"],
+    ["2027-02-25", 7, "2027-03-03"],
+    ["2100-02-28", 2, "2100-03-01"],
+    // The longest package, packages.days tops out at 60, with and without a leap day on the way.
+    ["2026-01-01", 60, "2026-03-01"],
+    ["2028-01-01", 60, "2028-02-29"],
+    ["2026-12-15", 60, "2027-02-12"],
+    // One day is the same-day rental, on a month end, a year end and the leap day as anywhere.
+    ["2026-11-02", 1, "2026-11-02"],
+    ["2026-01-31", 1, "2026-01-31"],
+    ["2026-12-31", 1, "2026-12-31"],
+    ["2028-02-29", 1, "2028-02-29"],
   ];
   for (const [pickup, days, expected] of table) {
     assert.equal(returnDate(pickup, days), expected, `returnDate(${pickup}, ${days})`);
   }
 
+  // Below one day would otherwise be a date before the pickup with no error, and a package is whole days.
+  for (const pickup of ["2026-11-02", "2026-12-31", "2028-02-29"]) {
+    for (const days of [0, -1, 1.5]) {
+      assert.throws(() => returnDate(pickup, days), RangeError, `returnDate(${pickup}, ${days})`);
+    }
+  }
+
   // Every pickup of six years, leap day included, with each package length.
   for (let day = 1; day <= 2200; day += 1) {
     const pickup = isoDate(2026, 1, day);
-    for (const days of [0, 1, 2, 3, 5, 7, 14, 28, 29, 30, 31]) {
-      assert.equal(returnDate(pickup, days), isoDate(2026, 1, day + days), `returnDate(${pickup}, ${days})`);
+    for (const days of [1, 2, 3, 5, 7, 14, 28, 29, 30, 31, 60]) {
+      assert.equal(returnDate(pickup, days), isoDate(2026, 1, day + days - 1), `returnDate(${pickup}, ${days})`);
     }
   }
 

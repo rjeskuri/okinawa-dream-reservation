@@ -159,8 +159,9 @@ const config = {
       const focusCursor = () => weeks.querySelector<HTMLElement>('[tabindex="0"]')?.focus();
 
       const render = () => {
-        const days = this.getAttribute("package-days");
-        const back = selected !== null && days !== null ? returnDate(selected, Number(days)) : null;
+        // A missing or empty attribute reads as 0. Anything but a whole number of at least 1 has no return date.
+        const days = Number(this.getAttribute("package-days"));
+        const back = selected !== null && Number.isInteger(days) && days >= 1 ? returnDate(selected, days) : null;
         const shown = cursor.slice(0, 7);
         month.textContent = monthName(`${shown}-01`);
         previous.disabled = shown <= min.slice(0, 7);
