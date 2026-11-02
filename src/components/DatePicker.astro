@@ -249,10 +249,21 @@ const config = {
   date-picker {
     display: inline-block;
   }
+  /* The theme's `label { display: block }` outranks the browser's own [hidden] rule. */
+  date-picker [hidden] {
+    display: none;
+  }
   .date-picker-head {
     display: flex;
     justify-content: space-between;
     align-items: center;
+  }
+  /* The theme's button fill and hover outrank the browser's disabled look. */
+  date-picker button:disabled {
+    border-color: var(--color-border);
+    background: var(--color-background);
+    color: var(--color-text-muted);
+    cursor: not-allowed;
   }
   date-picker table {
     border-collapse: collapse;
@@ -268,24 +279,25 @@ const config = {
     cursor: pointer;
   }
   date-picker td:focus-visible {
-    outline: 2px solid currentColor;
-    outline-offset: -2px;
+    /* The same ring as global.css, outside the cell: the token is only checked against the page background. */
+    outline: 3px solid var(--color-focus-ring);
+    outline-offset: 2px;
   }
   date-picker td.is-outside {
-    opacity: 0.6;
+    color: var(--color-text-muted);
   }
   date-picker td[aria-disabled="true"] {
-    color: #767676;
+    color: var(--color-text-muted);
     cursor: not-allowed;
     text-decoration: line-through;
   }
   date-picker td.is-return {
     font-weight: bold;
-    box-shadow: inset 0 0 0 2px #0a5f8a;
+    box-shadow: inset 0 0 0 2px var(--color-link);
   }
   date-picker td[aria-selected="true"] {
-    background: #0a5f8a;
-    color: #fff;
+    background: var(--color-button-background);
+    color: var(--color-button-text);
     font-weight: bold;
   }
 </style>
