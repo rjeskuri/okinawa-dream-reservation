@@ -45,6 +45,14 @@ Models and vehicles are never deleted, because bookings reference them: a publis
 `bookings.package_id` is deliberately not a foreign key, because a package can leave the catalog while bookings of it
 remain.
 
+`replaceCatalog` in `src/lib/db/catalog-store.ts` writes a publish in one D1 batch, so a failure leaves the previous
+catalog and version. Packages, prices, options, config, refund tiers and closed dates are replaced whole. A vehicle type
+or rate class the catalog no longer names leaves with it, unless a model, kept inactive ones included, still references
+it. `readCatalog` returns every row, so callers filter out inactive models and retired vehicles.
+
+A publish reports the bookings it affects: blocking bookings that end after now, on a vehicle whose status after the
+publish is not `active`.
+
 ### Bookings and bookkeeping
 
 | Table | Holds |

@@ -17,9 +17,13 @@ npm run db:migrate:local
 
 Fill in `.dev.vars` after copying it; the comments in the file say what each value is.
 
-Seed step, not available yet: `seed/local.sql` arrives with task #13 and does not exist today, so skip this step until
-then. When it exists, run `npx wrangler d1 execute DB --local --file seed/local.sql` here, before starting the server.
-It is deliberately not in a code block, so pasting the block above cannot fail on it.
+Seed a small sample catalog, before starting the server:
+
+```sh
+npx wrangler d1 execute DB --local --file seed/local.sql
+```
+
+The seed uses plain INSERTs, so to reseed, delete `.wrangler/state` first, then migrate and seed again.
 
 Start the server; it serves http://localhost:4321:
 
