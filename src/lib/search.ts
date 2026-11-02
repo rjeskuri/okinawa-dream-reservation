@@ -32,11 +32,22 @@ function parses(parse: (value: string) => unknown, value: string): boolean {
   }
 }
 
+/** Reads a param through `find`, which returns undefined for a value it refuses. An empty param counts as absent. */
+export function paramReader<Field extends string>(params: URLSearchParams, onInvalid: (field: Field) => void) {
+  return <T>(field: Field, find: (value: string) => T | undefined): T | undefined => {
+    const value = params.get(field);
+    if (value === null || value === "") return undefined;
+    const found = find(value);
+    if (found === undefined) onInvalid(field);
+    return found;
+  };
+}
+
 /**
- * The params of a listing request. An empty param counts as absent. The pickup window is checked only for a date, time and
- * day package that are each valid, and the date or time it refuses comes back undefined like any other invalid param. An
- * hours package has no return day until task #50, so it has no window to check. cc means nothing for a car (the guest may
- * have left a band behind when switching type), so it is dropped.
+ * The params of a listing request. The pickup window is checked only for a date, time and day package that are each valid,
+ * and the date or time it refuses comes back undefined like any other invalid param. An hours package has no return day
+ * until task #50, so it has no window to check. cc means nothing for a car (the guest may have left a band behind when
+ * switching type), so it is dropped.
  */
 export function parseSearch(
   params: URLSearchParams,
@@ -46,13 +57,7 @@ export function parseSearch(
   now: number,
 ): ParsedSearch {
   const errors: SearchError[] = [];
-  const read = <T>(field: SearchField, find: (value: string) => T | undefined): T | undefined => {
-    const value = params.get(field);
-    if (value === null || value === "") return undefined;
-    const found = find(value);
-    if (found === undefined) errors.push({ field, reason: "INVALID" });
-    return found;
-  };
+  const read = paramReader<SearchField>(params, (field) => errors.push({ field, reason: "INVALID" }));
 
   let date = read("date", (value) => (parses(jstToEpoch, value) ? value : undefined));
   // parseHHmm takes H:mm too, and the param is HH:mm.
