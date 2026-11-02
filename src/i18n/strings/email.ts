@@ -113,6 +113,8 @@ export const email: Dictionary = {
   "email.staff.refund.failed": japanese("返金できませんでした。Square を確認してください"),
   "email.staff.alert.subject": japanese("【要確認】{title}"),
   "email.staff.alert.intro": japanese("確認が必要な問題があります。"),
+  "email.staff.alert.refund.title": japanese("キャンセルの返金が拒否されました"),
+  "email.staff.alert.refund.action": japanese("予約はキャンセル済みです。Square を確認し、お客様にご連絡ください。"),
   "email.staff.reconcile.subject": japanese("【照合レポート】{runAt} {count}件"),
   "email.staff.reconcile.intro": japanese("{runAt} の照合で {count} 件の問題が見つかりました。"),
 };
