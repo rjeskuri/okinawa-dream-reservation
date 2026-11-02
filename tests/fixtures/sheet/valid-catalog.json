@@ -1,0 +1,284 @@
+{
+  "config": {
+    "shopOpen": "09:00",
+    "shopClose": "18:00",
+    "slotMinutes": 30,
+    "turnaroundMinutes": 60,
+    "holdMinutes": 15,
+    "minLeadHours": 24,
+    "maxDaysAhead": 180,
+    "photoMaxMb": 5
+  },
+  "vehicleTypes": [
+    {
+      "id": "scooter",
+      "depositJpy": 3000,
+      "sort": 1,
+      "texts": {
+        "ja": { "name": "スクーター" },
+        "en": { "name": "Scooter" },
+        "zh-cn": { "name": "踏板车" },
+        "ko": { "name": "스쿠터" }
+      }
+    },
+    {
+      "id": "motorcycle",
+      "depositJpy": 5000,
+      "sort": 2,
+      "texts": {
+        "ja": { "name": "バイク" },
+        "en": { "name": "Motorcycle" },
+        "zh-cn": { "name": "摩托车" },
+        "ko": { "name": "오토바이" }
+      }
+    },
+    {
+      "id": "car",
+      "depositJpy": 10000,
+      "sort": 3,
+      "texts": {
+        "ja": { "name": "車" },
+        "en": { "name": "Car" },
+        "zh-cn": { "name": "汽车" },
+        "ko": { "name": "자동차" }
+      }
+    }
+  ],
+  "rateClasses": [
+    {
+      "id": "scooter-50",
+      "grp": "bike",
+      "sort": 1,
+      "extensionPerHourJpy": 500,
+      "texts": {
+        "ja": { "name": "50ccスクーター" },
+        "en": { "name": "50cc scooter" },
+        "zh-cn": { "name": "50cc踏板车" },
+        "ko": { "name": "50cc 스쿠터" }
+      }
+    },
+    {
+      "id": "bike-125",
+      "grp": "bike",
+      "sort": 2,
+      "extensionPerHourJpy": 700,
+      "texts": {
+        "ja": { "name": "125cc" },
+        "en": { "name": "125cc bike" },
+        "zh-cn": { "name": "125cc摩托车" },
+        "ko": { "name": "125cc 오토바이" }
+      }
+    },
+    {
+      "id": "bike-400",
+      "grp": "bike",
+      "sort": 3,
+      "extensionPerHourJpy": 1000,
+      "texts": {
+        "ja": { "name": "400cc" },
+        "en": { "name": "400cc bike" },
+        "zh-cn": { "name": "400cc摩托车" },
+        "ko": { "name": "400cc 오토바이" }
+      }
+    },
+    {
+      "id": "car-k",
+      "grp": "car",
+      "sort": 4,
+      "extensionPerHourJpy": null,
+      "texts": {
+        "ja": { "name": "軽自動車" },
+        "en": { "name": "K-Car" },
+        "zh-cn": { "name": "轻型车" },
+        "ko": { "name": "경차" }
+      }
+    }
+  ],
+  "models": [
+    {
+      "id": "today-50",
+      "typeId": "scooter",
+      "engineCc": 50,
+      "licenseClass": "moped",
+      "sort": 1,
+      "active": true,
+      "rateClassId": "scooter-50",
+      "brand": "Honda",
+      "seats": null,
+      "texts": {
+        "ja": { "name": "トゥデイ", "summary": "トゥデイの概要", "description": "トゥデイの説明" },
+        "en": { "name": "Today", "summary": "Today summary", "description": "Today description" },
+        "zh-cn": { "name": "今日", "summary": "今日简介", "description": "今日说明" },
+        "ko": { "name": "투데이", "summary": "투데이 요약", "description": "투데이 설명" }
+      },
+      "photos": ["today-1.jpg", "today-2.jpg"]
+    },
+    {
+      "id": "pcx-125",
+      "typeId": "scooter",
+      "engineCc": 125,
+      "licenseClass": "small",
+      "sort": 2,
+      "active": true,
+      "rateClassId": "bike-125",
+      "brand": "Honda",
+      "seats": 2,
+      "texts": {
+        "ja": { "name": "ピーシーエックス", "summary": "PCXの概要", "description": "PCXの説明" },
+        "en": { "name": "PCX", "summary": "PCX summary", "description": "PCX description" },
+        "zh-cn": { "name": "PCX踏板", "summary": "PCX简介", "description": "PCX说明" },
+        "ko": { "name": "피씨엑스", "summary": "PCX 요약", "description": "PCX 설명" }
+      },
+      "photos": ["pcx-1.jpg", "pcx-2.jpg", "pcx-3.jpg"]
+    },
+    {
+      "id": "cub-110",
+      "typeId": "motorcycle",
+      "engineCc": 110,
+      "licenseClass": "moped",
+      "sort": 3,
+      "active": false,
+      "rateClassId": "bike-125",
+      "brand": "Honda",
+      "seats": 1,
+      "texts": {
+        "ja": { "name": "カブ", "summary": "カブの概要", "description": "カブの説明" },
+        "en": { "name": "Cub", "summary": "Cub summary", "description": "Cub description" },
+        "zh-cn": { "name": "幼兽", "summary": "幼兽简介", "description": "幼兽说明" },
+        "ko": { "name": "커브", "summary": "커브 요약", "description": "커브 설명" }
+      },
+      "photos": []
+    },
+    {
+      "id": "rebel-250",
+      "typeId": "motorcycle",
+      "engineCc": 250,
+      "licenseClass": "standard",
+      "sort": 4,
+      "active": true,
+      "rateClassId": "bike-400",
+      "brand": "Honda",
+      "seats": 2,
+      "texts": {
+        "ja": { "name": "レブル", "summary": "レブルの概要", "description": "レブルの説明" },
+        "en": { "name": "Rebel", "summary": "Rebel summary", "description": "Rebel description" },
+        "zh-cn": { "name": "叛逆者", "summary": "叛逆者简介", "description": "叛逆者说明" },
+        "ko": { "name": "레블", "summary": "레블 요약", "description": "레블 설명" }
+      },
+      "photos": ["rebel-1.jpg"]
+    },
+    {
+      "id": "nbox-660",
+      "typeId": "car",
+      "engineCc": 660,
+      "licenseClass": "car",
+      "sort": 5,
+      "active": true,
+      "rateClassId": "car-k",
+      "brand": "Honda",
+      "seats": 4,
+      "texts": {
+        "ja": { "name": "エヌボックス", "summary": "N-BOXの概要", "description": "N-BOXの説明" },
+        "en": { "name": "N-BOX", "summary": "N-BOX summary", "description": "N-BOX description" },
+        "zh-cn": { "name": "N-BOX轻型车", "summary": "N-BOX简介", "description": "N-BOX说明" },
+        "ko": { "name": "엔박스", "summary": "N-BOX 요약", "description": "N-BOX 설명" }
+      },
+      "photos": ["nbox-1.jpg"]
+    }
+  ],
+  "vehicles": [
+    { "plate": "わ1001", "modelId": "today-50", "status": "active", "odometerKm": 12000, "baseUsageDays": 30 },
+    { "plate": "わ1002", "modelId": "pcx-125", "status": "active", "odometerKm": 8000, "baseUsageDays": 0 },
+    { "plate": "わ1003", "modelId": "pcx-125", "status": "maintenance", "odometerKm": null, "baseUsageDays": 5 },
+    { "plate": "わ1004", "modelId": "cub-110", "status": "retired", "odometerKm": null, "baseUsageDays": 0 },
+    { "plate": "わ1005", "modelId": "rebel-250", "status": "active", "odometerKm": 21000, "baseUsageDays": 90 },
+    { "plate": "わ1006", "modelId": "nbox-660", "status": "active", "odometerKm": 45000, "baseUsageDays": 120 }
+  ],
+  "packages": [
+    {
+      "id": "hours-6",
+      "sort": 1,
+      "days": null,
+      "hours": 6,
+      "texts": {
+        "ja": { "name": "6時間" },
+        "en": { "name": "6 hours" },
+        "zh-cn": { "name": "6小时" },
+        "ko": { "name": "6시간" }
+      }
+    },
+    {
+      "id": "day-1",
+      "sort": 2,
+      "days": 1,
+      "hours": null,
+      "texts": {
+        "ja": { "name": "1日" },
+        "en": { "name": "1 day" },
+        "zh-cn": { "name": "1天" },
+        "ko": { "name": "1일" }
+      }
+    },
+    {
+      "id": "day-3",
+      "sort": 3,
+      "days": 3,
+      "hours": null,
+      "texts": {
+        "ja": { "name": "3日" },
+        "en": { "name": "3 days" },
+        "zh-cn": { "name": "3天" },
+        "ko": { "name": "3일" }
+      }
+    }
+  ],
+  "prices": [
+    { "rateClassId": "scooter-50", "packageId": "hours-6", "priceJpy": 2500 },
+    { "rateClassId": "scooter-50", "packageId": "day-1", "priceJpy": 3500 },
+    { "rateClassId": "scooter-50", "packageId": "day-3", "priceJpy": 9000 },
+    { "rateClassId": "bike-125", "packageId": "hours-6", "priceJpy": 3600 },
+    { "rateClassId": "bike-125", "packageId": "day-1", "priceJpy": 5200 },
+    { "rateClassId": "bike-125", "packageId": "day-3", "priceJpy": 13800 },
+    { "rateClassId": "bike-400", "packageId": "hours-6", "priceJpy": 6100 },
+    { "rateClassId": "bike-400", "packageId": "day-1", "priceJpy": 9100 },
+    { "rateClassId": "bike-400", "packageId": "day-3", "priceJpy": 24700 },
+    { "rateClassId": "car-k", "packageId": "day-1", "priceJpy": 7300 },
+    { "rateClassId": "car-k", "packageId": "day-3", "priceJpy": 18900 }
+  ],
+  "options": [
+    {
+      "id": "helmet",
+      "grp": "bike",
+      "sort": 1,
+      "baseJpy": 0,
+      "extraPerHourJpy": null,
+      "extraPer24hJpy": null,
+      "texts": {
+        "ja": { "name": "ヘルメット" },
+        "en": { "name": "Helmet" },
+        "zh-cn": { "name": "头盔" },
+        "ko": { "name": "헬멧" }
+      }
+    },
+    {
+      "id": "child-seat",
+      "grp": "car",
+      "sort": 2,
+      "baseJpy": 1100,
+      "extraPerHourJpy": 110,
+      "extraPer24hJpy": 550,
+      "texts": {
+        "ja": { "name": "チャイルドシート" },
+        "en": { "name": "Child seat" },
+        "zh-cn": { "name": "儿童座椅" },
+        "ko": { "name": "카시트" }
+      }
+    }
+  ],
+  "cancellationTiers": [
+    { "minDaysBefore": 7, "refundPercent": 100 },
+    { "minDaysBefore": 3, "refundPercent": 50 },
+    { "minDaysBefore": 0, "refundPercent": 0 }
+  ],
+  "closedDates": ["2026-12-31", "2027-01-01", "2027-01-02"]
+}
