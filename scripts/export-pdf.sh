@@ -59,6 +59,31 @@ FAILED=""
 SKIPPED=""
 DONE=0
 
+# run_chrome URL OUT LOG: prints URL to the PDF OUT, with Chrome's stdout and stderr in LOG, and leaves its exit code in $rc.
+# --virtual-time-budget lets images and scripts settle before the page is printed. The watchdog kills a Chrome that hangs.
+run_chrome() {
+  "$CHROME" --headless --disable-gpu --no-first-run --no-default-browser-check \
+    --user-data-dir="$WORK/profile" --no-pdf-header-footer --virtual-time-budget=10000 \
+    --print-to-pdf="$2" "$1" >"$3" 2>&1 &
+  CHROME_PID=$!
+  (
+    waited=0
+    while [ "$waited" -lt "$PAGE_TIMEOUT" ] && kill -0 "$CHROME_PID" 2>/dev/null; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if [ "$waited" -ge "$PAGE_TIMEOUT" ]; then
+      kill "$CHROME_PID" 2>/dev/null || true
+    fi
+  ) &
+  WATCH_PID=$!
+  rc=0
+  wait "$CHROME_PID" || rc=$?
+  kill "$WATCH_PID" 2>/dev/null || true
+  CHROME_PID=""
+  WATCH_PID=""
+}
+
 # print_page NAME LOCALE PATH [optional]
 # Prints BASE/LOCALE/PATH to OUT/LOCALE-NAME.pdf. A page marked optional that answers 404 is skipped, not failed.
 print_page() {
@@ -81,33 +106,27 @@ print_page() {
   fi
 
   tmp="$WORK/$label.pdf"
-  rm -f "$tmp"
-  # --virtual-time-budget lets images and scripts settle before the page is printed. The watchdog kills a Chrome that hangs.
-  "$CHROME" --headless --disable-gpu --no-first-run --no-default-browser-check \
-    --user-data-dir="$WORK/profile" --no-pdf-header-footer --virtual-time-budget=10000 \
-    --print-to-pdf="$tmp" "$url" >/dev/null 2>&1 &
-  CHROME_PID=$!
-  (
-    waited=0
-    while [ "$waited" -lt "$PAGE_TIMEOUT" ] && kill -0 "$CHROME_PID" 2>/dev/null; do
-      sleep 1
-      waited=$((waited + 1))
-    done
-    if [ "$waited" -ge "$PAGE_TIMEOUT" ]; then
-      kill "$CHROME_PID" 2>/dev/null || true
+  # Chrome is tried twice, because one bad launch is not always repeated. Its output is kept per attempt.
+  attempt=1
+  while :; do
+    rm -f "$tmp"
+    log="$WORK/$label.$attempt.log"
+    run_chrome "$url" "$tmp" "$log"
+    if [ "$rc" = 0 ] && [ -s "$tmp" ] && [ "$(head -c 4 "$tmp")" = "%PDF" ]; then
+      break
     fi
-  ) &
-  WATCH_PID=$!
-  rc=0
-  wait "$CHROME_PID" || rc=$?
-  kill "$WATCH_PID" 2>/dev/null || true
-  CHROME_PID=""
-  WATCH_PID=""
-
-  if [ "$rc" != 0 ] || [ ! -s "$tmp" ] || [ "$(head -c 4 "$tmp")" != "%PDF" ]; then
-    echo "error: $label failed, Chrome did not write a PDF for $url (exit $rc)" >&2
+    if [ "$attempt" = 1 ]; then
+      first_why="exit $rc, $(tail -n 2 "$log" | tr '\n' ' ')"
+      attempt=2
+      continue
+    fi
+    echo "error: $label failed, Chrome did not write a PDF for $url (exit $rc), last output:" >&2
+    tail -n 5 "$log" | sed 's/^/  | /' >&2
     FAILED="$FAILED $label"
     return 0
+  done
+  if [ "$attempt" = 2 ]; then
+    echo "note: $label first attempt failed ($first_why), the second worked" >&2
   fi
   mv "$tmp" "$OUT/$label.pdf"
   DONE=$((DONE + 1))
