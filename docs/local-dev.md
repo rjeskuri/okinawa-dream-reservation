@@ -11,10 +11,20 @@ Everything here runs on your machine with no Cloudflare account. Commands are fo
 
 ```sh
 npm install
-cp .dev.vars.example .dev.vars        # then fill it in; see the comments in the file
+cp .dev.vars.example .dev.vars
 npm run db:migrate:local
-npx wrangler d1 execute DB --local --file seed/local.sql   # after task #13: seed/local.sql does not exist yet
-npm run dev                            # http://localhost:4321
+```
+
+Fill in `.dev.vars` after copying it; the comments in the file say what each value is.
+
+Seed step, not available yet: `seed/local.sql` arrives with task #13 and does not exist today, so skip this step until
+then. When it exists, run `npx wrangler d1 execute DB --local --file seed/local.sql` here, before starting the server.
+It is deliberately not in a code block, so pasting the block above cannot fail on it.
+
+Start the server; it serves http://localhost:4321:
+
+```sh
+npm run dev
 ```
 
 - `.dev.vars` holds the secrets declared in `src/env.d.ts`. It is gitignored and never committed. The placeholders in the
@@ -29,13 +39,19 @@ npm run dev                            # http://localhost:4321
 
 ## Crons locally
 
-`astro dev` does not run crons. Run the built Worker with scheduled triggers enabled:
+`astro dev` does not run crons. Run the built Worker with scheduled triggers enabled. It serves `dist/server` via
+`.wrangler/deploy/config.json` on http://localhost:8787 and keeps running, so run the `curl` from a second terminal:
 
 ```sh
 npm run build
-npx wrangler dev --test-scheduled      # serves dist/server via .wrangler/deploy/config.json on http://localhost:8787
-curl 'http://localhost:8787/cdn-cgi/handler/scheduled?cron=*/10+*+*+*+*'    # answers "ok"
+npx wrangler dev --test-scheduled
 ```
+
+```sh
+curl 'http://localhost:8787/cdn-cgi/handler/scheduled?cron=*/10+*+*+*+*'
+```
+
+The `curl` answers `ok`.
 
 - Quote the URL: zsh refuses unquoted `?` and `*`. In the URL `+` stands for a space, so the cron is `*/10 * * * *`.
   The other registered cron is `0 18 * * *` (`0+18+*+*+*`). Any other expression is recorded with status `unknown`.
