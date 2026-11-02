@@ -16,11 +16,13 @@ import { fakeGoogle, GOOGLE_PRIVATE_KEY, GOOGLE_TOKEN, type FakeGoogle, type Fau
 import {
   canonicalCatalog,
   CATALOG_TABS,
-  expectedCatalog,
+  expectedCatalog as fixtureCatalog,
   removeColumn,
   setCell,
+  sheetSerial,
   statusWrite,
-  validWorkbook,
+  validWorkbook as fixtureWorkbook,
+  type Workbook,
 } from "../helpers/sheet-workbook.ts";
 import { startWorker, testVars, type TestWorker } from "../helpers/worker.ts";
 
@@ -32,6 +34,32 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 /** In every faked failure, so that any of Google's body reaching the response shows. */
 const UPSTREAM = "UPSTREAM-DETAIL-FOR-NOBODY";
 const ROWS = 48;
+
+const DAY_MS = 86_400_000;
+const JST_OFFSET_MS = 9 * 3_600_000;
+
+/**
+ * The Worker reads the real clock, and a ClosedDates row more than two years from it is an error, so the fixture's own
+ * dates would turn into error rows on 2029-01-01. Three days a month from now take their place here, and only here.
+ */
+const CLOSED_DATES = [30, 31, 32].map((days) =>
+  new Date(Date.now() + JST_OFFSET_MS + days * DAY_MS).toISOString().slice(0, 10),
+);
+
+/** The fixture's sheet with CLOSED_DATES in its cells, written as those were: a serial, text and a serial. */
+function validWorkbook(): Workbook {
+  const workbook = fixtureWorkbook();
+  const [first, second, third] = CLOSED_DATES;
+  workbook.ClosedDates[1][0] = sheetSerial(first);
+  workbook.ClosedDates[2][0] = second;
+  workbook.ClosedDates[3][0] = sheetSerial(third);
+  return workbook;
+}
+
+/** The fixture's catalog, closed on CLOSED_DATES. */
+function expectedCatalog(): Catalog {
+  return { ...fixtureCatalog(), closedDates: CLOSED_DATES };
+}
 
 async function withWorker(
   google: FakeGoogle,

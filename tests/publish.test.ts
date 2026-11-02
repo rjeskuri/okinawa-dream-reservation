@@ -41,7 +41,9 @@ import {
 const publish = () => import("../src/lib/catalog/publish.ts");
 
 const DAY_MS = 86_400_000;
-const NOW = Date.parse("2030-03-01T12:00:00+09:00");
+// Within two years of the fixture's ClosedDates, 2026-12-31 to 2027-01-02, or they become error rows. In the past, and
+// far enough back that its bookings are over by the real clock, so that code reading Date.now() for `now` shows.
+const NOW = Date.parse("2026-03-01T12:00:00+09:00");
 
 /** Each catalog tab's publish_status column and last data row in the valid workbook, counted by hand. */
 const STATUS_COLUMNS: Record<string, { column: string; lastRow: number }> = {
@@ -415,6 +417,54 @@ test("bad rows are skipped and their errors written back in row order", async ()
   }
 });
 
+test("publishCatalog checks ClosedDates against the now it is given, not the real clock", async () => {
+  const { publishCatalog } = await publish();
+  // The fixture's dates are 2026-12-31 to 2027-01-02, and a publish takes dates within two years of its `now`. The
+  // second clock keeps one of them, so it still tells the two clocks apart once the real one has left all three behind.
+  const CLOCKS: { name: string; now: number; errors: Record<string, string[]>; drop: Dropped }[] = [
+    {
+      name: "a clock past all three dates",
+      now: Date.parse("2029-03-01T12:00:00+09:00"),
+      errors: {
+        "ClosedDates 2": ["date", "46387"],
+        "ClosedDates 3": ["date", "2027-01-01"],
+        "ClosedDates 4": ["date", "46389"],
+      },
+      drop: { closedDates: ["2026-12-31", "2027-01-01", "2027-01-02"] },
+    },
+    {
+      name: "a clock that reaches only the first date",
+      now: Date.parse("2024-12-31T12:00:00+09:00"),
+      errors: {
+        "ClosedDates 3": ["date", "2027-01-01"],
+        "ClosedDates 4": ["date", "46389"],
+      },
+      drop: { closedDates: ["2027-01-01", "2027-01-02"] },
+    },
+  ];
+
+  for (const { name, now, errors, drop } of CLOCKS) {
+    await withDb(async (db) => {
+      const { sheets, calls } = fakeSheets(validWorkbook());
+
+      const report = await publishCatalog({ db, sheets, now });
+
+      // Everything but those rows publishes as usual, so what failed here is the clock.
+      const bad = Object.keys(errors).length;
+      const counts = { ok: ROWS - bad, warning: 0, error: bad };
+      assert.deepEqual(report, { ok: true, version: 1, counts, fatal: [], affectedBookings: [] }, name);
+      assert.deepEqual(
+        canonicalCatalog(await readCatalog(db)),
+        canonicalCatalog(withoutDropped(expectedCatalog(), drop)),
+        name,
+      );
+      assert.deepEqual(await catalogMeta(db), [{ id: 1, version: 1, published_at: now, source: "sheet" }], name);
+      assert.equal(calls.updates.length, 1, name);
+      assertCells(calls.updates[0], errors);
+    });
+  }
+});
+
 test("a warning publishes the row and shows in its cell", async () => {
   const { publishCatalog } = await publish();
   await withDb(async (db) => {
@@ -679,7 +729,7 @@ test("a fatal sheet changes nothing", async () => {
   for (const [name, edit, words] of FATAL) {
     const workbook = validWorkbook();
     edit(workbook);
-    const fatal = validateCatalog(structuredClone(workbook)).fatal;
+    const fatal = validateCatalog(structuredClone(workbook), NOW).fatal;
 
     const check = async (db: D1Database, label: string) => {
       const before = await snapshot(db);

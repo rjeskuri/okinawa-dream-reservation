@@ -37,7 +37,7 @@ const NAMES = inEachLocale("name");
 /** The columns guests read. They are published as typed, trimmed and nothing else: NFKC would turn `，` into `,`. */
 const DISPLAY_COLUMNS = new Set([...NAMES, ...inEachLocale("summary"), ...inEachLocale("description")]);
 
-const STATUS = "publish_status";
+export const STATUS = "publish_status";
 
 export const BOOKINGS_COLUMNS = [
   "booking_ref", "booking_id", "status", "source", "model_id", "plate", "override_plate", "override_status",

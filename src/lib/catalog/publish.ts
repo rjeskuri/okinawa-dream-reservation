@@ -4,7 +4,7 @@
 // staff's view of the statuses. Nothing here reads `env`.
 import { replaceCatalog, type AffectedBooking } from "../db/catalog-store.ts";
 import type { SheetsClient } from "../google/sheets.ts";
-import { CATALOG_TABS, headerKey, validateCatalog, type RowStatus } from "./sheet-schema.ts";
+import { CATALOG_TABS, headerKey, STATUS, validateCatalog, type RowStatus } from "./sheet-schema.ts";
 
 type PublishDeps = { db: D1Database; sheets: SheetsClient; now: number };
 
@@ -32,8 +32,6 @@ export class PublishError extends Error {
 
 /** One row, however many messages it has. */
 type RowResult = { tab: string; row: number; level: RowStatus["level"]; cell: string };
-
-const STATUS_HEADER = "publish_status";
 
 /** Sorts a row's worst message first, so its cell opens with the level that says whether the row published. */
 const SEVERITY = { error: 0, warning: 1, ok: 2 };
@@ -83,7 +81,7 @@ function columnName(index: number): string {
  */
 function statusWrites(workbook: Record<string, unknown[][]>, rows: RowResult[]) {
   return [...Map.groupBy(rows, ({ tab }) => tab)].map(([tab, tabRows]) => {
-    const column = columnName(workbook[tab][0].findIndex((name) => headerKey(name) === STATUS_HEADER));
+    const column = columnName(workbook[tab][0].findIndex((name) => headerKey(name) === STATUS));
     const lastRow = Math.max(...tabRows.map(({ row }) => row));
     const values = Array.from({ length: lastRow - 1 }, () => [""]);
     for (const { row, cell } of tabRows) values[row - 2] = [cell];
@@ -98,7 +96,7 @@ function statusWrites(workbook: Record<string, unknown[][]>, rows: RowResult[]) 
 export async function publishCatalog({ db, sheets, now }: PublishDeps): Promise<PublishReport> {
   const workbook = await step("read", () => sheets.batchGet([...CATALOG_TABS]));
 
-  const { catalog, statuses, fatal } = validateCatalog(workbook);
+  const { catalog, statuses, fatal } = validateCatalog(workbook, now);
   if (catalog === null || fatal.length > 0) {
     return { ok: false, counts: { ok: 0, warning: 0, error: 0 }, fatal, affectedBookings: [] };
   }
