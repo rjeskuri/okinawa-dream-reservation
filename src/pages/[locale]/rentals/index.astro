@@ -1,0 +1,196 @@
+---
+// /{locale}/rentals: the filter form and the grid. A complete, valid search lists what searchAvailability returns. Anything
+// else lists the active models with a prompt, and type and cc wait for the search, since only class narrows without dates.
+// Rendered from D1 on every request, so prices match the latest publish.
+import { env } from "cloudflare:workers";
+import DatePicker from "../../../components/DatePicker.astro";
+import ModelCard from "../../../components/ModelCard.astro";
+import { sheetName } from "../../../i18n/locales.ts";
+import { common } from "../../../i18n/strings/common.ts";
+import { rentals } from "../../../i18n/strings/rentals.ts";
+import { t } from "../../../i18n/t.ts";
+import Base from "../../../layouts/Base.astro";
+import { CC_BANDS, searchAvailability } from "../../../lib/booking/availability.ts";
+import { pickupSlots } from "../../../lib/booking/pickup-window.ts";
+import { photoUrl, readPhotoIndex } from "../../../lib/catalog/photos.ts";
+import { readCatalog, type PublishedCatalog } from "../../../lib/db/catalog-store.ts";
+import { isLocale } from "../../../lib/locale.ts";
+import { availabilityQuery, carriedQuery, listedModels, parseSearch, shownPackage } from "../../../lib/search.ts";
+import { addDaysToDate, epochToJst, jstToday } from "../../../lib/time.ts";
+
+const HOUR_MS = 3_600_000;
+
+const { locale } = Astro.params;
+// Astro's own check ignores case and sees any segment of the path, so it passes /JA/.
+if (!isLocale(locale)) return new Response(null, { status: 404 });
+
+const heading = t(locale, common, "nav.rentals");
+const now = Date.now();
+
+/** The page's view of a published catalog. searchAvailability throws before the first publish, so this needs one. */
+async function list(catalog: PublishedCatalog) {
+  const search = parseSearch(Astro.url.searchParams, catalog, catalog.config, catalog.closedDates, now);
+  const query = availabilityQuery(search, now);
+  const found = query && (await searchAvailability(env.DB, query));
+  const pkg = shownPackage(catalog.packages, search);
+  const photos = await readPhotoIndex(env.DB);
+  const carried = carriedQuery(search);
+
+  const cards = listedModels(catalog.models, search, found).map((model) => ({
+    model,
+    href: `/${locale}/rentals/${model.id}${carried}`,
+    photo: model.photos.map((name) => photoUrl(name, photos)).find((url) => url !== null) ?? null,
+    rateClass: catalog.rateClasses.find(({ id }) => id === model.rateClassId),
+    priceJpy: catalog.prices.find(({ rateClassId, packageId }) => rateClassId === model.rateClassId && packageId === pkg?.id)
+      ?.priceJpy,
+    depositJpy: catalog.vehicleTypes.find(({ id }) => id === model.typeId)?.depositJpy,
+  }));
+  return { search, complete: query !== null, pkg, cards };
+}
+
+const catalog = await readCatalog(env.DB);
+const listing = catalog && (await list(catalog));
+---
+
+<Base locale={locale} title={`${heading} | ${t(locale, common, "site.name")}`}>
+  <h1>{heading}</h1>
+  {
+    catalog === null || listing === null ? (
+      <p>{t(locale, rentals, "rentals.unpublished")}</p>
+    ) : (
+      <>
+        <form class="filters" action={`/${locale}/rentals`} method="get">
+          <DatePicker
+            locale={locale}
+            min={epochToJst(now + catalog.config.minLeadHours * HOUR_MS).date}
+            max={addDaysToDate(jstToday(now), catalog.config.maxDaysAhead)}
+            closedDates={catalog.closedDates}
+            value={listing.search.date}
+            packageDays={listing.pkg?.days ?? undefined}
+          />
+          <label>
+            {t(locale, rentals, "rentals.form.time")}
+            <select name="time">
+              <option value="">{t(locale, rentals, "rentals.form.chooseTime")}</option>
+              {pickupSlots(catalog.config).map((slot) => (
+                <option value={slot} selected={slot === listing.search.time}>
+                  {slot}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            {t(locale, rentals, "rentals.form.package")}
+            <select name="package">
+              {catalog.packages.map((pkg) => (
+                <option value={pkg.id} data-days={pkg.days ?? undefined} selected={pkg.id === listing.pkg?.id}>
+                  {sheetName(pkg.texts, locale)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            {t(locale, rentals, "rentals.form.type")}
+            <select name="type">
+              <option value="">{t(locale, rentals, "rentals.form.any")}</option>
+              {catalog.vehicleTypes.map((type) => (
+                <option value={type.id} selected={type.id === listing.search.typeId}>
+                  {sheetName(type.texts, locale)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label data-engine-filter hidden={listing.search.typeId === "car"}>
+            {t(locale, rentals, "rentals.form.engine")}
+            <select name="cc">
+              <option value="">{t(locale, rentals, "rentals.form.any")}</option>
+              {Object.keys(CC_BANDS).map((band) => (
+                <option value={band} selected={band === listing.search.ccBand}>
+                  {t(locale, rentals, `rentals.cc.${band}`)}
+                </option>
+              ))}
+            </select>
+          </label>
+          {listing.search.rateClassId && <input type="hidden" name="class" value={listing.search.rateClassId} />}
+          <button type="submit">{t(locale, rentals, "rentals.form.submit")}</button>
+        </form>
+
+        {listing.search.errors.length > 0 && (
+          <p data-search-error>
+            {[
+              ...new Set(listing.search.errors.map(({ reason }) => t(locale, rentals, `rentals.error.${reason}`))),
+              t(locale, rentals, "rentals.error.showingAll"),
+            ].join(" ")}
+          </p>
+        )}
+        {!listing.complete && <p data-search-prompt>{t(locale, rentals, "rentals.prompt")}</p>}
+        {listing.cards.length === 0 && <p>{t(locale, rentals, "rentals.empty")}</p>}
+
+        <div class="grid">
+          {listing.cards.map(({ model, href, photo, rateClass, priceJpy, depositJpy }) => (
+            <ModelCard
+              locale={locale}
+              model={model}
+              href={href}
+              available={listing.complete}
+              photo={photo}
+              rateClassName={rateClass ? sheetName(rateClass.texts, locale) : ""}
+              packageName={listing.pkg ? sheetName(listing.pkg.texts, locale) : ""}
+              priceJpy={priceJpy}
+              depositJpy={depositJpy}
+            />
+          ))}
+        </div>
+      </>
+    )
+  }
+</Base>
+
+<script>
+  // Without JavaScript the server hides the engine select and ignores a band sent with a car, so this is only the live view.
+  const form = document.querySelector("form.filters");
+  const engine = form?.querySelector<HTMLElement>("[data-engine-filter]");
+  const picker = form?.querySelector("date-picker");
+
+  form?.addEventListener("change", (event) => {
+    const select = event.target as HTMLSelectElement;
+    if (select.name === "type" && engine) engine.hidden = select.value === "car";
+    if (select.name === "package") {
+      const days = select.selectedOptions[0]?.dataset.days;
+      if (days === undefined) picker?.removeAttribute("package-days");
+      else picker?.setAttribute("package-days", days);
+    }
+  });
+</script>
+
+<style>
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-4);
+    margin-bottom: var(--space-6);
+  }
+  .filters select {
+    display: block;
+  }
+  /* The theme's `label { display: block }` outranks the browser's own [hidden] rule. */
+  [data-engine-filter][hidden] {
+    display: none;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: var(--space-4);
+  }
+  @media (min-width: 40rem) {
+    .grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+  @media (min-width: 64rem) {
+    .grid {
+      grid-template-columns: repeat(3, 1fr);
+    }
+  }
+</style>
