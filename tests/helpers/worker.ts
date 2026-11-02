@@ -22,14 +22,14 @@ export const testVars: Record<string, string> = {
   SQUARE_ENV: "sandbox",
   SQUARE_APPLICATION_ID: "test-square-application-id",
   SQUARE_LOCATION_ID: "test-square-location-id",
-  SQUARE_WEBHOOK_URL: "http://localhost:4321/api/square/webhook",
+  SQUARE_WEBHOOK_URL: "http://localhost:4321/api/webhooks/square",
   GOOGLE_SHEET_ID: "test-google-sheet-id",
   GOOGLE_DRIVE_FOLDER_ID: "test-google-drive-folder-id",
   APPS_SCRIPT_MAIL_URL: "https://script.example/mail",
   STAFF_EMAIL: "staff@example.com",
   ENABLE_GOOGLE_PAY: "false",
   ENABLE_APPLE_PAY: "false",
-  SQUARE_ACCESS_TOKEN: "test-square-access-token",
+  SQUARE_ACCESS_TOKEN: "test-placeholder-square-access-token",
   SQUARE_WEBHOOK_SIGNATURE_KEY: "test-square-webhook-signature-key",
   GOOGLE_SA_EMAIL: "test-sa@example.iam.gserviceaccount.com",
   GOOGLE_SA_PRIVATE_KEY: "test-google-sa-private-key",
@@ -48,7 +48,7 @@ export interface StartWorkerOptions {
 export interface TestWorker {
   /** Fetches `path` from the built Worker. */
   fetch(path: string, init?: RequestInit): Promise<Response>;
-  /** Triggers the Worker's `scheduled()` handler for `cron`. */
+  /** Triggers the Worker's `scheduled()` handler for `cron`. Rejects unless its outcome is `ok`. */
   scheduled(cron: string, scheduledTime?: number): Promise<void>;
   db: D1Database;
   media: R2Bucket;
@@ -173,7 +173,9 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<TestWo
       return (await fetcher.fetch(new URL(path, "http://localhost").href, init as never)) as unknown as Response;
     },
     async scheduled(cron, scheduledTime = Date.now()) {
-      await fetcher.scheduled({ cron, scheduledTime });
+      // Miniflare resolves with `{ outcome: "exception" }` when the handler fails, so raise it here.
+      const { outcome } = await fetcher.scheduled({ cron, scheduledTime });
+      if (outcome !== "ok") throw new Error(`scheduled() for cron "${cron}" ended with outcome "${outcome}"`);
     },
     db,
     media,

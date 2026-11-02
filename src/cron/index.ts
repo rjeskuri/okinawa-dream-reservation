@@ -10,7 +10,10 @@ export const registry: Record<string, CronJob[]> = {
 
 export type CronStatus = "ok" | "error" | "unknown";
 
-/** Runs every job registered for `cron` in order, then records the run. Never throws. */
+/**
+ * Runs every job registered for `cron` in order, then records the run. A failing job or an unregistered
+ * expression is recorded rather than thrown; the returned promise rejects only if the insert itself fails.
+ */
 export async function runCron(cron: string, scheduledTime: number, env: Env): Promise<void> {
   const jobs = registry[cron];
   let status: CronStatus = "ok";

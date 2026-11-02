@@ -37,6 +37,7 @@ interface WranglerConfig {
   d1_databases?: { binding: string; migrations_dir?: string }[];
   r2_buckets?: { binding: string }[];
   triggers?: { crons?: string[] };
+  vars?: Record<string, string>;
 }
 
 function readWranglerConfig(): WranglerConfig {
@@ -54,6 +55,22 @@ test("wrangler.jsonc declares main, DB, MEDIA, nodejs_compat and both crons", ()
   assert.equal(db.migrations_dir, "migrations");
   assert.ok(config.r2_buckets?.some((b) => b.binding === "MEDIA"), "no R2 binding named MEDIA");
   assert.deepEqual(config.triggers?.crons, ["*/10 * * * *", "0 18 * * *"]);
+});
+
+test("SQUARE_WEBHOOK_URL points at the webhook route", () => {
+  const url = readWranglerConfig().vars?.SQUARE_WEBHOOK_URL;
+  assert.ok(url, "wrangler.jsonc declares no SQUARE_WEBHOOK_URL");
+  assert.equal(new URL(url).pathname, "/api/webhooks/square");
+});
+
+test("the dev server allows quick-tunnel hosts", async () => {
+  const { default: config } = await import("../astro.config.mjs");
+  // Astro also accepts `server` as a function of the command.
+  const server = typeof config.server === "function" ? config.server({ command: "dev" }) : config.server;
+  const allowedHosts = server?.allowedHosts;
+  assert.notEqual(allowedHosts, true, "server.allowedHosts: true would allow every host");
+  assert.ok(Array.isArray(allowedHosts), `server.allowedHosts is ${JSON.stringify(allowedHosts)}, not a list`);
+  assert.ok(allowedHosts.includes(".trycloudflare.com"), `.trycloudflare.com is not in ${JSON.stringify(allowedHosts)}`);
 });
 
 test("stripJsonComments leaves comment-like text inside strings alone", () => {

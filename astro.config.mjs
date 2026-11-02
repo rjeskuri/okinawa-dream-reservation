@@ -7,4 +7,6 @@ import cloudflare from "@astrojs/cloudflare";
 export default defineConfig({
   output: "server",
   adapter: cloudflare(),
+  // `astro dev` answers 403 to unknown hosts; live checks reach it through Cloudflare quick tunnels.
+  server: { allowedHosts: [".trycloudflare.com"] },
 });
