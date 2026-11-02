@@ -1,7 +1,9 @@
 name: Deploy
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -14,15 +16,24 @@ permissions:
 
 jobs:
   deploy:
+    # A manual run on the main branch (github.ref, because ref_name also matches a tag named main), or a CI run that
+    # passed on a push to this repository's main. The branches filter above also lets through pull requests from a
+    # branch named main and failed runs, and this guard is what refuses them. Keep it one bare expression on one line:
+    # text outside a `${{ }}` would make it always true.
+    if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # On workflow_run, github.sha is the tip of main, not the commit CI passed.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
       - name: Deploy
-        run: |
-          if [ -f scripts/deploy.sh ]; then
-            chmod +x scripts/deploy.sh
-            scripts/deploy.sh
-          else
-            echo "no deploy script"
-          fi
+        run: scripts/deploy.sh
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
