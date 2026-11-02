@@ -41,10 +41,16 @@ export const pages: Dictionary = {
     ko: "픽업 {days}일 이상 전: 온라인으로 결제한 예약금의 {percent}%를 환불합니다.",
   },
   "policies.tier.pickupDay": {
-    ja: "受取日当日まで：オンラインで支払った予約金の{percent}%を返金します。",
-    en: "Up to and including the pickup day: {percent}% of the deposit paid online is refunded.",
-    "zh-cn": "直至取车当天：退还在线支付订金的{percent}%。",
-    ko: "픽업 당일까지: 온라인으로 결제한 예약금의 {percent}%를 환불합니다.",
+    ja: "受取時刻より前：オンラインで支払った予約金の{percent}%を返金します。",
+    en: "Before the pickup time: {percent}% of the deposit paid online is refunded.",
+    "zh-cn": "取车时间之前：退还在线支付订金的{percent}%。",
+    ko: "픽업 시간 전: 온라인으로 결제한 예약금의 {percent}%를 환불합니다.",
+  },
+  "policies.cancellation.noMatch": {
+    ja: "上のどの行にも当てはまらない場合は、返金はありません。",
+    en: "If no line above applies, there is no refund.",
+    "zh-cn": "如果以上各条都不适用，则不予退款。",
+    ko: "위의 어느 항목에도 해당하지 않으면 환불되지 않습니다.",
   },
   "policies.cancellation.note": {
     ja: "日数は日本時間（JST）の暦日で数えます。",

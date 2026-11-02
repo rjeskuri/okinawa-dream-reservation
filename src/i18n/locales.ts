@@ -52,6 +52,11 @@ export function fallbackOrder(locale: Locale): Locale[] {
   return [...new Set<Locale>([locale, "en", "ja"])];
 }
 
+/** The first name in fallbackOrder that is not blank. A published row can hold a blank that the sheet's check never saw. */
+export function sheetName(texts: Record<Locale, { name: string }>, locale: Locale): string {
+  return fallbackOrder(locale).map((candidate) => texts[candidate].name).find((name) => name !== "") ?? "";
+}
+
 /** The same page in `target`: swaps the leading locale segment of `pathname` and appends `search` unchanged. */
 export function localePath(pathname: string, search: string, target: Locale): string {
   return pathname.replace(/^\/[^/]+/, `/${target}`) + search;
