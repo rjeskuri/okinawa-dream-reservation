@@ -1,0 +1,37 @@
+/*
+ * Design tokens. The names are the contract: task #30 changes values only.
+ * Keep every colour a 3- or 6-digit hex (or a var() alias) and keep these contrast pairs:
+ *   text, text-muted, link, link-hover on background: 4.5:1
+ *   button-text on button-background and button-background-hover: 4.5:1
+ *   focus-ring and border (form controls) on background: 3:1
+ * Placeholder neutral palette until the owner's references arrive.
+ */
+:root {
+  --color-background: #ffffff;
+  --color-text: #1f2328;
+  --color-text-muted: #57606a;
+  --color-link: #0b5cad;
+  --color-link-hover: #083f78;
+  --color-button-background: #24292f;
+  --color-button-background-hover: #0b5cad;
+  --color-button-text: #ffffff;
+  --color-border: #6e7781;
+  --color-focus-ring: #b45309;
+
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.25rem;
+  --font-size-xl: 1.5rem;
+  --font-size-2xl: 2rem;
+
+  --line-height-base: 1.6;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  --radius-base: 0.25rem;
+}

@@ -1,0 +1,24 @@
+---
+// /{locale}/faq: the locale's entry of the `faq` collection.
+import { getEntry, render } from "astro:content";
+import { common } from "../../i18n/strings/common.ts";
+import { t } from "../../i18n/t.ts";
+import Base from "../../layouts/Base.astro";
+import { isLocale } from "../../lib/locale.ts";
+
+const { locale } = Astro.params;
+// Astro's own check ignores case and sees any segment of the path, so it passes /JA/.
+if (!isLocale(locale)) return new Response(null, { status: 404 });
+
+// Every locale has an entry, so a missing one is a bug and throws, like an unknown string key.
+const entry = await getEntry("faq", locale);
+if (!entry) throw new Error(`no faq entry for ${locale}`);
+const { Content } = await render(entry);
+
+const heading = t(locale, common, "nav.faq");
+---
+
+<Base locale={locale} title={`${heading} | ${t(locale, common, "site.name")}`}>
+  <h1>{heading}</h1>
+  <Content />
+</Base>
