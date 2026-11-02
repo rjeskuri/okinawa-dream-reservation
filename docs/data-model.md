@@ -14,7 +14,7 @@ The model is shaped on OCTO, so the OTA connection designed in task #49 can map 
 | --- | --- |
 | product | a model (`models`) |
 | option | a package (`packages`) |
-| unit | a vehicle (`vehicles`) |
+| unit | one `vehicle` unit per option, not a physical vehicle: see `docs/ota-design.md` |
 | booking: hold, then confirm, then cancel | a booking (`bookings`): ON_HOLD, then CONFIRMED, then CANCELLED |
 
 PAYMENT_PENDING and EXPIRED are used internally.
