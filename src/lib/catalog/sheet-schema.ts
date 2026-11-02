@@ -108,7 +108,7 @@ function attempt<T>(parse: () => T): T | null {
  * Text is normalized (NFKC) and trimmed before any check, and "" stands for every kind of empty cell. `asTyped` only
  * trims, for the display text of DISPLAY_COLUMNS: a cell of only spaces, ideographic ones too, is still empty.
  */
-function readCell(value: unknown, asTyped = false): Cell {
+export function readCell(value: unknown, asTyped = false): Cell {
   if (typeof value === "string") return asTyped ? value.trim() : value.normalize("NFKC").trim();
   return typeof value === "number" || typeof value === "boolean" ? value : "";
 }
