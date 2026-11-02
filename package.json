@@ -4,6 +4,26 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "dev": "astro dev",
+    "build": "astro build",
+    "lint": "astro check",
+    "test:e2e": "node --test --test-concurrency=1 \"tests/e2e/**/*.e2e.ts\"",
+    "typegen": "wrangler types --strict-vars=false",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local"
+  },
+  "dependencies": {
+    "@astrojs/cloudflare": "^14.4.2",
+    "astro": "^7.4.2"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.12",
+    "miniflare": "^5.20261019.2-beta",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.152.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "workerd@1.20261019.1": true
   }
 }

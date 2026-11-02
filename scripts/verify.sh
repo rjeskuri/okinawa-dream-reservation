@@ -3,7 +3,11 @@
 # Each check on its own line, so `set -e` stops at the first failure.
 set -eu
 cd "$(dirname "$0")/.."
+export ASTRO_TELEMETRY_DISABLED=1
 
+npm run lint
 npm test
+npm run build
+npm run test:e2e
 
 echo VERIFY OK

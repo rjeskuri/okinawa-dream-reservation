@@ -1,0 +1,13 @@
+{
+  "extends": "astro/tsconfigs/strict",
+  "compilerOptions": {
+    // Node runs src/lib/**/*.ts and the tests directly, so the code must be plain, erasable TypeScript
+    // with explicit .ts extensions on relative imports.
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true
+  },
+  // tests/ runs under Node and needs @types/node to type-check; until that dependency is approved,
+  // `astro check` covers src/ only and Node's type stripping runs the tests as written.
+  "exclude": ["dist", ".wrangler", "tests"]
+}

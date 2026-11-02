@@ -1,4 +1,5 @@
 # Gitignored files copied into every ticket worktree (gitignore syntax).
 .env
 .env.*
+.dev.vars
 credentials/
