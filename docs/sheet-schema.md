@@ -280,6 +280,11 @@ Staff type in one column, `override_plate`, to move a booking to another bike. P
 of the same model and free for the booking's time. `override_status` then shows the result, and the booking keeps its
 bike if the move was refused.
 
+Only a confirmed booking that has not ended can move. A plate that already matches the booking is left alone, with no
+result, so an old override can stay on the row. One Publish moves at most 20 bookings: a row past that says so in
+`override_status`, and the next Publish applies it. Rows run top to bottom, so when two rows want one bike for
+overlapping times, the higher row gets it.
+
 | Column | Holds |
 | --- | --- |
 | `booking_ref`, `booking_id` | The booking's reference and internal id |
