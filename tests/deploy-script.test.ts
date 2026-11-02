@@ -91,7 +91,7 @@ function runDeploy(
     for (const file of Object.values(runnerFiles)) writeFileSync(file, "");
     const result = spawnSync(script, [], {
       cwd: options.outsideRepo ? sandbox : repoRoot,
-      env: { PATH: `${sandbox}:/usr/bin:/bin`, HOME: sandbox, ...runnerFiles, ...options.runner, ...credentials },
+      env: { PATH: `${sandbox}:/usr/bin:/bin`, HOME: sandbox, ...runnerFiles, ...options.runner, ...credentials } as unknown as NodeJS.ProcessEnv,
       encoding: "utf8",
       timeout: 30_000,
     });
