@@ -17,6 +17,7 @@ export const common: Dictionary = {
   },
   "nav.label": { ja: "メインメニュー", en: "Main menu", "zh-cn": "主菜单", ko: "메인 메뉴" },
   "nav.rentals": { ja: "レンタル", en: "Rentals", "zh-cn": "租赁", ko: "렌탈" },
+  "nav.rates": { ja: "料金表", en: "Rates", "zh-cn": "价目表", ko: "요금표" },
   "nav.faq": { ja: "よくある質問", en: "FAQ", "zh-cn": "常见问题", ko: "자주 묻는 질문" },
   "nav.policies": { ja: "規約・ポリシー", en: "Policies", "zh-cn": "条款与政策", ko: "약관 및 정책" },
   "nav.access": { ja: "アクセス", en: "Access", "zh-cn": "交通指南", ko: "오시는 길" },

@@ -1,0 +1,264 @@
+---
+// /{locale}/rates: the fee schedule, from D1 on every request, so prices match the latest publish. The filters are a plain GET
+// form. Every cell is rendered and the server marks what the filter leaves out `hidden`, so src/scripts/rates.ts can narrow
+// the table without a request and bring back what an earlier filter hid.
+import { env } from "cloudflare:workers";
+import DraftNote from "../../components/DraftNote.astro";
+import { sheetName } from "../../i18n/locales.ts";
+import { common } from "../../i18n/strings/common.ts";
+import { rates } from "../../i18n/strings/rates.ts";
+import { rentals } from "../../i18n/strings/rentals.ts";
+import { t } from "../../i18n/t.ts";
+import Base from "../../layouts/Base.astro";
+import { readCatalog, type PublishedCatalog } from "../../lib/db/catalog-store.ts";
+import { isLocale } from "../../lib/locale.ts";
+import { buildFeeTable, parseRatesFilter, RATE_GROUPS, type RatesFilter } from "../../lib/rates.ts";
+
+const { locale } = Astro.params;
+// Astro's own check ignores case and sees any segment of the path, so it passes /JA/.
+if (!isLocale(locale)) return new Response(null, { status: 404 });
+
+const heading = t(locale, common, "nav.rates");
+const yen = (jpy: number) => t(locale, rentals, "rentals.amount").replace("{amount}", jpy.toLocaleString("en-US"));
+const fee = (jpy: number | null) => {
+  if (jpy === null) return "";
+  return jpy === 0 ? t(locale, rates, "rates.free") : yen(jpy);
+};
+const listing = (params: Record<string, string>) => `/${locale}/rentals?${new URLSearchParams(params)}`;
+
+/** The page's view of a published catalog. */
+function schedule(catalog: PublishedCatalog) {
+  const filter = parseRatesFilter(Astro.url.searchParams, catalog);
+  const invalid = filter.errors.length > 0;
+  // An invalid request shows the whole table, so its form must not claim a filter either.
+  const chosen: Partial<RatesFilter> = invalid ? {} : filter;
+  return {
+    invalid,
+    chosen,
+    tables: buildFeeTable(catalog, { errors: [] }),
+    shown: buildFeeTable(catalog, filter),
+    extensions: catalog.rateClasses.filter(({ extensionPerHourJpy }) => extensionPerHourJpy !== null),
+    optionGroups: RATE_GROUPS.map((group) => ({
+      group,
+      options: catalog.options.filter(({ grp }) => grp === group),
+    })).filter(({ options }) => options.length > 0),
+  };
+}
+
+const catalog = await readCatalog(env.DB);
+const view = catalog && schedule(catalog);
+---
+
+<Base locale={locale} title={`${heading} | ${t(locale, common, "site.name")}`}>
+  <h1>{heading}</h1>
+  {
+    catalog === null || view === null ? (
+      <p>{t(locale, rates, "rates.unpublished")}</p>
+    ) : (
+      <>
+        <form class="filters" action={`/${locale}/rates`} method="get">
+          <label>
+            {t(locale, rates, "rates.form.group")}
+            <select name="group">
+              <option value="">{t(locale, rentals, "rentals.form.any")}</option>
+              {RATE_GROUPS.map((group) => (
+                <option value={group} selected={group === view.chosen.group}>
+                  {t(locale, rates, `rates.group.${group}`)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            {t(locale, rates, "rates.class")}
+            <select name="class">
+              <option value="">{t(locale, rentals, "rentals.form.any")}</option>
+              {catalog.rateClasses.map(({ id, texts }) => (
+                <option value={id} selected={id === view.chosen.rateClassId}>
+                  {sheetName(texts, locale)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            {t(locale, rates, "rates.form.duration")}
+            <select name="duration">
+              <option value="">{t(locale, rentals, "rentals.form.any")}</option>
+              {catalog.packages.map(({ id, texts }) => (
+                <option value={id} selected={id === view.chosen.packageId}>
+                  {sheetName(texts, locale)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="submit">{t(locale, rates, "rates.form.submit")}</button>
+        </form>
+
+        <p data-rates-error="invalid" hidden={!view.invalid}>
+          {t(locale, rates, "rates.error.invalid")}
+        </p>
+        <p data-rates-error="empty" hidden={view.shown.length > 0}>
+          {t(locale, rates, "rates.error.empty")}
+        </p>
+
+        {view.tables.map(({ group, packages, rows }) => {
+          const kept = view.shown.find((table) => table.group === group);
+          const columnHidden = (id: string) => !kept?.packages.some((pkg) => pkg.id === id);
+          const rowHidden = (id: string) => !kept?.rows.some(({ rateClass }) => rateClass.id === id);
+          return (
+            <section data-rates-group={group} hidden={kept === undefined}>
+              <h2 id={`rates-${group}`}>{t(locale, rates, `rates.group.${group}`)}</h2>
+              <div class="scroll" role="region" tabindex="0" aria-labelledby={`rates-${group}`}>
+                <table data-fee-table={group}>
+                  <thead>
+                    <tr>
+                      <th scope="col">{t(locale, rates, "rates.class")}</th>
+                      {packages.map(({ id, texts }) => (
+                        <th scope="col" data-package={id} hidden={columnHidden(id)}>
+                          {sheetName(texts, locale)}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(({ rateClass, cells }) => (
+                      <tr data-class={rateClass.id} hidden={rowHidden(rateClass.id)}>
+                        <th scope="row">
+                          <a href={listing({ class: rateClass.id })}>{sheetName(rateClass.texts, locale)}</a>
+                        </th>
+                        {cells.map(({ packageId, priceJpy }) => (
+                          <td data-package={packageId} hidden={columnHidden(packageId)}>
+                            {priceJpy !== null && (
+                              <a href={listing({ class: rateClass.id, package: packageId })}>{yen(priceJpy)}</a>
+                            )}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          );
+        })}
+
+        {view.extensions.length > 0 && (
+          <section>
+            <h2>{t(locale, rates, "rates.extension.heading")}</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">{t(locale, rates, "rates.class")}</th>
+                  <th scope="col">{t(locale, rates, "rates.extension.price")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {view.extensions.map(({ id, texts, extensionPerHourJpy }) => (
+                  <tr data-extension={id}>
+                    <th scope="row">{sheetName(texts, locale)}</th>
+                    <td>{fee(extensionPerHourJpy)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+        )}
+
+        {view.optionGroups.length > 0 && (
+          <section>
+            <h2>{t(locale, rates, "rates.options.heading")}</h2>
+            {view.optionGroups.map(({ group, options }) => (
+              <>
+                <h3 id={`rates-options-${group}`}>{t(locale, rates, `rates.group.${group}`)}</h3>
+                <div class="scroll" role="region" tabindex="0" aria-labelledby={`rates-options-${group}`}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">{t(locale, rates, "rates.options.name")}</th>
+                        <th scope="col">{t(locale, rates, "rates.options.base")}</th>
+                        <th scope="col">{t(locale, rates, "rates.options.perHour")}</th>
+                        <th scope="col">{t(locale, rates, "rates.options.per24h")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {options.map(({ id, texts, baseJpy, extraPerHourJpy, extraPer24hJpy }) => (
+                        <tr data-option={id}>
+                          <th scope="row">{sheetName(texts, locale)}</th>
+                          <td>{fee(baseJpy)}</td>
+                          <td>{fee(extraPerHourJpy)}</td>
+                          <td>{fee(extraPer24hJpy)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ))}
+          </section>
+        )}
+
+        <section class="notes">
+          <h2>{t(locale, rates, "rates.notes.heading")}</h2>
+          <div data-draft-note="coverage">
+            <DraftNote locale={locale}>
+              <p>{t(locale, rates, "rates.note.coverage")}</p>
+            </DraftNote>
+          </div>
+          <div data-draft-note="peak">
+            <DraftNote locale={locale}>
+              <p>{t(locale, rates, "rates.note.peak")}</p>
+            </DraftNote>
+          </div>
+        </section>
+      </>
+    )
+  }
+</Base>
+
+<script src="../../scripts/rates.ts"></script>
+
+<style>
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-4);
+    margin-bottom: var(--space-6);
+  }
+  .filters select {
+    display: block;
+  }
+  section {
+    margin-bottom: var(--space-6);
+  }
+  /* At phone width the table scrolls inside this box, not the page, and the class names stay in view. */
+  .scroll {
+    overflow-x: auto;
+    margin-bottom: var(--space-4);
+  }
+  .scroll:focus-visible {
+    outline: 3px solid var(--color-focus-ring);
+    outline-offset: 2px;
+  }
+  table {
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+  th,
+  td {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    text-align: left;
+  }
+  thead th,
+  td {
+    white-space: nowrap;
+  }
+  th:first-child {
+    position: sticky;
+    left: 0;
+    background: var(--color-background);
+  }
+  .notes > div {
+    margin-bottom: var(--space-4);
+  }
+</style>
