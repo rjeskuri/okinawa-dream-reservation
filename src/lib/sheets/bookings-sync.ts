@@ -1,7 +1,8 @@
-// Copies bookings from D1 to the Bookings tab: the rows already there are updated in one batchUpdate, the rest are
-// appended in one append, after one read of the booking_id column. The two override columns belong to staff: an update
-// writes the ranges around them, and only an append writes them, as empty cells.
-import { BOOKINGS_COLUMNS } from "../catalog/sheet-schema.ts";
+// Copies bookings from D1 to the Bookings tab. One read of the whole tab gives the header row, which says where each
+// column is (any order, extra columns allowed), and the booking_id column. The rows already there are updated in one
+// batchUpdate, the rest are appended in one append. The two override columns belong to staff: an update writes only
+// the runs of columns this function owns, and an append writes the override cells as empty ones.
+import { BOOKINGS_COLUMNS, headerKey } from "../catalog/sheet-schema.ts";
 import { SheetsError } from "../google/sheets.ts";
 import type { SheetsClient } from "../google/sheets.ts";
 import type { SendResult } from "../outbox.ts";
@@ -45,9 +46,8 @@ const APPENDED_STATUSES = new Set(["CONFIRMED", "CANCELLED"]);
 
 const OVERRIDE_COLUMNS: readonly string[] = ["override_plate", "override_status"];
 
-const LAST_COLUMN = BOOKINGS_COLUMNS.length - 1;
-
-const ID_COLUMN = BOOKINGS_COLUMNS.indexOf("booking_id");
+/** A problem with the tab that only staff can fix. */
+class TabError extends Error {}
 
 /** The column letters of a zero-based column index. */
 function columnLetters(index: number): string {
@@ -55,18 +55,6 @@ function columnLetters(index: number): string {
   for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters;
   return letters;
 }
-
-/** The runs of columns an update may write: every column except the overrides, as [first, last] pairs. */
-const UPDATE_SPANS: [number, number][] = (() => {
-  const spans: [number, number][] = [];
-  BOOKINGS_COLUMNS.forEach((name, i) => {
-    if (OVERRIDE_COLUMNS.includes(name)) return;
-    const last = spans[spans.length - 1];
-    if (last !== undefined && last[1] === i - 1) last[1] = i;
-    else spans.push([i, i]);
-  });
-  return spans;
-})();
 
 const BOOKING_SQL = (count: number) =>
   "SELECT id, ref, status, source, model_id, package_id, vehicle_plate, start_at, end_at, price_jpy, deposit_jpy, " +
@@ -87,9 +75,14 @@ function jst(ms: number): string {
   return `${date} ${time}`;
 }
 
-/** The cells of a booking row, in BOOKINGS_COLUMNS order. */
-function rowOf(b: BookingRecord, refunds: RefundRecord[]): Cell[] {
-  const cells: Record<(typeof BOOKINGS_COLUMNS)[number], Cell> = {
+/** Refunds in these statuses moved money, or will; REJECTED and FAILED did not. */
+const MONEY_STATUSES = new Set(["PENDING", "COMPLETED", "RETRY"]);
+
+type ColumnName = (typeof BOOKINGS_COLUMNS)[number];
+
+/** The cells of a booking row by column name. */
+function rowOf(b: BookingRecord, refunds: RefundRecord[]): Record<ColumnName, Cell> {
+  return {
     booking_ref: b.ref,
     booking_id: b.id,
     status: b.status,
@@ -108,12 +101,11 @@ function rowOf(b: BookingRecord, refunds: RefundRecord[]): Cell[] {
     price_jpy: b.price_jpy ?? 0,
     deposit_jpy: b.deposit_jpy ?? 0,
     paid_jpy: b.paid_jpy,
-    refund_jpy: refunds.reduce((sum, r) => sum + r.amount_jpy, 0),
+    refund_jpy: refunds.filter((r) => MONEY_STATUSES.has(r.status)).reduce((sum, r) => sum + r.amount_jpy, 0),
     refund_status: refunds.length === 0 ? "" : refunds[refunds.length - 1].status,
     created_at: jst(b.created_at),
     updated_at: jst(b.updated_at),
   };
-  return BOOKINGS_COLUMNS.map((name) => cells[name]);
 }
 
 async function loadBookings(db: D1Database, ids: string[]): Promise<Map<string, BookingRecord>> {
@@ -142,20 +134,54 @@ async function loadRefunds(db: D1Database, ids: string[]): Promise<Map<string, R
   return byBooking;
 }
 
-/** The sheet row number (1-based) of each booking_id on the tab. A repeated id keeps its first row. */
-async function sheetRows(sheets: SheetsClient): Promise<Map<string, number>> {
-  const column = columnLetters(ID_COLUMN);
-  const read = await sheets.batchGet([`${TAB}!${column}:${column}`]);
+type TabLayout = {
+  /** The column name at each zero-based position of the header row; a staff column or a repeated header has none. */
+  nameAt: Map<number, ColumnName>;
+  /** The number of columns up to the last header. */
+  width: number;
+  /** The sheet row number (1-based) of each booking_id on the tab. A repeated id keeps its first row. */
+  rows: Map<string, number>;
+};
+
+/** Reads the whole tab once: the header row says where each column is, and the booking_id column says which rows. */
+async function readTab(sheets: SheetsClient): Promise<TabLayout> {
+  const grid = (await sheets.batchGet([TAB]))[TAB] ?? [];
+  const header = grid[0] ?? [];
+  if (!header.some((name) => headerKey(name) !== "")) throw new TabError(`${TAB}: the tab is missing or has no header row`);
+
+  const position = new Map<string, number>();
+  header.forEach((name, index) => {
+    const key = headerKey(name);
+    if (!position.has(key)) position.set(key, index);
+  });
+  const missing = BOOKINGS_COLUMNS.filter((name) => !position.has(name));
+  if (missing.length > 0) throw new TabError(`${TAB}: the header ${missing.join(", ")} is missing`);
+
+  const nameAt = new Map(BOOKINGS_COLUMNS.map((name) => [position.get(name) as number, name]));
+  const idAt = position.get("booking_id") as number;
   const rows = new Map<string, number>();
-  (read[TAB] ?? []).forEach((cells, i) => {
-    const id = cells[0];
+  grid.forEach((cells, i) => {
+    const id = cells[idAt];
     // Row 1 is the header.
     if (i > 0 && typeof id === "string" && id !== "" && !rows.has(id)) rows.set(id, i + 1);
   });
-  return rows;
+  return { nameAt, width: header.length, rows };
+}
+
+/** The runs of adjacent columns an update may write: every schema column but the overrides, as [first, last] pairs. */
+function updateSpans(nameAt: Map<number, ColumnName>): [number, number][] {
+  const owned = [...nameAt].filter(([, name]) => !OVERRIDE_COLUMNS.includes(name)).map(([index]) => index);
+  const spans: [number, number][] = [];
+  for (const index of owned.sort((x, y) => x - y)) {
+    const last = spans[spans.length - 1];
+    if (last !== undefined && last[1] === index - 1) last[1] = index;
+    else spans.push([index, index]);
+  }
+  return spans;
 }
 
 function failure(error: unknown): SendResult {
+  if (error instanceof TabError) return { ok: false, retryable: false, error: error.message };
   if (error instanceof SheetsError) {
     return { ok: false, retryable: error.status === 429 || error.status >= 500, error: error.message };
   }
@@ -178,24 +204,32 @@ export async function syncBookingRows(deps: SyncDeps, bookingIds: string[]): Pro
 
     if (known.length > 0) {
       const refunds = await loadRefunds(deps.db, known);
-      const onSheet = await sheetRows(deps.sheets);
+      const { nameAt, width, rows } = await readTab(deps.sheets);
+      const spans = updateSpans(nameAt);
       const updates: { range: string; values: unknown[][] }[] = [];
       const appends: Cell[][] = [];
       for (const id of known) {
         const booking = bookings.get(id) as BookingRecord;
-        const row = rowOf(booking, refunds.get(id) ?? []);
-        const at = onSheet.get(id);
+        const cells = rowOf(booking, refunds.get(id) ?? []);
+        const at = rows.get(id);
         if (at !== undefined) {
-          for (const [first, last] of UPDATE_SPANS) {
+          for (const [first, last] of spans) {
             const range = `${TAB}!${columnLetters(first)}${at}:${columnLetters(last)}${at}`;
-            updates.push({ range, values: [row.slice(first, last + 1)] });
+            const values = Array.from({ length: last - first + 1 }, (_, i) => cells[nameAt.get(first + i) as ColumnName]);
+            updates.push({ range, values: [values] });
           }
         } else if (APPENDED_STATUSES.has(booking.status)) {
-          appends.push(row);
+          // Each value under its own header; "" under the overrides, the staff columns and a repeated header.
+          appends.push(
+            Array.from({ length: width }, (_, i) => {
+              const name = nameAt.get(i);
+              return name === undefined || OVERRIDE_COLUMNS.includes(name) ? "" : cells[name];
+            }),
+          );
         }
       }
       if (updates.length > 0) await deps.sheets.batchUpdate(updates);
-      if (appends.length > 0) await deps.sheets.append(`${TAB}!A:${columnLetters(LAST_COLUMN)}`, appends);
+      if (appends.length > 0) await deps.sheets.append(`${TAB}!A:${columnLetters(width - 1)}`, appends);
     }
 
     if (unknown.length > 0) {
