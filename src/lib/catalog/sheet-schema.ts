@@ -2,7 +2,7 @@
 // docs/sheet-schema.md is the staff's view of the same rules. A bad row is reported and left out, and so is every row
 // that depends on it. One pass over the cells with Map and Set lookups, because #15 runs this with 10 ms of CPU.
 import type { Locale } from "../locale.ts";
-import { epochToJst, formatHHmm, jstToEpoch, parseHHmm, sheetSerialToEpoch } from "../time.ts";
+import { epochToJst, formatHHmm, jstToday, jstToEpoch, parseHHmm, sheetSerialToEpoch } from "../time.ts";
 import type {
   CancellationTier, Catalog, LicenseClass, LocalizedTexts, Model, Option, Package, Price, RateClass, RateGroup,
   ShopConfig, Vehicle, VehicleStatus, VehicleType, VehicleTypeId,
@@ -37,7 +37,7 @@ const NAMES = inEachLocale("name");
 /** The columns guests read. They are published as typed, trimmed and nothing else: NFKC would turn `，` into `,`. */
 const DISPLAY_COLUMNS = new Set([...NAMES, ...inEachLocale("summary"), ...inEachLocale("description")]);
 
-const STATUS = "publish_status";
+export const STATUS = "publish_status";
 
 export const BOOKINGS_COLUMNS = [
   "booking_ref", "booking_id", "status", "source", "model_id", "plate", "override_plate", "override_status",
@@ -71,7 +71,7 @@ export const SHEET_TABS = {
 type Tab = keyof typeof SHEET_TABS;
 
 /** What one publish reads, each tab after those it depends on. */
-const CATALOG_TABS = [
+export const CATALOG_TABS = [
   "Config", "Types", "RateClasses", "Packages", "Prices", "Models", "Vehicles", "Options", "Cancellation",
   "ClosedDates",
 ] as const;
@@ -240,18 +240,26 @@ class Row {
     return time ?? "";
   }
 
-  /** YYYY-MM-DD from text or a serial, so one day written both ways reads equal. */
-  date(column: string): string {
+  /** An error unless `date` falls in `window`. */
+  private inside(column: string, cell: unknown, date: string, window: DateWindow): void {
+    if (date < window.from || date > window.to) {
+      this.error(`${column} ${show(cell)} is outside the allowed dates, ${window.from} to ${window.to}`);
+    }
+  }
+
+  /** YYYY-MM-DD from text or a serial, so one day written both ways reads equal. Given a `window`, also inside it. */
+  date(column: string, window?: DateWindow): string {
     const cell = this.cell(column);
     const date = attempt(
       () => epochToJst(typeof cell === "number" ? sheetSerialToEpoch(cell) : jstToEpoch(String(cell))).date,
     );
     if (date === null) this.error(`${column} ${show(cell)} is not a date: use YYYY-MM-DD`);
+    else if (window) this.inside(column, cell, date, window);
     return date ?? "";
   }
 
-  /** The instant of a serial, or of text in YYYY-MM-DD HH:mm JST. */
-  instant(column: string): number {
+  /** The instant of a serial, or of text in YYYY-MM-DD HH:mm JST. Given a `window`, its JST date is also inside it. */
+  instant(column: string, window?: DateWindow): number {
     const cell = this.cell(column);
     const instant = attempt(() => {
       if (typeof cell === "number") return sheetSerialToEpoch(cell);
@@ -259,6 +267,7 @@ class Row {
       return match && jstToEpoch(match[1], match[2]);
     });
     if (instant === null) this.error(`${column} ${show(cell)} is not a date and time: use YYYY-MM-DD HH:mm`);
+    else if (window) this.inside(column, cell, epochToJst(instant).date, window);
     return instant ?? NaN;
   }
 
@@ -513,21 +522,36 @@ function readCancellation(rows: Row[]): CancellationTier[] {
   });
 }
 
-function readClosedDates(rows: Row[]): string[] {
+function readClosedDates(rows: Row[], window: DateWindow): string[] {
   const seen = new Set<string>();
   return keep(rows, (row) => {
-    const date = row.date("date");
+    const date = row.date("date", window);
     row.unique("date", date, seen);
     return date;
   });
 }
 
+/** The dates a ClosedDates or Blocks cell may hold, both ends included, as YYYY-MM-DD. */
+type DateWindow = { from: string; to: string };
+
+/** Two years either side of the JST date of `now`, on the same month and day; Feb 29 has no anniversary, so Feb 28. */
+function plausibleDates(now: number): DateWindow {
+  const today = jstToday(now);
+  const shifted = (years: number): string => {
+    const date = `${String(Number(today.slice(0, 4)) + years).padStart(4, "0")}${today.slice(4)}`;
+    return date.endsWith("-02-29") ? `${date.slice(0, 8)}28` : date;
+  };
+  return { from: shifted(-2), to: shifted(2) };
+}
+
 /**
  * Checks the catalog tabs. A tab or header problem stops the row checks, because every row below it would fail for the
  * same reason, but Config is still read so that `fatal` lists all that is wrong. A bad Config row leaves the catalog
- * null and the other tabs checked. `statuses` numbers rows as the sheet does.
+ * null and the other tabs checked. `statuses` numbers rows as the sheet does. A ClosedDates row more than 2 years before
+ * or after the JST date of `now` (epoch ms, the publish time) is an error and its date is left out: a date typed as
+ * digits, such as 260105, is a serial far in the future. The rest of the catalog still publishes.
  */
-export function validateCatalog(raw: Workbook): { catalog: Catalog | null; statuses: RowStatus[]; fatal: string[] } {
+export function validateCatalog(raw: Workbook, now: number): { catalog: Catalog | null; statuses: RowStatus[]; fatal: string[] } {
   const fatal: string[] = [];
   const tabs = Object.fromEntries(CATALOG_TABS.map((tab) => [tab, readTab(raw, tab, fatal)]));
   const config = tabs.Config && readConfig(tabs.Config, fatal);
@@ -542,7 +566,7 @@ export function validateCatalog(raw: Workbook): { catalog: Catalog | null; statu
   const vehicles = readVehicles(rows.Vehicles, idsOf(models));
   const options = readOptions(rows.Options);
   const cancellationTiers = readCancellation(rows.Cancellation);
-  const closedDates = readClosedDates(rows.ClosedDates);
+  const closedDates = readClosedDates(rows.ClosedDates, plausibleDates(now));
   return {
     catalog: config && {
       config, vehicleTypes, rateClasses, models, vehicles, packages, prices, options, cancellationTiers, closedDates,
@@ -556,11 +580,15 @@ export function validateCatalog(raw: Workbook): { catalog: Catalog | null; statu
  * Checks the Blocks tab against the published catalog. A broken tab is fatal, because #21 cancels any future block
  * missing from `blocks` and must not read it as deleted rows. For the same reason `skippedBlockIds` lists the id of
  * each rejected row, as `blockId` would hold it, so that #21 leaves those stored blocks alone. A blank channel,
- * reference or note passes: rejecting the row would free the bike it holds.
+ * reference or note passes: rejecting the row would free the bike it holds. The JST date of `start` and of `end` must
+ * each be within 2 years either side of the JST date of `now` (epoch ms, the publish time), inclusive. One outside it
+ * is an error and the row is skipped like any other, because a date typed as digits, such as 260105, reads as a serial
+ * centuries away and would block none of the intended dates.
  */
 export function validateBlocks(
   raw: Workbook,
   catalog: Catalog,
+  now: number,
 ): { blocks: ValidBlock[]; statuses: RowStatus[]; fatal: string[]; skippedBlockIds: string[] } {
   const fatal: string[] = [];
   const rows = readTab(raw, "Blocks", fatal);
@@ -568,6 +596,7 @@ export function validateBlocks(
 
   const modelIds = idsOf(catalog.models);
   const modelOfPlate = new Map(catalog.vehicles.map(({ plate, modelId }) => [plate, modelId]));
+  const window = plausibleDates(now);
   const seen = new Set<string>();
   const skippedBlockIds: string[] = [];
   const blocks = keep(rows, (row) => {
@@ -578,8 +607,8 @@ export function validateBlocks(
     if (plate !== "" && modelOfPlate.get(plate) !== modelId) {
       row.error(`plate ${show(plate)} is not a vehicle of model ${show(modelId)}`);
     }
-    const startAt = row.instant("start");
-    const endAt = row.instant("end");
+    const startAt = row.instant("start", window);
+    const endAt = row.instant("end", window);
     if (endAt <= startAt) row.error("end must be after start");
     if (!row.ok && ownsId) skippedBlockIds.push(blockId);
     return {
