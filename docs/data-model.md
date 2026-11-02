@@ -17,7 +17,7 @@ The model is shaped on OCTO, so the OTA connection designed in task #49 can map 
 | unit | one `vehicle` unit per option, not a physical vehicle: see `docs/ota-design.md` |
 | booking: hold, then confirm, then cancel | a booking (`bookings`): ON_HOLD, then CONFIRMED, then CANCELLED |
 
-PAYMENT_PENDING and EXPIRED are used internally.
+PAYMENT_PENDING is used internally. EXPIRED is reported to OTAs, as designed in `docs/ota-design.md`.
 
 ## Tables
 
