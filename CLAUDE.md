@@ -22,7 +22,7 @@ Booking site for an Okinawa rental shop (motorcycles, scooters, cars). Guests bo
 - `tests/`: the test suite (`npm test`, Node's runner over `tests/*.test.ts`).
 - `tests/e2e/`: tests against the built Worker in Miniflare (`npm run test:e2e`).
 - `tests/helpers/`: shared test helpers: `d1.ts` (in-memory D1 with the migrations) and `worker.ts` (the built Worker).
-- `docs/`: sheet schema, data model, local dev, deploy.
+- `docs/`: sheet schema, data model, local dev, deploy. Local dev and testing: [docs/local-dev.md](docs/local-dev.md); local secrets template: [.dev.vars.example](.dev.vars.example).
 - `scripts/verify.sh`: the checks behind the verify command; `.github/workflows/ci.yml` runs it.
 - `.githooks/pre-commit`: format and lint checks on staged files.
 

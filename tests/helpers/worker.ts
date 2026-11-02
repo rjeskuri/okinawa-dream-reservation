@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { Miniflare, convertV4MiniflareOptions } from "miniflare";
+import { Miniflare, convertV4MiniflareOptions, type Json } from "miniflare";
 import { unstable_getMiniflareWorkerOptions } from "wrangler";
 import { applyMigrations } from "./d1.ts";
 
@@ -53,6 +53,15 @@ export interface TestWorker {
   db: D1Database;
   media: R2Bucket;
   stop(): Promise<void>;
+}
+
+/**
+ * What this helper uses of `mf.getWorker()`. Miniflare's own return type needs `@cloudflare/workers-types`,
+ * which is not installed, and the global `Fetcher` has no `scheduled`.
+ */
+interface WorkerFetcher {
+  fetch(url: string, init?: RequestInit): Promise<Response>;
+  scheduled(options: { cron: string; scheduledTime: number }): Promise<{ outcome: string }>;
 }
 
 function blockedOutbound(request: Request): Response {
@@ -150,19 +159,20 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<TestWo
       ...worker,
       modulesRoot: dirname(main),
       modules: builtModules(main),
-      bindings: { ...worker.bindings, ...testVars, ...opts.vars },
+      // wrangler's `Omit` over an index-signature type leaves `bindings` as `unknown`.
+      bindings: { ...(worker.bindings as Record<string, Json> | undefined), ...testVars, ...opts.vars },
       outboundService: opts.outbound ?? blockedOutbound,
     }),
   );
   let db: D1Database;
   let media: R2Bucket;
-  let fetcher: Awaited<ReturnType<Miniflare["getWorker"]>>;
+  let fetcher: WorkerFetcher;
   try {
     await mf.ready;
     db = (await mf.getD1Database("DB")) as unknown as D1Database;
     media = (await mf.getR2Bucket("MEDIA")) as unknown as R2Bucket;
     await applyMigrations(db);
-    fetcher = await mf.getWorker();
+    fetcher = (await mf.getWorker()) as unknown as WorkerFetcher;
   } catch (error) {
     // A live Miniflare keeps the process open, so never leak one from a failed start.
     await mf.dispose();
@@ -170,7 +180,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<TestWo
   }
   return {
     async fetch(path, init) {
-      return (await fetcher.fetch(new URL(path, "http://localhost").href, init as never)) as unknown as Response;
+      return fetcher.fetch(new URL(path, "http://localhost").href, init);
     },
     async scheduled(cron, scheduledTime = Date.now()) {
       // Miniflare resolves with `{ outcome: "exception" }` when the handler fails, so raise it here.

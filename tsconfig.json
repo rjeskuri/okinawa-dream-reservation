@@ -7,7 +7,5 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true
   },
-  // tests/ runs under Node and needs @types/node to type-check; until that dependency is approved,
-  // `astro check` covers src/ only and Node's type stripping runs the tests as written.
-  "exclude": ["dist", ".wrangler", "tests"]
+  "exclude": ["dist", ".wrangler"]
 }
