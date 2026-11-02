@@ -40,6 +40,11 @@ Booking site for an Okinawa rental shop (motorcycles, scooters, cars). Guests bo
   `t/<issue#>-<slug>` and its worktree. Never on main; a hook blocks edits and commits there.
 - Tests first: write the tests the ticket names, prove them red with `harness-red check`, then
   change the source. Never loosen a test to make it pass.
+- The test-breaker guards against honest mistakes, not sabotage of our own tests (the owner's
+  decision, 2026-11-02). A cheat counts only if a well-meaning coder could plausibly write it. One
+  that needs deliberate sabotage is recorded as `cheat failed` and noted in the PR for the reviewer.
+  This never covers attackers at runtime: forged webhooks, tampered links, bad signatures and
+  hostile input stay required test cases.
 - Land through a pull request (`harness-pr open`); the user merges.
 
 ## Done means
