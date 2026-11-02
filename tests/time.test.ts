@@ -224,6 +224,30 @@ test("sheetSerialToEpoch converts Asia/Tokyo serials", () => {
   }
 });
 
+test("sheetSerialToEpoch rejects serials outside years 0000 to 9999", () => {
+  // 400 Gregorian years are 146_097 days, and serial 36_526 is 2000-01-01: 25_569 (1970-01-01 in the table above) plus
+  // 30 * 365 + 7 days. So 0000-01-01 is 36_526 - 5 * 146_097 = -693_959, and 10000-01-01 is 36_526 + 20 * 146_097 =
+  // 2_958_466, which makes 2_958_465 the day 9999-12-31.
+  const firstDay = -693_959;
+  const lastDay = 2_958_465;
+
+  // Date.parse on an explicit offset, because Date.UTC reads years 0000-0099 as 19xx.
+  const accepted: [number, string][] = [
+    [lastDay, "9999-12-31T00:00:00+09:00"],
+    [lastDay + 0.5, "9999-12-31T12:00:00+09:00"],
+    [firstDay, "0000-01-01T00:00:00+09:00"],
+  ];
+  for (const [serial, instant] of accepted) {
+    assert.equal(sheetSerialToEpoch(serial), Date.parse(instant), `sheetSerialToEpoch(${serial})`);
+  }
+
+  // A date typed as digits, values far past either end, and the whole day just outside each end.
+  const rejected = [20260105, 1e300, Number.MAX_VALUE, -Number.MAX_VALUE, lastDay + 1, firstDay - 1];
+  for (const serial of rejected) {
+    assert.throws(() => sheetSerialToEpoch(serial), RangeError, `sheetSerialToEpoch(${serial})`);
+  }
+});
+
 test("invalid dates and times throw RangeError", () => {
   const badDates = [
     "2026-02-30",

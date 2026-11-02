@@ -60,13 +60,11 @@ export function daysBetweenDates(from: string, to: string): number {
 
 /**
  * The instant of a Sheets serial, days since 1899-12-30 00:00 in the sheet's zone, which is fixed to Asia/Tokyo.
- * A serial is a float, so the result is rounded to the nearest millisecond. The check is on the product, so a finite
- * serial that overflows throws as well as NaN and Infinity.
+ * A serial is a float, so the result is rounded to the nearest millisecond. The check is on the rounded wall clock, so
+ * NaN, Infinity and a serial outside years 0000-9999 JST throw.
  */
 export function sheetSerialToEpoch(serial: number): number {
-  const sinceSheetEpochMs = Math.round(serial * DAY_MS);
-  if (!Number.isFinite(sinceSheetEpochMs)) throw new RangeError(`invalid serial: ${serial}`);
-  return SHEET_EPOCH_WALL_MS + sinceSheetEpochMs - JST_OFFSET_MS;
+  return wallDate(SHEET_EPOCH_WALL_MS + Math.round(serial * DAY_MS)).getTime() - JST_OFFSET_MS;
 }
 
 /** Minutes since midnight of H:mm or HH:mm. */
