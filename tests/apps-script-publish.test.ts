@@ -902,9 +902,11 @@ test("the manifest runs on V8 in Japan time with the ticket's scopes", () => {
   assert.equal(manifest.runtimeVersion, "V8");
   assert.equal(manifest.timeZone, "Asia/Tokyo");
   // userinfo.email is the scope Google documents for Session.getActiveUser, added by the owner's answer on the ticket.
+  // script.send_mail is the mail web app's, from task #38.
   assert.deepEqual([...manifest.oauthScopes].sort(), [
     "https://www.googleapis.com/auth/script.container.ui",
     "https://www.googleapis.com/auth/script.external_request",
+    "https://www.googleapis.com/auth/script.send_mail",
     "https://www.googleapis.com/auth/spreadsheets.currentonly",
     "https://www.googleapis.com/auth/userinfo.email",
   ]);
