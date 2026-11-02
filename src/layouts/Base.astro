@@ -1,0 +1,86 @@
+---
+// The shell of every public page: html lang, title, hreflang alternates, header nav, language switcher and footer.
+import { htmlLang, localePath } from "../i18n/locales.ts";
+import { common } from "../i18n/strings/common.ts";
+import { t } from "../i18n/t.ts";
+import { LOCALES, type Locale } from "../lib/locale.ts";
+
+interface Props {
+  locale: Locale;
+  title: string;
+}
+
+const { locale, title } = Astro.props;
+// Pages render on demand, so the request's own origin gives the absolute hreflang URLs on any host.
+const { origin, pathname, search } = Astro.url;
+// Later tickets add these routes under src/pages/[locale]/.
+const sections = ["rentals", "faq", "policies", "access"];
+---
+
+<!doctype html>
+<html lang={htmlLang(locale)}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    {
+      LOCALES.map((target) => (
+        <link rel="alternate" hreflang={htmlLang(target)} href={origin + localePath(pathname, "", target)} />
+      ))
+    }
+    <link rel="alternate" hreflang="x-default" href={`${origin}/`} />
+  </head>
+  <body>
+    <header>
+      <a href={`/${locale}/`}>{t(locale, common, "site.name")}</a>
+      <nav aria-label={t(locale, common, "nav.label")}>
+        {sections.map((section) => <a href={`/${locale}/${section}/`}>{t(locale, common, `nav.${section}`)}</a>)}
+      </nav>
+      <nav aria-label={t(locale, common, "language.label")}>
+        {
+          LOCALES.map((target) => (
+            <a
+              href={localePath(pathname, search, target)}
+              hreflang={htmlLang(target)}
+              lang={htmlLang(target)}
+              aria-current={target === locale ? "true" : undefined}
+            >
+              {t(locale, common, `language.${target}`)}
+            </a>
+          ))
+        }
+      </nav>
+    </header>
+    <main>
+      <slot />
+    </main>
+    <footer>{t(locale, common, "footer.rights")}</footer>
+  </body>
+</html>
+
+<style is:global>
+  :lang(en) {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  :lang(ja) {
+    font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, "Noto Sans CJK JP", sans-serif;
+  }
+  :lang(zh-CN) {
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  }
+  :lang(ko) {
+    font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans CJK KR", sans-serif;
+  }
+</style>
+
+<style>
+  header,
+  nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+  header {
+    justify-content: space-between;
+  }
+</style>
