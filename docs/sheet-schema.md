@@ -89,8 +89,9 @@ What the code does today: `validateCatalog` returns no catalog and lists each re
 
 One setting per row. All eight keys are required. A bad or missing value is fatal: the Publish stops, nothing is
 written back to the sheet (also not to the other rows), and the reason, such as `Config: shop_close is missing or
-invalid`, appears in the Publish alert. The check also gives the row an error naming the problem, but you will read it
-in the alert rather than in `publish_status`.
+invalid`, appears in the Publish alert. Staff see only that short reason. The check also words a longer message for the
+row (for `08:00` as `shop_close`: `shop_close 08:00 must be after shop_open 09:00`), but on a fatal Publish it is shown
+nowhere: not in the alert, and not in `publish_status`, which is not written. Check the value against the table below.
 
 | Column | Accepts |
 | --- | --- |
@@ -100,7 +101,7 @@ in the alert rather than in `publish_status`.
 | key | value | Example |
 | --- | --- | --- |
 | `shop_open` | Time of day | `09:00` |
-| `shop_close` | Time of day, after `shop_open`. The error appears on this row. | `18:00` |
+| `shop_close` | Time of day, after `shop_open`; if it is not, the Publish stops with `Config: shop_close is missing or invalid`. | `18:00` |
 | `slot_minutes` | Whole number, 1 or more | `30` |
 | `turnaround_minutes` | Whole number, 0 or more | `60` |
 | `hold_minutes` | Whole number, 1 or more | `15` |
