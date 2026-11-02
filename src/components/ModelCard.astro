@@ -1,0 +1,117 @@
+---
+// One model on the listing: a single link around a photo with its labels on top, then the license, price and deposit. The
+// labels sit on the button colours, whose contrast the tokens guarantee, because any photo can be behind them.
+import { sheetName } from "../i18n/locales.ts";
+import { rentals } from "../i18n/strings/rentals.ts";
+import { t } from "../i18n/t.ts";
+import type { Locale } from "../lib/locale.ts";
+import type { Model } from "../lib/types.ts";
+
+interface Props {
+  locale: Locale;
+  model: Model;
+  href: string;
+  /** Only for a model searchAvailability returned. */
+  available: boolean;
+  /** The first copied photo, or null to draw the placeholder. */
+  photo: string | null;
+  rateClassName: string;
+  packageName: string;
+  /** The class's price for the package, if it has one. */
+  priceJpy?: number;
+  depositJpy?: number;
+}
+
+const { locale, model, href, available, photo, rateClassName, packageName, priceJpy, depositJpy } = Astro.props;
+
+const yen = (jpy: number) => t(locale, rentals, "rentals.amount").replace("{amount}", jpy.toLocaleString("en-US"));
+---
+
+<a class="card" href={href} data-model-id={model.id} data-available={available ? "" : undefined}>
+  <div class="photo">
+    {
+      photo === null ? (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+          <rect x="3" y="5" width="18" height="14" rx="1" />
+          <circle cx="8.5" cy="10" r="1.5" />
+          <path d="m3 17 5-4 4 3 4-5 5 5" />
+        </svg>
+      ) : (
+        <img src={photo} alt="" loading="lazy" />
+      )
+    }
+    <span class="label engine">{model.typeId === "car" ? rateClassName : `${model.engineCc}cc`}</span>
+    <span class="label title">
+      <small>{model.brand}</small>
+      <strong>{sheetName(model.texts, locale)}</strong>
+    </span>
+  </div>
+  <div class="details">
+    <div>{t(locale, rentals, `rentals.license.${model.licenseClass}`)}</div>
+    <div>
+      {packageName}:{" "}
+      {
+        priceJpy === undefined ? (
+          t(locale, rentals, "rentals.card.noPrice")
+        ) : (
+          <strong data-price>{yen(priceJpy)}</strong>
+        )
+      }
+    </div>
+    {
+      depositJpy !== undefined && (
+        <div>
+          {t(locale, rentals, "rentals.card.deposit")}: <span data-deposit>{yen(depositJpy)}</span>
+        </div>
+      )
+    }
+  </div>
+</a>
+
+<style>
+  .card {
+    display: block;
+    overflow: hidden;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-base);
+    color: var(--color-text);
+    text-decoration: none;
+  }
+  .card:hover {
+    border-color: var(--color-link);
+    color: var(--color-text);
+  }
+  .photo {
+    position: relative;
+    aspect-ratio: 4 / 3;
+    color: var(--color-text-muted);
+  }
+  .photo img,
+  .photo svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .label {
+    position: absolute;
+    left: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-base);
+    background: var(--color-button-background);
+    color: var(--color-button-text);
+  }
+  .engine {
+    top: var(--space-2);
+  }
+  .title {
+    bottom: var(--space-2);
+    margin-right: var(--space-2);
+  }
+  .title small {
+    display: block;
+  }
+  .details {
+    padding: var(--space-3);
+  }
+</style>
