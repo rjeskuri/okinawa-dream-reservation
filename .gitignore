@@ -33,6 +33,9 @@ seed/photos-local/
 # PDFs of the mock for the customer, made by scripts/export-pdf.sh
 mock-pdfs/
 
+# The outbox emails rendered by scripts/demo-mail.ts: they hold test guest data
+.demo-mail/
+
 # Claude Code
 .claude/settings.local.json
 .claude/worktrees/

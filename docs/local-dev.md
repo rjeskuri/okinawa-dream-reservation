@@ -94,6 +94,24 @@ to one class, FAQ, policies and access. Checkout joins once it renders from a se
   date in the margins.
 - Text that is still a placeholder keeps its dashed box and "draft" label in the PDF.
 
+### Read the emails a booking sends
+
+The outbox holds the emails a booking queues, such as the guest confirmation with its cancel link. Without the Apps Script
+mail web app they are never delivered, so render them to files from the local database:
+
+```sh
+node scripts/demo-mail.ts
+```
+
+It reads the `email` items of the local D1 outbox (`npx wrangler d1 execute DB --local`), whatever their status, and writes
+`.demo-mail/<outbox id>.html` and `.txt` for each. Open the HTML in a browser; the cancel link in a guest confirmation
+points at `SITE_URL`, which `wrangler.jsonc` sets to http://localhost:4321 (`astro dev`), while the demo serves on 8787. To
+reach the right server, run `npm run dev` too (it reads the same local D1), or add `SITE_URL=http://localhost:8787` to
+`.dev.vars` and restart the demo before you book. The cancel page itself arrives with #105: until it is merged the link is
+correct (origin, path, booking id and a valid token) but opens a 404. Rerunning overwrites the files. Set `DEMO_MAIL_DIR` to
+write elsewhere.
+`.demo-mail/` is gitignored because it holds test guest data.
+
 ## Crons locally
 
 `astro dev` does not run crons. Run the built Worker with scheduled triggers enabled. It serves `dist/server` via
