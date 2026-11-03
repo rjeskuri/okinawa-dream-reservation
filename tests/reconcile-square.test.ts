@@ -7,13 +7,15 @@
 // What the ticket leaves open and this file decides, each one a Ruling in the PR:
 // - expectedJpy is what D1 holds and actualJpy what Square holds, for the money the issue is about. A side with no record of
 //   that money leaves its field out (0 is accepted too). status_mismatch may give the booking's deposit or paid as expected.
-// - retained_mismatch covers CANCELLED bookings only, under today's tiers, and reports retained amounts: expectedJpy = paid -
+// - retained_mismatch covers CANCELLED bookings whose confirmed_at or cancelled_at is in the window, under today's tiers,
+//   and a RETRY row still there at the daily run is stuck. It reports retained amounts: expectedJpy = paid -
 //   the tier's refund, actualJpy = paid - refunded. The tier is the one at cancelled_at (JST calendar days to pickup), never
 //   at `now`. Refunded counts PENDING and COMPLETED refunds, as #35's quote does, after this run's fixes: REJECTED, FAILED
 //   and RETRY never count, and a refund just recorded does.
 // - Only COMPLETED payments are reconciled: a FAILED one, such as a declined card, moved no money.
 // - A payment belongs to the booking whose payment_id it is, or else to the booking its reference_id names (#34 sets it to
-//   the booking id). The window is [now - days, now] for both lists, and a booking is in scope when its confirmed_at is in it.
+//   the booking id). The window is [now - days, now] for both lists. booking_without_payment and amount_mismatch cover a
+//   booking whose confirmed_at is in it, since an older payment is not in the listing.
 // - A Square refund belongs to a booking (recorded, counted) only when its payment_id is that booking's payment_id, whether
 //   or not that payment is in the window's listing. A refund of any other payment is never recorded.
 // - A COMPLETED payment no booking holds but whose reference_id names one is a #34 send-back. It is no issue when its
@@ -463,7 +465,8 @@ async function seedClean(world: World): Promise<void> {
   await refundOf(world, rejected.booking, { at: "2030-05-18 09:00", origin: "cancel", amount: rejected.booking.paid_jpy, status: "REJECTED" });
   await refundOf(world, rejected.booking, { at: "2030-05-19 10:00", origin: "dashboard", amount: rejected.booking.paid_jpy, status: "COMPLETED" });
 
-  // Paid before the window opened and cancelled inside it: 41 days, 100%. Its payment is not in the window's listing.
+  // Paid before the window opened and cancelled inside it: 41 days, 100%. Its payment is not in the window's listing, but
+  // its cancellation is, so the retained check covers it and finds the tier back.
   const paidEarlier = await paidBooking(world, { confirmed: "2030-04-20 09:00", pickup: "2030-07-01 09:00", cancelled: "2030-05-21 09:00" });
   await refundOf(world, paidEarlier.booking, { at: "2030-05-21 09:00", origin: "cancel", amount: paidEarlier.booking.paid_jpy, status: "COMPLETED" });
 
@@ -508,6 +511,11 @@ async function seedClean(world: World): Promise<void> {
     ["2030-05-31 10:20", "PENDING"],
   ];
   for (const [at, status] of tookNothing) squarePayment(world, { at, amount: yen(), status });
+
+  // Booked and cancelled before even a 60-day window opened: out of scope both ways, so its refused refund, which a
+  // retained check would flag, is not looked at. 21 days, 100%.
+  const outOfScope = await paidBooking(world, { confirmed: "2030-02-20 09:00", pickup: "2030-04-05 09:00", cancelled: "2030-03-15 09:00" });
+  await unsentRefund(world, outOfScope.booking, { at: "2030-03-15 09:00", origin: "cancel", amount: outOfScope.booking.paid_jpy, status: "REJECTED" });
 }
 
 const DISCREPANCIES: Case[] = [
@@ -920,6 +928,46 @@ const DISCREPANCIES: Case[] = [
         actualJpy: back,
       };
       return { issues: [issue], fixes: [{ kind: "insert", booking, square }] };
+    },
+  },
+  {
+    type: "retained_mismatch",
+    what: "a booking made before the window and cancelled inside it, whose refund Square refused",
+    seed: async (world) => {
+      // Booked 92 days back for a pickup months out. 46 days, 100%. The refused call left the row REJECTED with no Square
+      // id, so nothing went back. Its payment is not in the listing, which is no booking_without_payment.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-03-01 10:00", pickup: "2030-07-10 09:00", cancelled: "2030-05-25 14:00", paid });
+      await unsentRefund(world, booking, { at: "2030-05-25 14:00", origin: "cancel", amount: paid, status: "REJECTED" });
+      const issue: ExpectedIssue = {
+        type: "retained_mismatch",
+        bookingRef: booking.ref,
+        paymentId: must(booking.payment_id, "payment id"),
+        refundId: ANY,
+        expectedJpy: 0,
+        actualJpy: paid,
+      };
+      return { issues: [issue], fixes: [] };
+    },
+  },
+  {
+    type: "retained_mismatch",
+    what: "a booking made before the window and cancelled inside it, whose refund is stuck in RETRY",
+    seed: async (world) => {
+      // Booked 60 days back. 9 days, 50%. A RETRY row still there at the daily run is stuck, and nothing went back.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-04-02 09:00", pickup: "2030-06-06 09:00", cancelled: "2030-05-28 11:00", paid });
+      const tier = tierRefund(paid, 50);
+      await unsentRefund(world, booking, { at: "2030-05-28 11:00", origin: "cancel", amount: tier, status: "RETRY" });
+      const issue: ExpectedIssue = {
+        type: "retained_mismatch",
+        bookingRef: booking.ref,
+        paymentId: must(booking.payment_id, "payment id"),
+        refundId: ANY,
+        expectedJpy: paid - tier,
+        actualJpy: paid,
+      };
+      return { issues: [issue], fixes: [] };
     },
   },
 ];

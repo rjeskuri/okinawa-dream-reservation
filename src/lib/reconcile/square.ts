@@ -1,5 +1,5 @@
 // D1 against Square over a window of days, for the daily cron (#44): every COMPLETED payment and every refund Square
-// lists there, and every web booking confirmed there. Two differences are put right here, a refund's status and a
+// lists there, every web booking confirmed there, and every web booking cancelled there. Two differences are put right here, a refund's status and a
 // refund taken in the Dashboard that D1 never heard of; the rest is only reported. Both lists are read before any
 // write, so a listing that fails leaves D1 as it was, and the fixes land in one batch. expectedJpy is what D1 holds
 // and actualJpy what Square holds. Nothing here moves money.
@@ -46,26 +46,34 @@ const REFUSED_STATUSES = new Set(["REJECTED", "FAILED"]);
 /** A booking a payment has settled. */
 const SETTLED_STATUSES = new Set<string>(["CONFIRMED", "CANCELLED"]);
 
-/** ?1 and ?2 are the window. Blocks have no payment, and only a confirmed booking has a confirmed_at. */
-const IN_SCOPE_SQL = "source = 'web' AND status IN ('CONFIRMED', 'CANCELLED') AND confirmed_at BETWEEN ?1 AND ?2";
+/*
+ * Two scopes, ?1 and ?2 being the window. Blocks have no payment, and only a confirmed booking has a confirmed_at.
+ * - The payment check, booking_without_payment: a web booking confirmed in the window. One confirmed before it paid
+ *   before it too, so its payment is not in the listing.
+ * - The retained check, retained_mismatch: a CANCELLED web booking confirmed or cancelled in the window. Bookings run
+ *   months ahead, so a cancellation in the window is checked however long before it the booking was paid.
+ */
+const PAYMENT_SCOPE_SQL = "source = 'web' AND status IN ('CONFIRMED', 'CANCELLED') AND confirmed_at BETWEEN ?1 AND ?2";
+const RETAINED_SCOPE_SQL =
+  "source = 'web' AND status = 'CANCELLED' AND (confirmed_at BETWEEN ?1 AND ?2 OR cancelled_at BETWEEN ?1 AND ?2)";
 
 /**
- * The bookings in scope, and any booking that holds or is named by a listed payment, or holds a listed refund's
+ * The bookings in either scope, and any booking that holds or is named by a listed payment, or holds a listed refund's
  * payment, whenever it was confirmed. ?3 the payment ids and ?4 the reference ids go as one JSON parameter each, so a
  * listing of any size stays within D1's 100 bound parameters.
  */
 const BOOKINGS_SQL = `SELECT id, ref, status, start_at, deposit_jpy, payment_id, paid_jpy, cancelled_at,
-    (${IN_SCOPE_SQL}) AS in_scope
+    (${PAYMENT_SCOPE_SQL}) AS payment_scope, (${RETAINED_SCOPE_SQL}) AS retained_scope
   FROM bookings
-  WHERE (${IN_SCOPE_SQL})
+  WHERE (${PAYMENT_SCOPE_SQL}) OR (${RETAINED_SCOPE_SQL})
     OR payment_id IN (SELECT value FROM json_each(?3))
     OR id IN (SELECT value FROM json_each(?4))`;
 
-/** The rows of the listed refunds, ?3, and every row of a cancelled booking in scope. */
+/** The rows of the listed refunds, ?3, and every row of a booking in the retained scope. */
 const REFUNDS_SQL = `SELECT r.id, r.booking_id, r.square_refund_id, r.amount_jpy, r.status, b.ref
   FROM refunds r JOIN bookings b ON b.id = r.booking_id
   WHERE r.square_refund_id IN (SELECT value FROM json_each(?3))
-    OR r.booking_id IN (SELECT id FROM bookings WHERE ${IN_SCOPE_SQL} AND status = 'CANCELLED')`;
+    OR r.booking_id IN (SELECT id FROM bookings WHERE ${RETAINED_SCOPE_SQL})`;
 
 /** Only from the status this run read, so a webhook that moved the row since keeps what it wrote. */
 const SET_STATUS_SQL = "UPDATE refunds SET status = ?1, updated_at = ?2 WHERE id = ?3 AND status = ?4";
@@ -85,7 +93,10 @@ type BookingRow = {
   payment_id: string | null;
   paid_jpy: number;
   cancelled_at: number | null;
-  in_scope: number;
+  /** 1 in the payment check's scope, else 0 or null. */
+  payment_scope: number | null;
+  /** 1 in the retained check's scope, else 0 or null. */
+  retained_scope: number | null;
 };
 
 type RefundRow = {
@@ -284,21 +295,21 @@ function refundIssues(
 }
 
 /**
- * Each booking in scope against its payment and, once cancelled, what the shop keeps: paid less the tier's refund at
- * cancelled_at, against paid less what has gone back, counted after this run's fixes.
+ * Each booking in the payment scope against its payment and, in the retained scope, what the shop keeps: paid less the
+ * tier's refund at cancelled_at, against paid less what has gone back, counted after this run's fixes.
  */
 function bookingIssues(
-  inScope: BookingRow[],
+  bookings: BookingRow[],
   completed: Set<string>,
   tiers: CancellationTier[],
   rowsOf: Map<string, RefundRow[]>,
   fixes: Fixes,
 ): ReconcileIssue[] {
   const issues: ReconcileIssue[] = [];
-  for (const booking of inScope) {
+  for (const booking of bookings) {
     const { ref: bookingRef, status, paid_jpy: paid } = booking;
     const paymentId = booking.payment_id ?? undefined;
-    if (paymentId === undefined || !completed.has(paymentId)) {
+    if (booking.payment_scope === 1 && (paymentId === undefined || !completed.has(paymentId))) {
       issues.push({
         type: "booking_without_payment",
         bookingRef,
@@ -307,7 +318,7 @@ function bookingIssues(
         detail: `The booking is ${status} on ${yen(paid)} paid, and Square lists no COMPLETED payment for it.`,
       });
     }
-    if (status !== "CANCELLED") continue;
+    if (booking.retained_scope !== 1) continue;
 
     const refunded = refundedJpy([
       ...(rowsOf.get(booking.id) ?? []).map((row) => ({
@@ -373,14 +384,13 @@ export async function reconcileSquare(deps: ReconcileDeps, opts: ReconcileOption
   const rowOf = new Map<string, RefundRow>();
   for (const row of rows) if (row.square_refund_id !== null) rowOf.set(row.square_refund_id, row);
 
-  const inScope = bookings.filter((booking) => booking.in_scope === 1);
-  const tiers = inScope.some(({ status }) => status === "CANCELLED") ? await readCancellationTiers(db) : [];
+  const tiers = bookings.some((booking) => booking.retained_scope === 1) ? await readCancellationTiers(db) : [];
   const completed = new Set(payments.map(({ id }) => id));
   const fixes: Fixes = { statements: [], statusOf: new Map(), recorded: new Map() };
   const issues = paymentIssues(payments, groupBy(refunds, (refund) => refund.payment_id), byPayment, byId);
   issues.push(...refundIssues({ db, now }, refunds, rowOf, byPayment, fixes));
   // After refundIssues, which fills `fixes` for the retained check to count.
-  issues.push(...bookingIssues(inScope, completed, tiers, groupBy(rows, (row) => row.booking_id), fixes));
+  issues.push(...bookingIssues(bookings, completed, tiers, groupBy(rows, (row) => row.booking_id), fixes));
 
   let fixed = 0;
   if (fixes.statements.length > 0) {
