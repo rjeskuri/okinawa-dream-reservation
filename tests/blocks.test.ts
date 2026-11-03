@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { searchAvailability } from "../src/lib/booking/availability.ts";
 import { createHold } from "../src/lib/booking/holds.ts";
+import { applyOverrides } from "../src/lib/booking/overrides.ts";
 import type { ValidBlock } from "../src/lib/catalog/sheet-schema.ts";
 import { conflicts, isBlocking } from "../src/lib/db/blocking.ts";
 import type { BookingStatus } from "../src/lib/types.ts";
@@ -2525,3 +2526,517 @@ test("hostile text in a row stays data", () =>
     assert.equal((await mustFind(db, hostile.blockId)).status, "CANCELLED");
     assert.equal((await mustFind(db, quiet.blockId)).status, "CONFIRMED");
   }));
+
+// --- Staff overrides and bikes that leave service (task #111) -------------------------------------------------------
+// A staff override (task #22's applyOverrides, run here for real) moves a block's booking without touching its row on
+// the Blocks tab. These cases compare the columns staff and guests see, through `placement`, rather than every column:
+// where a sync keeps what it last read of a row is not theirs to pin.
+
+const OVERRIDE_AT = NOW + 10 * MINUTE_MS;
+const TURNAROUND_MS = 60 * MINUTE_MS;
+
+/** Where and when a block holds a bike, whether it holds, and the channel the sheet gave it. */
+function placement(row: BookingRow): Partial<BookingRow> {
+  const { status, model_id, vehicle_plate, start_at, end_at, external_ref, external_channel } = row;
+  const { cancelled_at, cancel_reason, updated_at } = row;
+  return { status, model_id, vehicle_plate, start_at, end_at, external_ref, external_channel, cancelled_at, cancel_reason, updated_at };
+}
+
+/** Moves the booking to `plate` through the Bookings tab's override cell, as task #22 does, and returns its row. */
+async function overrideTo(db: D1Database, bookingId: string, plate: string, at: number): Promise<BookingRow> {
+  const { results } = await applyOverrides(db, [{ row: 2, bookingId, overridePlate: plate }], at);
+  assert.deepEqual(
+    results.map(({ level, plate: moved }) => ({ level, moved })),
+    [{ level: "ok", moved: plate }],
+    JSON.stringify(results),
+  );
+  const row = await db.prepare("SELECT * FROM bookings WHERE id = ?1").bind(bookingId).first<BookingRow>();
+  assert.ok(row, `booking ${bookingId} is gone`);
+  assert.equal(row.vehicle_plate, plate);
+  return row;
+}
+
+/** A rerun of `sheet` changes nothing, so the sync took the last edit in. */
+async function assertSettled(db: D1Database, sheet: ValidBlock[], at: number): Promise<void> {
+  const before = await allBookings(db);
+  const rerun = await syncBlocks(db, sheet, at);
+  assert.deepEqual(counts(rerun), [0, 0], JSON.stringify(rerun.statuses));
+  assert.deepEqual(await allBookings(db), before);
+}
+
+// わ5 is the least used, so a block that falls back to any free bike lands there. わ4 is in maintenance, which a row may
+// still name.
+const OVERRIDE_BIKES: Bike[] = [
+  { plate: "わ1", base: 5 },
+  { plate: "わ2", base: 6 },
+  { plate: "わ3", base: 4 },
+  { plate: "わ4", base: 7, status: "maintenance" },
+  { plate: "わ5", base: 0 },
+];
+
+/** A block stored from `partial` among OVERRIDE_BIKES, then moved to `to` by a staff override at OVERRIDE_AT. */
+async function overriddenBlock(db: D1Database, partial: Partial<ValidBlock>, to: string) {
+  const shop = await seedShop(db, OVERRIDE_BIKES);
+  // A free bike of another model, which no block of this model may take.
+  await seedShop(db, ["わ9"]);
+  const row = aBlock(shop.modelId, partial);
+  const stored = await storeSheet(db, [row]);
+  const moved = await overrideTo(db, stored.id, to, OVERRIDE_AT);
+  return { shop, row, stored, moved };
+}
+
+test("an override survives an edit to a block's note", async (t) => {
+  const TEXT_EDITS: [label: string, change: Partial<ValidBlock>][] = [
+    ["the note", { note: "Guest asked for two helmets" }],
+    ["the reference", { reference: "KL-20300610-77" }],
+    ["the channel", { channel: "Rakuten Travel" }],
+    ["note, reference and channel at once", { note: "Ferry delayed", reference: "RK-5", channel: "Jalan" }],
+  ];
+  const OVERRIDES: [named: string, to: string][] = [
+    ["わ1", "わ2"],
+    ["わ3", "わ1"],
+    ["わ4", "わ2"],
+  ];
+
+  for (const [label, change] of TEXT_EDITS) {
+    for (const [named, to] of OVERRIDES) {
+      await t.test(`${label}, on a row naming ${named} that staff moved to ${to}`, () =>
+        withShop(async (db) => {
+          const { row, moved } = await overriddenBlock(db, { plate: named }, to);
+          const edited = { ...row, ...change };
+
+          const result = await syncBlocks(db, [edited], LATER);
+
+          assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+          assert.deepEqual(counts(result), [1, 0]);
+          const kept = { ...placement(moved), external_channel: edited.channel };
+          assert.deepEqual(placement(await mustFind(db, row.blockId)), { ...kept, updated_at: LATER });
+          await assertSettled(db, [edited], LATER + HOUR_MS);
+
+          // The next edit finds it on the same bike.
+          const again = { ...edited, note: `${edited.note} again` };
+          const second = await syncBlocks(db, [again], LATER + 2 * HOUR_MS);
+          assert.equal(statusOf(second, row.blockId).level, "ok", statusOf(second, row.blockId).message);
+          assert.deepEqual(placement(await mustFind(db, row.blockId)), { ...kept, updated_at: LATER + 2 * HOUR_MS });
+        }),
+      );
+    }
+  }
+
+  await t.test("after the plate column had moved it", () =>
+    withShop(async (db) => {
+      const shop = await seedShop(db, OVERRIDE_BIKES);
+      const row = aBlock(shop.modelId, { plate: "わ1" });
+      const stored = await storeSheet(db, [row]);
+      const replated = { ...row, plate: "わ3" };
+      assert.equal(statusOf(await syncBlocks(db, [replated], NOW + MINUTE_MS), row.blockId).level, "ok");
+      assert.equal((await mustFind(db, row.blockId)).vehicle_plate, "わ3");
+      const moved = await overrideTo(db, stored.id, "わ2", OVERRIDE_AT);
+      const edited = { ...replated, note: "Pick-up at the port" };
+
+      const result = await syncBlocks(db, [edited], LATER);
+
+      assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+      assert.deepEqual(placement(await mustFind(db, row.blockId)), { ...placement(moved), updated_at: LATER });
+    }),
+  );
+
+  await t.test("after a second override", () =>
+    withShop(async (db) => {
+      const { row, stored } = await overriddenBlock(db, { plate: "わ1" }, "わ2");
+      await syncBlocks(db, [{ ...row, note: "first" }], LATER);
+      assert.equal((await mustFind(db, row.blockId)).vehicle_plate, "わ2");
+      const moved = await overrideTo(db, stored.id, "わ3", LATER + 10 * MINUTE_MS);
+
+      const result = await syncBlocks(db, [{ ...row, note: "second" }], LATER + HOUR_MS);
+
+      assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+      assert.deepEqual(placement(await mustFind(db, row.blockId)), { ...placement(moved), updated_at: LATER + HOUR_MS });
+    }),
+  );
+
+  await t.test("while a rental has taken the bike the row names", () =>
+    withShop(async (db) => {
+      const { row, moved } = await overriddenBlock(db, { plate: "わ1" }, "わ2");
+      const rental = await seedBooking(db, {
+        vehicle_plate: "わ1",
+        ref: "WEB-AAAA",
+        start_at: row.startAt,
+        end_at: row.endAt,
+      });
+
+      const result = await syncBlocks(db, [{ ...row, note: "Guest calls on arrival" }], LATER);
+
+      assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+      assert.deepEqual(placement(await mustFind(db, row.blockId)), { ...placement(moved), updated_at: LATER });
+      const after = await db.prepare("SELECT * FROM bookings WHERE id = ?1").bind(rental.id).first<BookingRow>();
+      assert.deepEqual(after, rental);
+      assertNoOverlaps(await allBookings(db), LATER, TURNAROUND_MS, "note edit");
+    }),
+  );
+
+  await t.test("on a row with a blank plate", () =>
+    withShop(async (db) => {
+      const { row, stored, moved } = await overriddenBlock(db, { plate: null }, "わ2");
+      assert.equal(stored.vehicle_plate, "わ5");
+
+      const result = await syncBlocks(db, [{ ...row, note: "Blank plate, new note" }], LATER);
+
+      assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+      assert.deepEqual(placement(await mustFind(db, row.blockId)), { ...placement(moved), updated_at: LATER });
+    }),
+  );
+});
+
+test("a changed plate still moves an overridden block", async (t) => {
+  // Every row names わ1, and staff move it to わ2 before the edit.
+  const MOVES: [label: string, change: Partial<ValidBlock>, plate: string][] = [
+    ["to a free bike", { plate: "わ3" }, "わ3"],
+    ["to a bike in maintenance, which a row may name", { plate: "わ4" }, "わ4"],
+    ["to a free bike with a new note in the same edit", { plate: "わ3", note: "Moved by the office" }, "わ3"],
+  ];
+  for (const [label, change, plate] of MOVES) {
+    await t.test(label, () =>
+      withShop(async (db) => {
+        const { row, moved } = await overriddenBlock(db, { plate: "わ1" }, "わ2");
+        const edited = { ...row, ...change };
+
+        const result = await syncBlocks(db, [edited], LATER);
+
+        assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+        assert.deepEqual(counts(result), [1, 0]);
+        const expected = { ...placement(moved), vehicle_plate: plate };
+        assert.deepEqual(placement(await mustFind(db, row.blockId)), { ...expected, updated_at: LATER });
+        await assertSettled(db, [edited], LATER + HOUR_MS);
+
+        // A note edit after it leaves the block where the plate column put it.
+        await syncBlocks(db, [{ ...edited, note: "Later note" }], LATER + 2 * HOUR_MS);
+        assert.deepEqual(placement(await mustFind(db, row.blockId)), { ...expected, updated_at: LATER + 2 * HOUR_MS });
+      }),
+    );
+  }
+
+  await t.test("to a free bike after a note edit kept the override", () =>
+    withShop(async (db) => {
+      const { row, moved } = await overriddenBlock(db, { plate: "わ1" }, "わ2");
+      const noted = { ...row, note: "Kept on the override" };
+      await syncBlocks(db, [noted], LATER);
+      assert.equal((await mustFind(db, row.blockId)).vehicle_plate, "わ2");
+
+      const result = await syncBlocks(db, [{ ...noted, plate: "わ3" }], LATER + HOUR_MS);
+
+      assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+      assert.deepEqual(placement(await mustFind(db, row.blockId)), {
+        ...placement(moved),
+        vehicle_plate: "わ3",
+        updated_at: LATER + HOUR_MS,
+      });
+    }),
+  );
+
+  await t.test("back to the bike the row first named", () =>
+    withShop(async (db) => {
+      const { row } = await overriddenBlock(db, { plate: "わ1" }, "わ2");
+      await syncBlocks(db, [{ ...row, plate: "わ3" }], LATER);
+      assert.equal((await mustFind(db, row.blockId)).vehicle_plate, "わ3");
+
+      const result = await syncBlocks(db, [row], LATER + HOUR_MS);
+
+      assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+      assert.equal((await mustFind(db, row.blockId)).vehicle_plate, "わ1");
+    }),
+  );
+
+  await t.test("not to a busy bike, and not to any other", () =>
+    withShop(async (db) => {
+      const { row } = await overriddenBlock(db, { plate: "わ1" }, "わ2");
+      await seedBooking(db, { vehicle_plate: "わ3", ref: "WEB-CCCC", start_at: row.startAt, end_at: row.endAt });
+
+      await assertRejected(db, [{ ...row, plate: "わ3" }], row.blockId, [["WEB-CCCC", "わ3"]], LATER);
+
+      assert.equal((await mustFind(db, row.blockId)).vehicle_plate, "わ2");
+    }),
+  );
+
+  await t.test("not when a hold takes the new plate just before the write", () =>
+    withShop(async (db) => {
+      const { shop, row } = await overriddenBlock(db, { plate: "わ1" }, "わ2");
+      const before = await mustFind(db, row.blockId);
+      // わ5 is the least used of the free bikes, so that is where the hold lands.
+      const race = raceBeforeWrite(db, () => createHold(db, holdFor(shop), LATER));
+
+      const result = await syncBlocks(race.db, [{ ...row, plate: "わ5" }], LATER);
+
+      assert.equal(race.raced(), true);
+      const hold = (await allBookings(db)).find(({ status }) => status === "ON_HOLD");
+      assert.equal(hold?.vehicle_plate, "わ5");
+      assert.equal(statusOf(result, row.blockId).level, "error");
+      assert.deepEqual(await mustFind(db, row.blockId), before);
+      assertNoOverlaps(await allBookings(db), LATER, TURNAROUND_MS, "plate column after an override");
+    }),
+  );
+});
+
+test("new times still move an overridden block", async (t) => {
+  // The row names わ1 and staff moved it to わ2. A time edit may take either of those two bikes, but no other.
+  const SPAN = { startAt: wall("06-20 10:00"), endAt: wall("06-20 16:00") };
+  const ITS_BIKES = ["わ1", "わ2"];
+
+  for (const noteFirst of [false, true]) {
+    await t.test(`to free times${noteFirst ? ", after a note edit kept the override" : ""}`, () =>
+      withShop(async (db) => {
+        const { row } = await overriddenBlock(db, { plate: "わ1" }, "わ2");
+        let sheet = row;
+        if (noteFirst) {
+          sheet = { ...row, note: "Before the new times" };
+          await syncBlocks(db, [sheet], NOW + 30 * MINUTE_MS);
+          assert.equal((await mustFind(db, row.blockId)).vehicle_plate, "わ2");
+        }
+        const edited = { ...sheet, ...SPAN };
+
+        const result = await syncBlocks(db, [edited], LATER);
+
+        assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+        const after = await mustFind(db, row.blockId);
+        assert.deepEqual(
+          [after.status, after.start_at, after.end_at, after.updated_at],
+          ["CONFIRMED", SPAN.startAt, SPAN.endAt, LATER],
+        );
+        assert.ok(ITS_BIKES.includes(after.vehicle_plate), after.vehicle_plate);
+        await assertSettled(db, [edited], LATER + HOUR_MS);
+      }),
+    );
+  }
+
+  await t.test("not to times both of its bikes are taken, and not to any other bike", () =>
+    withShop(async (db) => {
+      const { row } = await overriddenBlock(db, { plate: "わ1" }, "わ2");
+      const span = { start_at: wall("06-20 09:00"), end_at: wall("06-20 18:00") };
+      await seedBooking(db, { vehicle_plate: "わ1", ref: "WEB-AAAA", ...span });
+      await seedBooking(db, { vehicle_plate: "わ2", ref: "WEB-BBBB", ...span });
+      const blockers: Blocker[] = [
+        ["WEB-AAAA", "わ1"],
+        ["WEB-BBBB", "わ2"],
+      ];
+
+      await assertRejected(db, [{ ...row, ...SPAN }], row.blockId, blockers, LATER);
+    }),
+  );
+
+  for (const busy of ITS_BIKES) {
+    await t.test(`never onto ${busy} when a rental has it at the new times`, () =>
+      withShop(async (db) => {
+        const { row } = await overriddenBlock(db, { plate: "わ1" }, "わ2");
+        await seedBooking(db, {
+          vehicle_plate: busy,
+          ref: "WEB-DDDD",
+          start_at: wall("06-20 09:00"),
+          end_at: wall("06-20 18:00"),
+        });
+        const before = await allBookings(db);
+
+        const result = await syncBlocks(db, [{ ...row, ...SPAN }], LATER);
+
+        const { level, message } = statusOf(result, row.blockId);
+        const after = await mustFind(db, row.blockId);
+        if (level === "ok") {
+          assert.deepEqual([after.start_at, after.end_at], [SPAN.startAt, SPAN.endAt]);
+          assert.ok(ITS_BIKES.includes(after.vehicle_plate) && after.vehicle_plate !== busy, after.vehicle_plate);
+        } else {
+          assertNamesConflict({ blockId: row.blockId, level, message }, [["WEB-DDDD", busy]]);
+          assert.deepEqual(await allBookings(db), before);
+        }
+        assertNoOverlaps(await allBookings(db), LATER, TURNAROUND_MS, `${busy} taken`);
+      }),
+    );
+  }
+});
+
+/**
+ * A blank-plate block stored on わ1, then the only bike of its model, beside a row of another model that keeps the tab
+ * from reading as emptied. With `cancelled`, the block's row is then deleted from the tab. Then `others` join the model
+ * and わ1 goes to `status`. `before` is the block's row as it then stands.
+ */
+async function blockOnLeavingBike(
+  db: D1Database,
+  status: string,
+  others: Bike[],
+  opts: { plate?: string | null; base?: number; cancelled?: boolean } = {},
+) {
+  const shop = await seedShop(db, [{ plate: "わ1", base: opts.base ?? 0 }]);
+  const other = await seedShop(db, ["わ9"]);
+  const row = aBlock(shop.modelId, { plate: opts.plate ?? null });
+  const anchor = aBlock(other.modelId, { startAt: wall("07-20 09:00"), endAt: wall("07-20 18:00") });
+  await storeSheet(db, [row, anchor]);
+  if (opts.cancelled) {
+    await syncBlocks(db, [anchor], NOW);
+    assert.equal((await mustFind(db, row.blockId)).status, "CANCELLED");
+  }
+  for (const { plate, base = 0, status: bikeStatus = "active" } of others) {
+    await seedVehicle(db, { plate, model_id: shop.modelId, base_usage_days: base, odometer_km: null, status: bikeStatus });
+  }
+  await db.prepare("UPDATE vehicles SET status = ?1 WHERE plate = 'わ1'").bind(status).run();
+  return { shop, row, anchor, before: await mustFind(db, row.blockId) };
+}
+
+test("a blank-plate block leaves a bike in maintenance", async (t) => {
+  const NEW_SPAN = { startAt: wall("06-20 10:00"), endAt: wall("06-20 16:00") };
+
+  for (const status of ["maintenance", "retired"]) {
+    // わ4 is out of service too and the least used of all, so only an active bike may take the block.
+    const MOVES: [label: string, change: Partial<ValidBlock>, others: Bike[], plate: string][] = [
+      [
+        "a later end over its own times",
+        { endAt: wall("06-11 12:00") },
+        [{ plate: "わ2", base: 7 }, { plate: "わ3", base: 2 }, { plate: "わ4", status }],
+        "わ3",
+      ],
+      [
+        "new times on another day",
+        NEW_SPAN,
+        [{ plate: "わ2", base: 1 }, { plate: "わ3", base: 6 }, { plate: "わ4", status }],
+        "わ2",
+      ],
+    ];
+    for (const [label, change, others, plate] of MOVES) {
+      await t.test(`${status}: ${label} moves it to the least-used active bike`, () =>
+        withShop(async (db) => {
+          const { row, anchor, before } = await blockOnLeavingBike(db, status, others);
+          const edited = { ...row, ...change };
+
+          const result = await syncBlocks(db, [edited, anchor], LATER);
+
+          assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+          assert.deepEqual(counts(result), [1, 0]);
+          assert.deepEqual(placement(await mustFind(db, row.blockId)), {
+            ...placement(before),
+            vehicle_plate: plate,
+            start_at: edited.startAt,
+            end_at: edited.endAt,
+            updated_at: LATER,
+          });
+          await assertSettled(db, [edited, anchor], LATER + HOUR_MS);
+        }),
+      );
+    }
+
+    await t.test(`${status}: a row back from a cancel returns on the least-used active bike`, () =>
+      withShop(async (db) => {
+        const others = [{ plate: "わ2", base: 8 }, { plate: "わ3", base: 3 }, { plate: "わ4", status }];
+        const { row, anchor, before } = await blockOnLeavingBike(db, status, others, { cancelled: true });
+
+        const result = await syncBlocks(db, [row, anchor], LATER);
+
+        assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+        assert.deepEqual(placement(await mustFind(db, row.blockId)), {
+          ...placement(before),
+          status: "CONFIRMED",
+          vehicle_plate: "わ3",
+          cancelled_at: null,
+          cancel_reason: null,
+          updated_at: LATER,
+        });
+      }),
+    );
+
+    await t.test(`${status}: with every active bike taken it stays, reports an error, and moves once one is free`, () =>
+      withShop(async (db) => {
+        const others = [{ plate: "わ2" }, { plate: "わ4", status }];
+        const { row, anchor, before } = await blockOnLeavingBike(db, status, others);
+        await seedBooking(db, {
+          vehicle_plate: "わ2",
+          ref: "WEB-BBBB",
+          start_at: wall("06-20 09:00"),
+          end_at: wall("06-20 18:00"),
+        });
+        const edited = { ...row, ...NEW_SPAN };
+
+        await assertRejected(db, [edited, anchor], row.blockId, [["WEB-BBBB", "わ2"]], LATER);
+
+        await db.prepare("UPDATE bookings SET status = 'CANCELLED' WHERE ref = 'WEB-BBBB'").run();
+        const freed = await syncBlocks(db, [edited, anchor], LATER + HOUR_MS);
+        assert.equal(statusOf(freed, row.blockId).level, "ok", statusOf(freed, row.blockId).message);
+        assert.deepEqual(placement(await mustFind(db, row.blockId)), {
+          ...placement(before),
+          vehicle_plate: "わ2",
+          start_at: NEW_SPAN.startAt,
+          end_at: NEW_SPAN.endAt,
+          updated_at: LATER + HOUR_MS,
+        });
+      }),
+    );
+
+    await t.test(`${status}: with no active bike of its model it stays and reports an error`, () =>
+      withShop(async (db) => {
+        const { row, anchor } = await blockOnLeavingBike(db, status, [{ plate: "わ4", status }]);
+        const edited = { ...row, ...NEW_SPAN };
+        const before = await allBookings(db);
+
+        for (const at of [LATER, LATER + HOUR_MS]) {
+          const result = await syncBlocks(db, [edited, anchor], at);
+
+          const { level, message } = statusOf(result, row.blockId);
+          assert.equal(level, "error", message);
+          assert.ok(message.length > 0);
+          assert.deepEqual(await allBookings(db), before);
+        }
+      }),
+    );
+
+    await t.test(`${status}: a returning row with every active bike taken stays cancelled and reports an error`, () =>
+      withShop(async (db) => {
+        const { row, anchor } = await blockOnLeavingBike(db, status, [{ plate: "わ2" }], { cancelled: true });
+        await seedBooking(db, { vehicle_plate: "わ2", ref: "WEB-BBBB", start_at: row.startAt, end_at: row.endAt });
+
+        await assertRejected(db, [row, anchor], row.blockId, [["WEB-BBBB", "わ2"]], LATER);
+
+        assert.equal((await mustFind(db, row.blockId)).status, "CANCELLED");
+      }),
+    );
+  }
+
+  await t.test("a hold that takes the least-used bike just before the write is never overlapped", () =>
+    withShop(async (db) => {
+      const others = [{ plate: "わ2", base: 7 }, { plate: "わ3", base: 2 }];
+      const { shop, row, anchor } = await blockOnLeavingBike(db, "maintenance", others);
+      const race = raceBeforeWrite(db, () => createHold(db, holdFor(shop, wall("06-20 09:00")), LATER));
+
+      const result = await syncBlocks(race.db, [{ ...row, ...NEW_SPAN }, anchor], LATER);
+
+      assert.equal(race.raced(), true);
+      const hold = (await allBookings(db)).find(({ status }) => status === "ON_HOLD");
+      assert.equal(hold?.vehicle_plate, "わ3");
+      assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+      assert.equal((await mustFind(db, row.blockId)).vehicle_plate, "わ2");
+      assertNoOverlaps(await allBookings(db), LATER, TURNAROUND_MS, "off a bike in maintenance, raced");
+    }),
+  );
+
+  await t.test("a bike still active keeps its block, though another is less used", () =>
+    withShop(async (db) => {
+      const { row, anchor } = await blockOnLeavingBike(db, "active", [{ plate: "わ3", base: 0 }], { base: 9 });
+      const edited = { ...row, endAt: wall("06-11 12:00") };
+
+      const result = await syncBlocks(db, [edited, anchor], LATER);
+
+      assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+      assert.equal((await mustFind(db, row.blockId)).vehicle_plate, "わ1");
+    }),
+  );
+
+  for (const cancelled of [false, true]) {
+    await t.test(`a row naming a plate in maintenance keeps it${cancelled ? " when it returns" : ""}`, () =>
+      withShop(async (db) => {
+        const others = [{ plate: "わ3", base: 0 }];
+        const { row, anchor } = await blockOnLeavingBike(db, "maintenance", others, { plate: "わ1", cancelled });
+        const edited = cancelled ? row : { ...row, endAt: wall("06-11 12:00") };
+
+        const result = await syncBlocks(db, [edited, anchor], LATER);
+
+        assert.equal(statusOf(result, row.blockId).level, "ok", statusOf(result, row.blockId).message);
+        const after = await mustFind(db, row.blockId);
+        assert.deepEqual([after.status, after.vehicle_plate, after.end_at], ["CONFIRMED", "わ1", edited.endAt]);
+      }),
+    );
+  }
+});

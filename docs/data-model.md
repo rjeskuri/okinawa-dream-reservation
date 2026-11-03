@@ -90,10 +90,12 @@ The other paths:
 - `CANCELLED -> CONFIRMED`: a block's row returns to the sheet before the block's end and the overlap rule still lets it.
   Web bookings have no way back.
 
-`syncBlocks` in `src/lib/booking/blocks.ts` writes block bookings. `content_hash` is the row as last synced, so an
-unchanged row costs no write. Any write that takes a vehicle picks it inside that one conditional statement, as a hold
-does. Blocks that have ended are never written again, and at most 20 changes run per call. `docs/sheet-schema.md` says
-what staff see.
+`syncBlocks` in `src/lib/booking/blocks.ts` writes block bookings. `content_hash` is a digest of the row as last synced,
+so an unchanged row costs no write, then after a dot a digest of that row's plate alone. A staff override changes
+`vehicle_plate` and leaves `content_hash` alone, so the plate digest is how a sync tells an edit to the row's plate,
+which moves the block, from an edit to its other columns, which keeps the override. Any write that takes a vehicle
+picks it inside that one conditional statement, as a hold does. Blocks that have ended are never written again, and at
+most 20 changes run per call. `docs/sheet-schema.md` says what staff see.
 
 ## The overlap rule
 

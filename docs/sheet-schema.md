@@ -275,7 +275,11 @@ Each Publish then brings the stored blocks in line with the tab, and `publish_st
 - **A new row** takes the plate it names, or with a blank plate the least-used free vehicle of the model. A named plate
   is the only vehicle it can take, even when others are free.
 - **A changed row** keeps its vehicle if that is free for the new times. With a blank plate it otherwise moves to the
-  least-used free vehicle. A change to `channel`, `reference` or `note` alone moves nothing.
+  least-used free vehicle, as it does when its vehicle is now in maintenance or retired. A change to `channel`,
+  `reference` or `note` alone moves nothing.
+- **A block moved with `override_plate`** on the Bookings tab stays on that bike when its row's `channel`, `reference`
+  or `note` changes. A new `plate` moves it to that plate. New times on a row that names a plate ask for that plate
+  again, and with a blank plate the block keeps the bike staff chose if it is free.
 - **A row that cannot get a vehicle** shows an error naming what is in the way, a booking's ref or a block's `block_id`,
   and the plate. No new block is stored, and a stored block stays exactly as it was until a Publish finds the times free.
 - **A row deleted from the tab** cancels its block, unless the block has ended. Ended blocks are never changed: a later

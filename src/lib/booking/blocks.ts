@@ -72,15 +72,17 @@ const STORED_SQL = `SELECT id, external_ref AS blockId, status, vehicle_plate AS
   ORDER BY external_ref`;
 
 // What a move binds, in a statement of its own or as the read that says why it failed: ?1 to ?5 are q, ?6 is the booking,
-// which never stands in its own way, ?7 the plate it asks for and ?8 is 1 when any free bike of the model will do.
+// which never stands in its own way, ?7 the plate it asks for and ?8 is 1 for a blank plate, when any free active bike
+// of the model will do. Then ?7 is the bike the block stands on, if it is stored.
 const ASKED_SQL = "WITH q(s, e, buf, now, model) AS (SELECT ?1, ?2, ?3, ?4, ?5)";
 
-// A named plate need not be active. assignFreeVehicleSql counts the booking's own row as busy, which does no harm: it
-// runs only once ?7, the one bike that row can be on, has been refused.
+// A named plate need not be active, but a blank-plate block keeps its bike only while that bike is active. Otherwise it
+// moves, so that a bike taken out of service sheds it. assignFreeVehicleSql counts the booking's own row as busy, which
+// does no harm: it runs only once ?7, the one bike that row can be on, has been refused.
 const PICK_SQL = `${ASKED_SQL},
   pick(plate) AS (SELECT COALESCE(
     (SELECT v.plate FROM vehicles v
-      WHERE v.plate = ?7 AND v.model_id = (SELECT model FROM q)
+      WHERE v.plate = ?7 AND v.model_id = (SELECT model FROM q) AND (?8 = 0 OR v.status = 'active')
         AND NOT EXISTS (
           SELECT 1 FROM bookings b WHERE b.vehicle_plate = v.plate AND b.id <> ?6 AND ${BLOCKING_SQL} AND ${OVERLAP_SQL}
         )),
@@ -103,10 +105,11 @@ const MOVE_SQL = `${PICK_SQL}
   WHERE bookings.id = ?6 AND pick.plate IS NOT NULL
   RETURNING vehicle_plate`;
 
+// Only the bikes PICK_SQL may take, so the row is never told of a booking on a bike it could not have had.
 const BLOCKER_SQL = `${ASKED_SQL}
   SELECT CASE b.source WHEN 'block' THEN b.external_ref ELSE b.ref END AS name, v.plate AS plate
   FROM vehicles v JOIN bookings b ON b.vehicle_plate = v.plate
-  WHERE v.model_id = (SELECT model FROM q) AND (v.plate = ?7 OR (?8 = 1 AND v.status = 'active'))
+  WHERE v.model_id = (SELECT model FROM q) AND (v.plate = ?7 OR ?8 = 1) AND (?8 = 0 OR v.status = 'active')
     AND b.id <> ?6 AND ${BLOCKING_SQL} AND ${OVERLAP_SQL}
   ORDER BY v.plate, b.start_at, b.id
   LIMIT 1`;
@@ -121,9 +124,20 @@ function ok(blockId: string): BlockStatus {
   return { blockId, level: "ok", message: "ok" };
 }
 
-/** JSON keeps each column to its own place, so text moved from one column to the next is a change. */
-function contentHash({ modelId, plate, startAt, endAt, channel, reference, note }: ValidBlock): Promise<string> {
-  return sha256Hex(JSON.stringify([modelId, plate, startAt, endAt, channel, reference, note]));
+/**
+ * What content_hash keeps of the row: a digest of the whole row, so that an unchanged row costs no write, then after a
+ * dot one of its plate alone. A staff override moves the bike and leaves content_hash as it was, so the second part is
+ * how a later sync tells an edit to the plate column from a bike staff chose. JSON keeps each column to its own place,
+ * so text moved from one column to the next is a change.
+ */
+async function contentHash({ modelId, plate, startAt, endAt, channel, reference, note }: ValidBlock): Promise<string> {
+  const row = await sha256Hex(JSON.stringify([modelId, plate, startAt, endAt, channel, reference, note]));
+  return `${row}.${await sha256Hex(JSON.stringify(plate))}`;
+}
+
+/** The digest of the plate a content hash was made from. A hash from before it had one gives undefined. */
+function plateDigest(hash: string | null): string | undefined {
+  return hash?.split(".")[1];
 }
 
 /** What the row is told without a write, or null when it is a change. Ended blocks are left alone in every path. */
@@ -133,13 +147,17 @@ function settledStatus(block: ValidBlock, hash: string, row: StoredBlock | undef
   return row.endAt <= now ? { blockId: block.blockId, level: "warning", message: ENDED } : null;
 }
 
-function movesBike(block: ValidBlock, row: StoredBlock): boolean {
+/**
+ * Whether the change must take a bike through the overlap rule. A named plate counts only when the row changed it since
+ * the last sync, because the block may stand where a staff override put it, and only when the block is not on it yet.
+ */
+function movesBike(block: ValidBlock, hash: string, row: StoredBlock): boolean {
   return (
     row.status !== "CONFIRMED" ||
     row.startAt !== block.startAt ||
     row.endAt !== block.endAt ||
     row.modelId !== block.modelId ||
-    (block.plate !== null && block.plate !== row.plate)
+    (block.plate !== null && block.plate !== row.plate && plateDigest(hash) !== plateDigest(row.hash))
   );
 }
 
@@ -153,7 +171,7 @@ async function applyChange(
   now: number,
 ): Promise<BlockStatus> {
   const { blockId, channel, modelId, startAt, endAt } = block;
-  if (row !== undefined && !movesBike(block, row)) {
+  if (row !== undefined && !movesBike(block, hash, row)) {
     await db.prepare(TEXT_SQL).bind(channel, hash, now, row.id).run();
     return ok(blockId);
   }
