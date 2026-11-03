@@ -1,0 +1,98 @@
+---
+// /{locale}/booking/cancel?b={id}&t={token}: the link in a guest's confirmation email. GET shows what cancelling would
+// refund and writes nothing, because mail scanners follow links; only a POST cancels, and it quotes for itself.
+import { env } from "cloudflare:workers";
+import { cancel } from "../../../i18n/strings/cancel.ts";
+import { common } from "../../../i18n/strings/common.ts";
+import { email } from "../../../i18n/strings/email.ts";
+import { t } from "../../../i18n/t.ts";
+import Base from "../../../layouts/Base.astro";
+import { cancelBooking, quoteCancellation, verifyCancelToken } from "../../../lib/booking/cancel.ts";
+import { isLocale } from "../../../lib/locale.ts";
+import { REFUND_WORDING } from "../../../lib/mail/templates.ts";
+import { epochToJst } from "../../../lib/time.ts";
+import { squareClient } from "../../../server/square.ts";
+
+const { locale } = Astro.params;
+// Astro's own check ignores case and sees any segment of the path, so it passes /JA/.
+if (!isLocale(locale)) return new Response(null, { status: 404 });
+
+// The one place a booking and a token are read from. The form has no action and no fields, so a POST comes back to this
+// same URL and its body is never read: nothing a client adds can name another booking or move the amount.
+const bookingId = Astro.url.searchParams.get("b") ?? "";
+const token = Astro.url.searchParams.get("t") ?? "";
+
+// One answer for a bad token and for no such booking, before anything about the booking is read.
+if (!(await verifyCancelToken(env.CANCEL_LINK_SECRET, bookingId, token))) return new Response(null, { status: 404 });
+
+const now = Date.now();
+const answer =
+  Astro.request.method === "POST"
+    ? await cancelBooking(
+        { db: env.DB, square: squareClient(env), now, staffEmail: env.STAFF_EMAIL, siteUrl: env.SITE_URL },
+        bookingId,
+      )
+    : await quoteCancellation(env.DB, bookingId, now);
+
+// A real link only ever names a confirmed web booking, so anything else reads as no booking at all.
+if (!answer.ok && answer.reason !== "ALREADY_CANCELLED" && answer.reason !== "STARTED") {
+  return new Response(null, { status: 404 });
+}
+
+const heading = t(locale, cancel, "cancel.heading");
+const amount = (jpy: number) => t(locale, email, "email.amount").replace("{amount}", jpy.toLocaleString("en-US"));
+const pickup = (startAt: number) => {
+  const { date, time } = epochToJst(startAt);
+  return `${date} ${time} JST`;
+};
+---
+
+<Base locale={locale} title={`${heading} | ${t(locale, common, "site.name")}`}>
+  <h1>{heading}</h1>
+  {!answer.ok && <p>{t(locale, cancel, answer.reason === "STARTED" ? "cancel.started" : "cancel.already")}</p>}
+  {
+    answer.ok && "booking" in answer && (
+      <>
+        <p>{t(locale, cancel, "cancel.intro")}</p>
+        <dl>
+          <dt>{t(locale, email, "email.label.ref")}</dt>
+          <dd>{answer.booking.ref}</dd>
+          <dt>{t(locale, email, "email.label.pickup")}</dt>
+          <dd>{pickup(answer.booking.startAt)}</dd>
+          <dt>{t(locale, cancel, "cancel.label.daysBefore")}</dt>
+          <dd>{answer.daysBefore}</dd>
+          <dt>{t(locale, cancel, "cancel.label.percent")}</dt>
+          <dd>{answer.refundPercent}%</dd>
+          <dt>{t(locale, email, "email.label.refund")}</dt>
+          <dd>{amount(answer.refundJpy)}</dd>
+        </dl>
+        <form method="post">
+          <button type="submit">{t(locale, cancel, "cancel.submit")}</button>
+        </form>
+      </>
+    )
+  }
+  {
+    answer.ok && "refundStatus" in answer && (
+      <>
+        <p>{t(locale, cancel, "cancel.done")}</p>
+        <dl>
+          <dt>{t(locale, email, "email.label.refund")}</dt>
+          <dd>{amount(answer.refundJpy)}</dd>
+        </dl>
+        <p>{t(locale, email, `email.refund.${REFUND_WORDING[answer.refundStatus]}`)}</p>
+      </>
+    )
+  }
+</Base>
+
+<style>
+  dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--space-2) var(--space-4);
+  }
+  dd {
+    margin: 0;
+  }
+</style>
