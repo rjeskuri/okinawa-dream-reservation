@@ -442,6 +442,194 @@ test("a tampered or stale signature on block sync gets 401", async () => {
   assert.ok(await stored("BLK-1"));
 });
 
+// Miniflare's fetch sends every body as Transfer-Encoding: chunked unless the request names a Content-Length, which then
+// arrives in place of it, so a test that cares which one the Worker sees uses one of these two.
+function postWithLength(body: string): Promise<Response> {
+  const headers = { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) };
+  return worker.fetch(SYNC_PATH, { method: "POST", headers, body });
+}
+
+function postStream(body: ReadableStream<Uint8Array>): Promise<Response> {
+  const headers = { "content-type": "application/json" };
+  return worker.fetch(SYNC_PATH, { method: "POST", headers, body, duplex: "half" } as RequestInit);
+}
+
+/** The bytes of `text` in chunks of `size`. */
+function chunksOf(text: string, size: number): ReadableStream<Uint8Array> {
+  const bytes = Buffer.from(text);
+  let at = 0;
+  return new ReadableStream({
+    pull(controller) {
+      controller.enqueue(bytes.subarray(at, at + size));
+      at += size;
+      if (at >= bytes.length) controller.close();
+    },
+  });
+}
+
+// A stream has no Content-Length to go by, so its bytes have to be counted as they arrive. Each chunk is far below the
+// limit, so the count has to run across them, and 1000 is no multiple of 3, so chunks end inside the multi-byte filler
+// too, which has to survive that.
+function postChunks(body: string): Promise<Response> {
+  return postStream(chunksOf(body, 1000));
+}
+
+const SENDS: [how: string, send: (body: string) => Promise<Response>][] = [
+  ["as a string", (body) => postSync(body)],
+  ["with a Content-Length", postWithLength],
+  ["as a stream with no Content-Length", postChunks],
+];
+
+/** A good envelope of at least `bytes`, padded with `filler`. */
+function paddedBody(bytes: number, filler: string): string {
+  const ts = Date.now();
+  const padded = (count: number) =>
+    signedBody(testVars.PUBLISH_SECRET, ts, JSON.stringify({ requestedBy: filler.repeat(count) }));
+  return padded(Math.ceil((bytes - Buffer.byteLength(padded(0))) / Buffer.byteLength(filler)));
+}
+
+/** A refused request reached neither Google nor the sheet, and left every booking in `rows` as it was. */
+async function assertLeftAlone(rows: BookingRow[], label: string): Promise<void> {
+  assert.deepEqual(outboundRequests, [], `${label}: a refused request reached Google`);
+  assert.equal(sheets.count("batchUpdate"), 0, `${label}: a status was written`);
+  assert.deepEqual(await allBookings(), rows, `${label}: a booking changed`);
+}
+
+/** Runs `run` with `worker` standing for a Worker of its own, so the helpers above all reach it. It has a catalog. */
+async function withPublishSecret(secret: string | undefined, run: () => Promise<void>): Promise<void> {
+  const shared = worker;
+  const vars = { GOOGLE_SA_PRIVATE_KEY: privateKey, PUBLISH_SECRET: secret };
+  worker = await startWorker({ vars, outbound: fakeGoogle });
+  try {
+    await replaceCatalog(worker.db, expectedCatalog(), { now: Date.now(), source: "sheet" });
+    await run();
+  } finally {
+    await worker.stop();
+    worker = shared;
+  }
+}
+
+test("a body over 64 KB is refused without Google calls", async () => {
+  // A sync that ran would cancel this block and take the three rows of the sheet.
+  await storedBlock("BLK-OLD");
+  const rows = await allBookings();
+
+  // Signed, so only the limit can refuse them, and one byte over 64 KiB, the larger reading of 64 KB. The second is
+  // under the limit in characters, and over it in the bytes that arrive.
+  for (const filler of ["x", "沖"]) {
+    for (const [how, send] of SENDS) {
+      const label = `"${filler}" padding ${how}`;
+      const body = paddedBody(65_537, filler);
+      assert.ok(Buffer.byteLength(body) >= 65_537, label);
+
+      // The Worker stops reading a stream it refuses, so the end of the upload can fail before the answer gets through.
+      // That still has to leave Google and D1 alone, and the other sends always get an answer to read.
+      const res = await send(body).catch((error: Error) => {
+        assert.equal(send, postChunks, `${label}: ${error.message}`);
+        return null;
+      });
+      await res?.text().catch(() => "");
+
+      assert.ok(res === null || res.status === 413, `${label} got ${res?.status}`);
+      await assertLeftAlone(rows, label);
+    }
+  }
+});
+
+test("a fast stream past 64 KB is refused without reading the rest", async () => {
+  // This needs no signature, and it ends, so a Worker that reads all of it before measuring answers in time. What tells
+  // them apart is how much the sender gave up. A sender stays ahead of the Worker by what the sockets between them hold:
+  // about 1 MiB on a Mac, and at most 10 MiB by Linux's default TCP buffer limits, where CI runs. A Worker that reads on
+  // took the whole cap, even on overloaded cores, so MOST_BYTES sits between the two.
+  const CHUNK_BYTES = 16 * 1024;
+  const CAP_BYTES = 32 * 1024 * 1024;
+  const MOST_BYTES = 16 * 1024 * 1024;
+  const chunk = Buffer.alloc(CHUNK_BYTES, "x");
+
+  await storedBlock("BLK-OLD");
+  const rows = await allBookings();
+
+  let pulled = 0;
+  const flood = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(chunk);
+      pulled += CHUNK_BYTES;
+      if (pulled >= CAP_BYTES) controller.close();
+    },
+  });
+
+  // As in "a body over 64 KB is refused": the end of a refused upload can fail before the answer gets through.
+  const res = await postStream(flood).catch(() => null);
+  await res?.text().catch(() => "");
+
+  // 64,000 bytes is the smaller reading of the limit, so the Worker cannot have refused this on fewer.
+  assert.ok(pulled > 64_000, `the sender gave up only ${pulled} bytes, which never reached the limit`);
+  assert.ok(pulled < MOST_BYTES, `the sender gave up ${pulled} bytes, so the Worker read on past the limit`);
+  assert.ok(res === null || res.status === 413, `got ${res?.status}`);
+  await assertLeftAlone(rows, "the flood");
+
+  // The refusal left the route working.
+  await signedSync();
+  assert.equal((await stored("BLK-1"))?.status, "CONFIRMED");
+});
+
+test("an empty or unset PUBLISH_SECRET gets 500 and never authorizes", async () => {
+  const CASES: [string, string | undefined][] = [
+    ["empty", ""],
+    ["unset", undefined],
+  ];
+  // The signature anyone can compute for an empty key, and the one for an unset secret that was turned into text.
+  const KEYS = ["", "undefined"];
+  // The caller here has proved nothing, and what workerd throws for the key names it: "Imported HMAC key length (0) ...".
+  const CRYPTO_DETAIL = /DataError|HMAC|importKey/i;
+
+  for (const [name, secret] of CASES) {
+    await withPublishSecret(secret, async () => {
+      await storedBlock("BLK-OLD");
+      const rows = await allBookings();
+
+      for (const key of KEYS) {
+        const label = `${name}, signed with ${JSON.stringify(key)}`;
+        const res = await postSync(signedBody(key));
+        const text = await res.text();
+        assert.equal(res.status, 500, label);
+        assert.doesNotMatch(text, CRYPTO_DETAIL, label);
+      }
+
+      await assertLeftAlone(rows, name);
+    });
+  }
+});
+
+test("a large signed body within 64 KB still syncs", async () => {
+  // 64,000 bytes is within the limit on either reading of 64 KB, however it arrives. The second padding comes in threes,
+  // so it asks for less to stay within that, and its stream only keeps its signature if chunks that end inside a
+  // character are put back together.
+  for (const [filler, bytes] of [["x", 64_000], ["沖", 63_998]] as const) {
+    for (const [how, send] of SENDS) {
+      const label = `"${filler}" padding ${how}`;
+      await worker.db.prepare("DELETE FROM bookings").run();
+      sheets = createFakeSheets(blocksWorkbook());
+      const body = paddedBody(bytes, filler);
+      const size = Buffer.byteLength(body);
+      assert.ok(size >= bytes && size <= 64_000, `${label}: ${size} bytes`);
+
+      const res = await send(body);
+      const text = await res.text();
+
+      assert.equal(res.status, 200, `${label}: ${text}`);
+      const result = JSON.parse(text) as SyncResponse;
+      assert.equal(result.processed, 3, label);
+      assert.equal(result.remaining, 0, label);
+      assert.deepEqual(result.errors, [], label);
+      for (const blockId of ["BLK-1", "BLK-2", "BLK-3"]) {
+        assert.equal((await stored(blockId))?.status, "CONFIRMED", `${label}: ${blockId}`);
+      }
+      for (const row of [2, 3, 4]) assert.match(shownOn(row), SHOWS_OK, `${label}: row ${row}`);
+    }
+  }
+});
+
 const BROKEN_TABS: [label: string, breakIt: (workbook: Workbook) => void, names: string][] = [
   ["a tab with no header row", (workbook) => workbook.Blocks.splice(0), "Blocks"],
   ["a missing end header", (workbook) => removeColumn(workbook, "Blocks", "end"), "end"],

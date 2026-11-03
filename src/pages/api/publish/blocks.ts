@@ -1,7 +1,9 @@
 // POST /api/publish/blocks: syncs the Blocks tab into inventory and writes each row's publish_status back. The body is the
-// `{ ts, payload, sig }` envelope signed with PUBLISH_SECRET, and anything else is a 401, before any call to Google. The
-// caller repeats it, sending back the `cursor` it answered, until `remaining` is 0. A failure reading or writing the sheet
-// answers non-2xx: the bookings stand, and a repeat run writes the statuses and moves none of them.
+// `{ ts, payload, sig }` envelope signed with PUBLISH_SECRET, and anything else is a 401, before any call to Google. A body
+// past the limit is a 413 and an empty or unset secret a 500, before any call to Google too, in plain words because
+// signedPost_ in apps-script/Publish.js shows staff a failure's body as it stands. The caller repeats it, sending back the
+// `cursor` it answered, until `remaining` is 0. A failure reading or writing the sheet answers non-2xx: the bookings stand,
+// and a repeat run writes the statuses and moves none of them.
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { syncBlocks, type BlockStatus } from "../../../lib/booking/blocks.ts";
@@ -14,6 +16,7 @@ import { createGoogleClients } from "../../../server/google.ts";
 
 const TAB = "Blocks";
 const STATUS_COLUMN = "publish_status";
+const MAX_BODY_BYTES = 64 * 1024;
 
 /** The shape namedErrorLines_ in apps-script/Publish.js lists for staff, as `name: message`. */
 type SyncError = { name: string; message: string };
@@ -85,9 +88,32 @@ async function syncTab(cursor: string | null, now: number): Promise<Answer> {
   return { processed: result.processed, remaining: result.remaining, errors: [...told, ...failed], cursor: result.cursor };
 }
 
+/** The body as text, or null past the limit. Counted as it arrives, so a sender cannot keep the Worker reading. */
+async function readBody(request: Request): Promise<string | null> {
+  if (request.body === null) return "";
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  for await (const chunk of request.body) {
+    bytes += chunk.byteLength;
+    if (bytes > MAX_BODY_BYTES) return null;
+    text += decoder.decode(chunk, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
 export const POST: APIRoute = async ({ request }) => {
+  const body = await readBody(request);
+  if (body === null) return new Response("The request is too large.", { status: 413 });
+
   const now = Date.now();
-  const verified = await verifyEnvelope(env.PUBLISH_SECRET, await request.text(), now);
+  let verified: Awaited<ReturnType<typeof verifyEnvelope>>;
+  try {
+    verified = await verifyEnvelope(env.PUBLISH_SECRET, body, now);
+  } catch {
+    // WebCrypto refuses an empty key, so this is an empty or unset PUBLISH_SECRET, and no request can pass.
+    return new Response("Publishing is not set up on the Worker, so no blocks were synced.", { status: 500 });
+  }
   if (!verified.ok) return Response.json({ error: "unauthorized" }, { status: 401 });
 
   try {
