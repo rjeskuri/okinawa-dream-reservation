@@ -181,6 +181,18 @@ export const checkoutClient: Dictionary = {
     "zh-cn": "无法处理您的银行卡。请检查卡片信息后重试。",
     ko: "카드를 처리하지 못했습니다. 카드 정보를 확인하고 다시 시도해 주세요.",
   },
+  "checkout.error.wallet": {
+    ja: "お支払いを完了できませんでした。もう一度お試しいただくか、カードでお支払いください。",
+    en: "The payment did not go through. Try again, or pay by card.",
+    "zh-cn": "付款未能完成。请重试，或使用银行卡支付。",
+    ko: "결제를 완료하지 못했습니다. 다시 시도하거나 카드로 결제해 주세요.",
+  },
+  "checkout.wallet.total": {
+    ja: "Okinawa Dream 予約金",
+    en: "Okinawa Dream deposit",
+    "zh-cn": "Okinawa Dream 订金",
+    ko: "Okinawa Dream 예약금",
+  },
   "checkout.error.form": {
     ja: "カード入力欄を読み込めませんでした。ページを更新してください。",
     en: "The card form could not load. Refresh the page to try again.",

@@ -52,6 +52,10 @@ const heading = say(`heading.${status}`);
 const payLabel = say("pay").replace("{amount}", money(booking.depositJpy) ?? "");
 // Anything but production gets the sandbox, so a mistyped SQUARE_ENV cannot reach a real card.
 const sdkUrl = env.SQUARE_ENV === "production" ? PRODUCTION_SDK_URL : SANDBOX_SDK_URL;
+// Only "true" turns a wallet on (task #47), so a slip in the dashboard leaves it off. Each mount stays hidden until the
+// client has started its wallet, and one that cannot start never shows.
+const googlePay = env.ENABLE_GOOGLE_PAY === "true";
+const applePay = env.ENABLE_APPLE_PAY === "true";
 
 const rows: [label: string, value: string | null | undefined][] = [];
 if (status === "ON_HOLD" || status === "CONFIRMED") {
@@ -132,6 +136,9 @@ if (status === "ON_HOLD" || status === "CONFIRMED") {
               <p class="problem" data-error-for={name} hidden />
             </Fragment>
           ))}
+          {googlePay && <div id="google-pay-button" class="wallet" hidden />}
+          {/* Square's Apple Pay has no button of its own, so Safari draws this one from its CSS. */}
+          {applePay && <button id="apple-pay-button" class="wallet" type="button" aria-label="Apple Pay" hidden />}
           <h2>{say("card.heading")}</h2>
           <p>{say("card.accepted")}</p>
           <p>{say("card.unionPay")}</p>
@@ -222,5 +229,17 @@ if (status === "ON_HOLD" || status === "CONFIRMED") {
   button:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+  .wallet {
+    width: 100%;
+    height: 2.75rem;
+    margin: var(--space-2) 0;
+  }
+  #apple-pay-button {
+    -webkit-appearance: -apple-pay-button;
+    -apple-pay-button-type: plain;
+    -apple-pay-button-style: black;
+    border: 0;
+    padding: 0;
   }
 </style>

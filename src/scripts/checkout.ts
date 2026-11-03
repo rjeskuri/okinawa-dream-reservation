@@ -1,5 +1,6 @@
 // The hold page's card form: mounts Square's card, keeps the countdown, and turns a submit into a tokenize with verification
-// details and a POST to the confirm endpoint. It reads the page through the seam set out at the top of
+// details and a POST to the confirm endpoint. When the page has a wallet's mount (task #47), it loads ./wallets.ts with
+// import() and a wallet's token goes the card's way. It reads the page through the seam set out at the top of
 // tests/helpers/checkout-client.ts, and it logs nothing, so a guest's details stay in the form and those two calls.
 import { checkoutClient } from "../i18n/strings/checkout.ts";
 import { t } from "../i18n/t.ts";
@@ -13,13 +14,17 @@ import {
 } from "../lib/checkout.ts";
 import type { ConfirmOutcome, Guest, GuestField, VerificationDetails } from "../lib/checkout.ts";
 import type { Locale } from "../lib/locale.ts";
+import type { Wallet, WalletPayments } from "./wallets.ts";
+
+/** What a tokenize answers. Only "OK" with a token is good to charge. */
+type TokenResult = { status: string; token?: string };
 
 type Card = {
   attach(selector: string): Promise<void>;
-  tokenize(details: VerificationDetails): Promise<{ status: string; token?: string }>;
+  tokenize(details: VerificationDetails): Promise<TokenResult>;
 };
 
-type Payments = { card(): Promise<Card> };
+type Payments = WalletPayments & { card(): Promise<Card> };
 
 type SquareSdk = { payments(applicationId: string, locationId: string): Payments | Promise<Payments> };
 
@@ -33,7 +38,7 @@ const form = document.getElementById("checkout") as HTMLFormElement;
 // First of all, so that no submit can leave with the form whatever goes wrong below.
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-  void pay();
+  payByCard();
 });
 
 const button = document.getElementById("pay-button") as HTMLButtonElement;
@@ -109,22 +114,15 @@ function loadSdk(): Promise<SquareSdk> {
   });
 }
 
-async function mountCard(): Promise<Card> {
+async function openPayments(): Promise<Payments> {
   const square = await loadSdk();
-  const payments = await square.payments(applicationId, locationId);
+  return square.payments(applicationId, locationId);
+}
+
+async function mountCard(payments: Payments): Promise<Card> {
   const mounted = await payments.card();
   await mounted.attach("#card-container");
   return mounted;
-}
-
-/** The source id for one charge, or null if Square gave none. Only the status says a token is good to use. */
-async function tokenize(from: Card, guest: Guest): Promise<string | null> {
-  try {
-    const { status, token } = await from.tokenize(buildVerificationDetails(depositJpy, guest));
-    return status === "OK" && token ? token : null;
-  } catch {
-    return null;
-  }
 }
 
 /** Whatever keeps a real answer from arriving may hide a charge that went through, so it reads as unknown. */
@@ -156,9 +154,15 @@ function act(outcome: ConfirmOutcome): void {
   handBack();
 }
 
-async function pay(): Promise<void> {
-  // The guard on a second charge: Enter in a field and requestSubmit reach here without asking the button.
-  if (state !== "ready" || card === null) return;
+/**
+ * One payment, by card or by wallet. `tokenize` is called before anything is awaited, since a wallet opens its sheet only
+ * within the guest's click. A wallet answers "Cancel" when the guest closes its sheet, which needs no words; a card never
+ * does, so from a card it is a failure like any other.
+ */
+async function pay(by: "card" | "wallet", tokenize: (guest: Guest) => Promise<TokenResult>): Promise<void> {
+  // The guard on a second charge, whichever way it starts: Enter in a field and requestSubmit reach here without asking the
+  // button, and a wallet's mount has none.
+  if (state !== "ready") return;
   if (Date.now() >= expiresAt) return endHold();
 
   clearWords();
@@ -167,18 +171,32 @@ async function pay(): Promise<void> {
 
   state = "paying";
   button.disabled = true;
-  const sourceId = await tokenize(card, guest);
-  if (sourceId === null) {
-    show(message, say("card"));
-    return handBack();
+  let result: TokenResult | null = null;
+  try {
+    result = await tokenize(guest);
+  } catch {
+    // Read as no token, below.
   }
-  act(await confirm(sourceId, guest));
+  // Only the status says a token is good to use.
+  if (result?.status === "OK" && result.token) return act(await confirm(result.token, guest));
+  if (by === "card" || result?.status !== "Cancel") show(message, say(by));
+  handBack();
 }
+
+function payByCard(): void {
+  // The card is mounted before the page is first ready, so only a submit before then finds none.
+  const mounted = card;
+  if (mounted !== null) void pay("card", (guest) => mounted.tokenize(buildVerificationDetails(depositJpy, guest)));
+}
+
+const payWith = (wallet: Wallet): void => void pay("wallet", () => wallet.tokenize());
 
 const timer = setInterval(tick, TICK_MS);
 tick();
 
-mountCard().then(
+const payments = openPayments();
+
+payments.then(mountCard).then(
   (mounted) => {
     card = mounted;
     if (state !== "loading") return;
@@ -191,3 +209,18 @@ mountCard().then(
     show(message, say("form"));
   },
 );
+
+// Each mount is on the page only when its flag is on, and with neither no wallet code loads.
+const walletMounts = {
+  googlePay: document.getElementById("google-pay-button"),
+  applePay: document.getElementById("apple-pay-button"),
+};
+if (walletMounts.googlePay !== null || walletMounts.applePay !== null) {
+  payments
+    .then(async (opened) => {
+      const { startWallets } = await import("./wallets.ts");
+      await startWallets(opened, walletMounts, depositJpy, locale, payWith);
+    })
+    // The card form has said what an SDK that did not open means. A wallet that could not start stays hidden.
+    .catch(() => {});
+}
