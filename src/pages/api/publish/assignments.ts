@@ -12,11 +12,5 @@ export const POST: APIRoute = async ({ request }) => {
   const verified = await verifyEnvelope(env.PUBLISH_SECRET, await request.text(), now);
   if (!verified.ok) return Response.json({ error: "unauthorized" }, { status: 401 });
 
-  try {
-    return Response.json(await syncAssignments({ db: env.DB, sheets: createGoogleClients().sheets, now }));
-  } catch (error) {
-    // Left to Astro a throw answers 404, not 500, and a failed Publish must not read as a missing route.
-    console.error("The assignments step failed:", error);
-    return Response.json({ error: "the assignments step failed" }, { status: 500 });
-  }
+  return Response.json(await syncAssignments({ db: env.DB, sheets: createGoogleClients().sheets, now }));
 };
