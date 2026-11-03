@@ -205,6 +205,8 @@ type PaidBooking = {
   cancelled?: string;
   /** What Square charged, when it differs from what D1 holds. */
   squareAmount?: number;
+  /** What Square says of the payment, when it is not COMPLETED. */
+  squareStatus?: string;
   /** False when the payment never reached Square's records. */
   inSquare?: boolean;
 };
@@ -239,7 +241,7 @@ async function paidBooking(world: World, spec: PaidBooking): Promise<{ booking: 
   });
   const payment: SquareRecord = {
     id: paymentId,
-    status: "COMPLETED",
+    status: spec.squareStatus ?? "COMPLETED",
     amount: spec.squareAmount ?? paid,
     currency: "JPY",
     reference_id: booking.id,
@@ -498,6 +500,14 @@ async function seedClean(world: World): Promise<void> {
     d1: null,
   });
   await refundOf(world, early.booking, { at: "2030-05-13 09:00", origin: "dashboard", amount: early.booking.paid_jpy, status: "REJECTED", d1: null });
+
+  // Dashboard payments that took no money, or none yet: only a COMPLETED payment is reconciled.
+  const tookNothing: [string, string][] = [
+    ["2030-05-16 12:10", "CANCELED"],
+    ["2030-05-29 15:45", "APPROVED"],
+    ["2030-05-31 10:20", "PENDING"],
+  ];
+  for (const [at, status] of tookNothing) squarePayment(world, { at, amount: yen(), status });
 }
 
 const DISCREPANCIES: Case[] = [
@@ -581,6 +591,70 @@ const DISCREPANCIES: Case[] = [
         refundId: undefined,
         expectedJpy: paid,
         actualJpy: charged,
+      };
+      return { issues: [issue], fixes: [] };
+    },
+  },
+  {
+    type: "amount_mismatch",
+    what: "Square took more than D1 holds, on a booking cancelled with all of D1's paid back",
+    seed: async (world) => {
+      // 40 days, 100%. Retained is worked out from D1's paid, which went back in full, so only the payment is wrong.
+      const paid = yen();
+      const charged = paid + randomInt(1, 5000);
+      const { booking, payment } = await paidBooking(world, {
+        confirmed: "2030-05-14 13:00",
+        pickup: "2030-06-30 09:00",
+        cancelled: "2030-05-21 18:00",
+        paid,
+        squareAmount: charged,
+      });
+      await refundOf(world, booking, { at: "2030-05-21 18:00", origin: "cancel", amount: paid, status: "COMPLETED" });
+      const issue: ExpectedIssue = {
+        type: "amount_mismatch",
+        bookingRef: booking.ref,
+        paymentId: payment.id,
+        refundId: undefined,
+        expectedJpy: paid,
+        actualJpy: charged,
+      };
+      return { issues: [issue], fixes: [] };
+    },
+  },
+  {
+    type: "booking_without_payment",
+    what: "a booking cancelled with nothing back, whose payment Square does not have",
+    seed: async (world) => {
+      // 1 day, 0%: no refund was due, so retained agrees and only the payment is missing.
+      const { booking } = await paidBooking(world, {
+        confirmed: "2030-05-06 16:00",
+        pickup: "2030-05-24 09:00",
+        cancelled: "2030-05-23 12:00",
+        inSquare: false,
+      });
+      const issue: ExpectedIssue = {
+        type: "booking_without_payment",
+        bookingRef: booking.ref,
+        paymentId: must(booking.payment_id, "payment id"),
+        refundId: undefined,
+        expectedJpy: booking.paid_jpy,
+        actualJpy: ABSENT,
+      };
+      return { issues: [issue], fixes: [] };
+    },
+  },
+  {
+    type: "booking_without_payment",
+    what: "a confirmed booking whose payment Square lists only as canceled",
+    seed: async (world) => {
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-25 10:30", pickup: "2030-06-26 09:00", squareStatus: "CANCELED" });
+      const issue: ExpectedIssue = {
+        type: "booking_without_payment",
+        bookingRef: booking.ref,
+        paymentId: must(booking.payment_id, "payment id"),
+        refundId: undefined,
+        expectedJpy: booking.paid_jpy,
+        actualJpy: oneOf(undefined, 0, booking.paid_jpy),
       };
       return { issues: [issue], fixes: [] };
     },
