@@ -1,5 +1,5 @@
-// The body reader of the publish routes, which anyone can call before the signature check: both read through it, so
-// neither reads more than the limit, however the body arrives (#103).
+// The body reader of the publish routes, which anyone can call before the signature check: each reads through it, so
+// none reads more than the limit, however the body arrives (#103, #108).
 
 const MAX_BODY_BYTES = 64 * 1024;
 
