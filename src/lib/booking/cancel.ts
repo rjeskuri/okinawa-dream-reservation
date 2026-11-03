@@ -221,7 +221,7 @@ export async function quoteCancellation(db: D1Database, bookingId: string, now: 
 }
 
 /** A package can leave the catalog while its bookings stay, and mail prints a missing value literally. */
-function nameIn(texts: string | null | undefined, locale: Locale): string {
+export function nameIn(texts: string | null | undefined, locale: Locale): string {
   return texts ? (JSON.parse(texts) as Record<Locale, { name: string }>)[locale].name : "-";
 }
 

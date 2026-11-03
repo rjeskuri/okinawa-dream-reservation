@@ -85,7 +85,8 @@ The main path is `ON_HOLD -> PAYMENT_PENDING -> CONFIRMED -> CANCELLED`:
 The other paths:
 
 - `ON_HOLD -> EXPIRED`: the hold passes `expires_at` unpaid. It stops blocking at that moment, with no cleanup job.
-- `PAYMENT_PENDING -> ON_HOLD`: the card was declined, so the hold returns with its original expiry and the guest can retry.
+- `PAYMENT_PENDING -> ON_HOLD`: the card was declined, or the payment took another amount or currency and went back in
+  full, so the hold returns with its original expiry and the guest can retry.
 - `PAYMENT_PENDING -> EXPIRED`: no payment found in Square for a booking stuck in PAYMENT_PENDING.
 - `CANCELLED -> CONFIRMED`: a block's row returns to the sheet before the block's end and the overlap rule still lets it.
   Web bookings have no way back.
