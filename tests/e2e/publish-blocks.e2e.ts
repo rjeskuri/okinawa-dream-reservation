@@ -34,6 +34,12 @@ const JST_OFFSET_MS = 32_400_000;
 const STATUS = "publish_status";
 const STAFF = "staff@okinawa-dream.example";
 
+/**
+ * The route's answer past the limit, as it gave it with its own reader before #108 moved it onto the shared one. The
+ * Apps Script prints it as it stands after "the Worker answered 413: ".
+ */
+const TOO_LARGE = "The request is too large.";
+
 /** One reading of the clock, so a run that crosses midnight in Japan keeps its rows and its expected values equal. */
 const TODAY_MS = Date.now();
 
@@ -528,9 +534,12 @@ test("a body over 64 KB is refused without Google calls", async () => {
         assert.equal(send, postChunks, `${label}: ${error.message}`);
         return null;
       });
-      await res?.text().catch(() => "");
+      const text = res === null ? null : await res.text().catch(() => null);
 
       assert.ok(res === null || res.status === 413, `${label} got ${res?.status}`);
+      // The end of a refused stream can cut the answer off, and every other send has one to read.
+      assert.ok(text !== null || send === postChunks, `${label}: no answer to read`);
+      if (text !== null) assert.equal(text, TOO_LARGE, `${label}: staff would read ${JSON.stringify(text)}`);
       await assertLeftAlone(rows, label);
     }
   }

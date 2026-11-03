@@ -11,12 +11,12 @@ import { headerKey, validateBlocks, type RowStatus } from "../../../lib/catalog/
 import { verifyEnvelope } from "../../../lib/crypto.ts";
 import { readCatalogKeys } from "../../../lib/db/catalog-store.ts";
 import { SheetsError } from "../../../lib/google/sheets.ts";
+import { readBody } from "../../../lib/request-body.ts";
 import { columnLetters } from "../../../lib/sheets/bookings-sync.ts";
 import { createGoogleClients } from "../../../server/google.ts";
 
 const TAB = "Blocks";
 const STATUS_COLUMN = "publish_status";
-const MAX_BODY_BYTES = 64 * 1024;
 
 /** The shape namedErrorLines_ in apps-script/Publish.js lists for staff, as `name: message`. */
 type SyncError = { name: string; message: string };
@@ -86,20 +86,6 @@ async function syncTab(cursor: string | null, now: number): Promise<Answer> {
     .filter(({ level }) => level === "error")
     .map(({ blockId, message }) => ({ name: blockId || TAB, message }));
   return { processed: result.processed, remaining: result.remaining, errors: [...told, ...failed], cursor: result.cursor };
-}
-
-/** The body as text, or null past the limit. Counted as it arrives, so a sender cannot keep the Worker reading. */
-async function readBody(request: Request): Promise<string | null> {
-  if (request.body === null) return "";
-  const decoder = new TextDecoder();
-  let bytes = 0;
-  let text = "";
-  for await (const chunk of request.body) {
-    bytes += chunk.byteLength;
-    if (bytes > MAX_BODY_BYTES) return null;
-    text += decoder.decode(chunk, { stream: true });
-  }
-  return text + decoder.decode();
 }
 
 export const POST: APIRoute = async ({ request }) => {
