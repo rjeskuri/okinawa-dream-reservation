@@ -105,8 +105,10 @@ node scripts/demo-mail.ts
 
 It reads the `email` items of the local D1 outbox (`npx wrangler d1 execute DB --local`), whatever their status, and writes
 `.demo-mail/<outbox id>.html` and `.txt` for each. Open the HTML in a browser; the cancel link in a guest confirmation
-points at the local site (`SITE_URL`), so it works while the demo or `astro dev` runs. Rerunning overwrites the files. Set
-`DEMO_MAIL_DIR` to write elsewhere. `.demo-mail/` is gitignored because it holds test guest data.
+points at `SITE_URL`, which `wrangler.jsonc` sets to http://localhost:4321 (`astro dev`), while the demo serves on 8787. For
+the link to work, run `npm run dev` too (it reads the same local D1), or add `SITE_URL=http://localhost:8787` to `.dev.vars`
+and restart the demo before you book. Rerunning overwrites the files. Set `DEMO_MAIL_DIR` to write elsewhere.
+`.demo-mail/` is gitignored because it holds test guest data.
 
 ## Crons locally
 
