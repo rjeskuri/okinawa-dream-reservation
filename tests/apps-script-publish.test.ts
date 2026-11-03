@@ -280,6 +280,74 @@ function assertLastRoundReported(step: LoopedStep, rounds: RoundsCase, alert: st
   assertPhotoList(cell(row, "message"), current, stale, `the message cell for ${what}`);
 }
 
+/** What each round of `path` signed, read back through the Worker's own check. */
+async function signedPayloads(script: AppsScriptWorld, path: string): Promise<unknown[]> {
+  const payloads: unknown[] = [];
+  for (const call of script.fetches.filter((fetched) => fetched.path === path)) {
+    const verified = await verifyEnvelope(SECRET, String(call.payload), Date.now());
+    assert.ok(verified.ok, `${path}: ${JSON.stringify(verified)}`);
+    payloads.push(verified.payload);
+  }
+  return payloads;
+}
+
+type CursorPass = {
+  label: string;
+  /** The errors each round answers. No two rounds share an entry. */
+  errors: number[];
+  /** The cursor each round answers. */
+  cursors: (string | null)[];
+  /** The first round whose errors still count at the end. */
+  countsFrom: number;
+  not: number[];
+};
+
+const ROUND_PROCESSED = 110;
+
+/** One list cut into the rounds of `errors`, in order. */
+function roundLists(errors: number[]): PhotoError[][] {
+  const all = photoErrors(errors.reduce((sum, count) => sum + count, 0));
+  return errors.map((count, i) => {
+    const from = errors.slice(0, i).reduce((sum, earlier) => sum + earlier, 0);
+    return all.slice(from, from + count);
+  });
+}
+
+/** Publish over these rounds of blocks. The last leaves `left` remaining, and `then` is the reply after it, if any. */
+function publishCursorPass({ errors, cursors }: CursorPass, left = 0, then?: Reply): { alert: string; row: unknown[] } {
+  const lists = roundLists(errors);
+  const answers = lists.map((list, i): Reply => {
+    const remaining = i === lists.length - 1 ? left : LEFT_OVER;
+    return { body: { processed: ROUND_PROCESSED, remaining, errors: list, cursor: cursors[i] } };
+  });
+  const replies = then === undefined ? answers : [...answers, then];
+  const script = world({ routes: { ...QUIET_ROUTES, [BLOCKS]: replies } });
+  script.call("publish");
+
+  assert.equal(paths(script).filter((path) => path === BLOCKS).length, replies.length, "every round ran");
+  return settled(script);
+}
+
+/** The alert and the log tell staff the running list, which is every round from `countsFrom` on. */
+function assertPassReported(pass: CursorPass, alert: string, row: unknown[]): void {
+  const lists = roundLists(pass.errors);
+  const current = lists.slice(pass.countsFrom).flat();
+  const stale = lists.slice(0, pass.countsFrom).flat();
+  const done = ROUND_PROCESSED * pass.errors.length;
+
+  for (const [where, text] of [
+    ["alert", alert],
+    ["blocks cell", cell(row, "blocks")],
+  ]) {
+    assertHasNumbers(text, [current.length, done], `the ${where} for ${pass.label}`);
+    for (const value of pass.not) {
+      assert.ok(!hasNumber(text, value), `the ${where} for ${pass.label} omits ${value}: ${text}`);
+    }
+  }
+  assertPhotoList(alert, current, stale, `the alert for ${pass.label}`);
+  assertPhotoList(cell(row, "message"), current, stale, `the message cell for ${pass.label}`);
+}
+
 test("publish signs requests the Worker accepts", async () => {
   const cases = [
     { secret: SECRET, baseUrl: BASE_URL, user: USER },
@@ -591,6 +659,84 @@ test("a long list of photo errors is capped and states the total", () => {
     const { alert, row } = publishRounds(PHOTO_LIST, rounds.errors);
     assertLastRoundReported(PHOTO_LIST, rounds, alert, row);
   }
+});
+
+test("a round sends back the cursor the round before answered", async () => {
+  const cases: { label: string; answered: unknown[]; sent: (string | null)[] }[] = [
+    { label: "one cursor", answered: ["Q1VSU09S", null], sent: [null, "Q1VSU09S"] },
+    { label: "a new cursor each round", answered: ["one", "two", "three", null], sent: [null, "one", "two", "three"] },
+    { label: "a cursor with quotes and kana", answered: ['"沖縄"/=+', null], sent: [null, '"沖縄"/=+'] },
+    // The last round's cursor has no round to go to, and must not reach the next step either.
+    { label: "a cursor on the last round", answered: ["one", "two"], sent: [null, "one"] },
+    { label: "a cursor that stops", answered: ["one", null, null], sent: [null, "one", null] },
+    { label: "one that comes back", answered: ["one", null, "two", null], sent: [null, "one", null, "two"] },
+    { label: "null cursors", answered: [null, null, null], sent: [null, null, null] },
+    { label: "no cursor key", answered: [undefined, undefined, undefined], sent: [null, null, null] },
+    { label: "no strings", answered: [7, ["one"], { at: 1 }, true, null], sent: [null, null, null, null, null] },
+  ];
+  for (const { label, answered, sent } of cases) {
+    for (const user of [USER, ""]) {
+      const blocks = answered.map((cursor, i): Reply => ({
+        body: { processed: 20, remaining: answered.length - 1 - i, errors: [], cursor },
+      }));
+      const photos = [1, 0].map((remaining): Reply => ({ body: { copied: 1, skipped: [], errors: [], remaining } }));
+      const script = world({ user, routes: { [BLOCKS]: blocks, [PHOTOS]: photos } });
+      script.call("publish");
+
+      const plain = { requestedBy: user };
+      const expected = sent.map((cursor) => (cursor === null ? plain : { ...plain, cursor }));
+      assert.deepEqual(await signedPayloads(script, BLOCKS), expected, `${label}, user ${JSON.stringify(user)}`);
+      assert.deepEqual(await signedPayloads(script, PHOTOS), [plain, plain], label);
+      assert.deepEqual(await signedPayloads(script, ASSIGNMENTS), [plain], label);
+    }
+  }
+});
+
+test("a cursor pass adds up the errors of the rounds that sent one", () => {
+  const passes: CursorPass[] = [
+    { label: "two rounds", errors: [2, 1], cursors: ["one", null], countsFrom: 0, not: [] },
+    { label: "three rounds", errors: [1, 1, 1], cursors: ["one", "two", null], countsFrom: 0, not: [] },
+    { label: "20 rows, then 3", errors: [20, 3], cursors: ["one", null], countsFrom: 0, not: [3, 20] },
+    { label: "a lot, then a few", errors: [25, 25, 7], cursors: ["one", "two", null], countsFrom: 0, not: [7, 25] },
+    { label: "a clean last round", errors: [4, 0], cursors: ["one", null], countsFrom: 0, not: [] },
+    { label: "a clean round between", errors: [2, 0, 1], cursors: ["one", "two", null], countsFrom: 0, not: [1, 2] },
+    { label: "a clean first round", errors: [0, 2], cursors: ["one", null], countsFrom: 0, not: [] },
+    // A round that sent no cursor starts the list again, as every round of a step without a cursor does.
+    { label: "no cursor at all", errors: [3, 1], cursors: [null, null], countsFrom: 1, not: [4, 3] },
+    { label: "a late cursor", errors: [5, 2, 1], cursors: [null, "one", null], countsFrom: 1, not: [8, 5, 1] },
+    { label: "a cursor that stops", errors: [2, 1, 4], cursors: ["one", null, null], countsFrom: 2, not: [7, 3] },
+  ];
+  for (const pass of passes) {
+    const { alert, row } = publishCursorPass(pass);
+    assert.doesNotMatch(cell(row, "blocks"), FAILED, `${pass.label}: the step did not fail`);
+    assertPassReported(pass, alert, row);
+  }
+});
+
+test("a cursor pass that fails or hits the round cap keeps the errors it has", () => {
+  const failures: Reply[] = [
+    { status: 503, body: "upstream busy" },
+    { throws: "Timeout: reservation-one.example.dev" },
+    { body: "<html>Bad gateway</html>" },
+  ];
+  const failing: CursorPass = { label: "a failure", errors: [2, 1], cursors: ["one", "two"], countsFrom: 0, not: [] };
+  for (const failure of failures) {
+    const { alert, row } = publishCursorPass(failing, LEFT_OVER, failure);
+    assert.match(alert, FAILED);
+    assertPassReported(failing, alert, row);
+  }
+
+  const capped: CursorPass = {
+    label: "the round cap",
+    errors: Array.from({ length: ROUND_CAP }, () => 2),
+    cursors: Array.from({ length: ROUND_CAP }, (_, i) => `round-${i}`),
+    countsFrom: 0,
+    not: [2],
+  };
+  const { alert, row } = publishCursorPass(capped, LEFT_OVER);
+  assert.match(alert, WORK_REMAINS);
+  assertHasNumbers(cell(row, "blocks"), [LEFT_OVER], "the blocks cell");
+  assertPassReported(capped, alert, row);
 });
 
 test("a failed /api/publish ends in an alert and a log row, not a stack trace", () => {

@@ -335,7 +335,7 @@ different contract. The reserve, hold, cancel and availability code in `src/lib`
 
 ## Retiring block rows
 
-This builds on #21, which is not built yet, so what follows is what will be true once it lands.
+This builds on #21.
 
 - **Per channel, not all at once.** After a channel goes live, new bookings on it arrive as OCTO bookings. Bookings
   already on the sheet stay as block rows and end on their own, since #21 leaves ended blocks alone.

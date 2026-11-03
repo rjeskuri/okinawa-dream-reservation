@@ -156,8 +156,9 @@ function count_(value) {
 /**
  * Calls a follow-up step while it reports work remaining and answers its PublishLog cell. The catalog is already
  * published by now, so a step that fails ends only that step: the next ones still have their own work to do.
- * Work totals across rounds. Errors do not: every call reports them again until staff fix them, so the last answered
- * round has the whole list.
+ * Work totals across rounds. Errors depend on the cursor. A step that answers a string `cursor` gets it back on its next
+ * round and tells each error once, so a round that sent a cursor adds to the list. A round that sent none starts the list
+ * again: a step without a cursor reports its errors on every call until staff fix them, so its last round has them all.
  */
 function runStep_(run, name, path, doneField) {
   let done = 0;
@@ -165,11 +166,13 @@ function runStep_(run, name, path, doneField) {
   let remaining = 0;
   let rounds = 0;
   let failed = false;
+  let cursor = null;
   try {
     do {
-      const result = signedPost_(path, { requestedBy: run.user });
+      const result = signedPost_(path, cursor === null ? { requestedBy: run.user } : { requestedBy: run.user, cursor });
       done += count_(result[doneField]);
-      errors = result.errors;
+      errors = cursor === null ? result.errors : [...errors, ...result.errors];
+      cursor = typeof result.cursor === "string" ? result.cursor : null;
       remaining = count_(result.remaining);
       rounds += 1;
     } while (remaining > 0 && rounds < MAX_ROUNDS_);

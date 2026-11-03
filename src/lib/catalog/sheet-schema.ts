@@ -21,6 +21,9 @@ export type ValidBlock = {
   note: string;
 };
 
+/** A data row of the Blocks tab: its sheet number, its `block_id` as validated, and whether it made it into `blocks`. */
+export type BlockRow = { row: number; blockId: string; kept: boolean };
+
 type Workbook = Record<string, unknown[][]>;
 
 type Cell = string | number | boolean;
@@ -583,24 +586,36 @@ export function validateCatalog(raw: Workbook, now: number): { catalog: Catalog 
  * reference or note passes: rejecting the row would free the bike it holds. The JST date of `start` and of `end` must
  * each be within 2 years either side of the JST date of `now` (epoch ms, the publish time), inclusive. One outside it
  * is an error and the row is skipped like any other, because a date typed as digits, such as 260105, reads as a serial
- * centuries away and would block none of the intended dates.
+ * centuries away and would block none of the intended dates. A blank `block_id` lists no id, so `blankIdRows` counts
+ * those rows and #21 stops its cancels for them. `rows` says which sheet row holds which `block_id` as it was read:
+ * `blocks` drops rejected rows and `statuses` has a line per message, so a row's place in one says nothing of the other.
  */
 export function validateBlocks(
   raw: Workbook,
-  catalog: Catalog,
+  catalog: { models: { id: string }[]; vehicles: { plate: string; modelId: string }[] },
   now: number,
-): { blocks: ValidBlock[]; statuses: RowStatus[]; fatal: string[]; skippedBlockIds: string[] } {
+): {
+  blocks: ValidBlock[];
+  statuses: RowStatus[];
+  fatal: string[];
+  skippedBlockIds: string[];
+  blankIdRows: number;
+  rows: BlockRow[];
+} {
   const fatal: string[] = [];
   const rows = readTab(raw, "Blocks", fatal);
-  if (rows === null) return { blocks: [], statuses: [], fatal, skippedBlockIds: [] };
+  if (rows === null) return { blocks: [], statuses: [], fatal, skippedBlockIds: [], blankIdRows: 0, rows: [] };
 
   const modelIds = idsOf(catalog.models);
   const modelOfPlate = new Map(catalog.vehicles.map(({ plate, modelId }) => [plate, modelId]));
   const window = plausibleDates(now);
   const seen = new Set<string>();
   const skippedBlockIds: string[] = [];
+  const blockRows: BlockRow[] = [];
+  let blankIdRows = 0;
   const blocks = keep(rows, (row) => {
     const blockId = row.required("block_id");
+    if (blockId === "") blankIdRows += 1;
     const ownsId = row.unique("block_id", blockId, seen);
     const modelId = row.known("model_id", modelIds, "Models");
     const plate = row.text("plate");
@@ -611,6 +626,7 @@ export function validateBlocks(
     const endAt = row.instant("end", window);
     if (endAt <= startAt) row.error("end must be after start");
     if (!row.ok && ownsId) skippedBlockIds.push(blockId);
+    blockRows.push({ row: row.sheetRow, blockId, kept: row.ok });
     return {
       blockId,
       modelId,
@@ -622,5 +638,5 @@ export function validateBlocks(
       note: row.text("note"),
     };
   });
-  return { blocks, statuses: statusesOf(rows), fatal, skippedBlockIds };
+  return { blocks, statuses: statusesOf(rows), fatal, skippedBlockIds, blankIdRows, rows: blockRows };
 }

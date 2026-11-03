@@ -1430,6 +1430,86 @@ test("validateBlocks checks dates, model, optional plate and duplicate ids", asy
   });
 });
 
+/** The ts-ignore covers the field for lint until #21 adds it, and nothing else. */
+function blankIdRowsOf(workbook: Workbook): number {
+  // @ts-ignore
+  return validateBlocks(workbook, expectedCatalog(), BLOCKS_NOW).blankIdRows;
+}
+
+// #21 stops its cancel pass for a row it cannot name, so a blank block_id has to be counted apart from readable ones.
+test("validateBlocks counts the rows rejected for a blank block_id", async (t) => {
+  const BLANK_ID: [string, (workbook: Workbook) => void, number][] = [
+    ["a clean tab", () => {}, 0],
+    ["a row rejected with a readable id", (workbook) => setCell(workbook, "Blocks", "BLK-2", "start", "soon"), 0],
+    ["a duplicate id", (workbook) => appendCopy(workbook, "Blocks", "BLK-1", {}), 0],
+    ["a blank id", (workbook) => setCell(workbook, "Blocks", "BLK-2", "block_id", ""), 1],
+    ["an id of spaces", (workbook) => setCell(workbook, "Blocks", "BLK-1", "block_id", "   "), 1],
+    ["an id of ideographic spaces", (workbook) => setCell(workbook, "Blocks", "BLK-3", "block_id", "　　"), 1],
+    [
+      "two blank ids",
+      (workbook) => {
+        setCell(workbook, "Blocks", "BLK-1", "block_id", "");
+        setCell(workbook, "Blocks", "BLK-3", "block_id", "");
+      },
+      2,
+    ],
+    [
+      "every id blank",
+      (workbook) => {
+        for (const key of ["BLK-1", "BLK-2", "BLK-3"]) setCell(workbook, "Blocks", key, "block_id", "");
+      },
+      3,
+    ],
+    [
+      "a blank id on a row wrong in other ways too",
+      (workbook) => {
+        setCell(workbook, "Blocks", "BLK-2", "start", "soon");
+        setCell(workbook, "Blocks", "BLK-2", "model_id", "ghost");
+        setCell(workbook, "Blocks", "BLK-2", "block_id", "");
+      },
+      1,
+    ],
+    [
+      "a blank id beside a readable rejected id",
+      (workbook) => {
+        setCell(workbook, "Blocks", "BLK-1", "start", "soon");
+        setCell(workbook, "Blocks", "BLK-2", "block_id", "");
+      },
+      1,
+    ],
+    ["a wholly blank row, which is no data row", (workbook) => workbook.Blocks.splice(2, 0, []), 0],
+    ["only a stale publish_status", (workbook) => appendRow(workbook, "Blocks", { publish_status: "error: stale" }), 0],
+    ["only an unticked box", (workbook) => appendRow(workbook, "Blocks", { note: false }), 0],
+    ["a tab with only its header", (workbook) => workbook.Blocks.splice(1), 0],
+    ["a tab with no rows, which is fatal", (workbook) => workbook.Blocks.splice(0), 0],
+    ["a missing header, which is fatal", (workbook) => removeColumn(workbook, "Blocks", "start"), 0],
+  ];
+
+  for (const [name, mutate, expected] of BLANK_ID) {
+    await t.test(name, () => {
+      const workbook = validWorkbook();
+      mutate(workbook);
+      assert.equal(blankIdRowsOf(workbook), expected);
+    });
+  }
+
+  await t.test("no Blocks tab counts none", () => {
+    const workbook = validWorkbook();
+    delete workbook.Blocks;
+    assert.equal(blankIdRowsOf(workbook), 0);
+  });
+
+  await t.test("a blank id still lists nothing in skippedBlockIds", () => {
+    const workbook = validWorkbook();
+    setCell(workbook, "Blocks", "BLK-1", "start", "soon");
+    setCell(workbook, "Blocks", "BLK-2", "block_id", "");
+    const { blocks, skippedBlockIds } = validateBlocks(workbook, expectedCatalog(), BLOCKS_NOW);
+    assert.deepEqual(skippedBlockIds, ["BLK-1"]);
+    assert.equal(blankIdRowsOf(workbook), 1);
+    assert.deepEqual(sortedBlocks(blocks), EXPECTED_BLOCKS.filter(({ blockId }) => blockId === "BLK-3"));
+  });
+});
+
 // What Insert > Checkbox on a whole column leaves in a row nobody filled in: boolean false there, and nothing else.
 const UNTICKED_ROWS: [string, Record<string, unknown>][] = [
   ["only an unticked box", { active: false }],
