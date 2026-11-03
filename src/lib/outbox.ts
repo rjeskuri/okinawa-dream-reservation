@@ -48,9 +48,9 @@ const STALE_CLAIM_MS = 10 * MINUTE_MS;
 // Sends run one at a time, so this keeps a slow mail service well inside STALE_CLAIM_MS.
 const DEFAULT_LIMIT = 50;
 
-const INSERT_SQL =
-  "INSERT OR IGNORE INTO outbox (kind, dedupe_key, payload, status, next_attempt_at, created_at) " +
-  "VALUES (?1, ?2, ?3, 'pending', ?4, ?4)";
+const INSERT_INTO_SQL = "INSERT OR IGNORE INTO outbox (kind, dedupe_key, payload, status, next_attempt_at, created_at)";
+
+const INSERT_SQL = `${INSERT_INTO_SQL} VALUES (?1, ?2, ?3, 'pending', ?4, ?4)`;
 
 // The items are one parameter, a JSON array, so their number never meets D1's 100 parameters per statement.
 const INSERT_EACH_SQL =
@@ -75,6 +75,21 @@ const SETTLE_SQL =
 export function enqueueStatements(db: D1Database, items: OutboxItem[], now: number): D1PreparedStatement[] {
   const insert = db.prepare(INSERT_SQL);
   return items.map((item) => insert.bind(item.kind, item.dedupeKey, JSON.stringify(item.payload), now));
+}
+
+/**
+ * enqueueStatements for a batch that only finds out as it runs whether `items` belong in it: each insert lands only if
+ * `condition` holds when its turn comes. `condition` reads `params` as ?5 onward.
+ */
+export function enqueueWhereStatements(
+  db: D1Database,
+  items: OutboxItem[],
+  now: number,
+  condition: string,
+  params: unknown[],
+): D1PreparedStatement[] {
+  const insert = db.prepare(`${INSERT_INTO_SQL} SELECT ?1, ?2, ?3, 'pending', ?4, ?4 WHERE ${condition}`);
+  return items.map((item) => insert.bind(item.kind, item.dedupeKey, JSON.stringify(item.payload), now, ...params));
 }
 
 /** As enqueueStatements, but a single statement whatever the number of items, for a caller counting its statements. */
