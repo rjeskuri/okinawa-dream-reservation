@@ -115,6 +115,53 @@ function chunksOf(text: string, size: number): ReadableStream<Uint8Array> {
   });
 }
 
+/** `body` as bytes, with a Content-Length, or as a stream of one byte to a chunk, which splits every sequence in it. */
+const BYTE_SENDS: [string, (worker: TestWorker, body: Buffer<ArrayBuffer>) => Promise<Response>][] = [
+  [
+    "with a Content-Length",
+    (worker, body) =>
+      worker.fetch(PATH, {
+        method: "POST",
+        headers: { ...JSON_HEADERS, "Content-Length": String(body.length) },
+        body,
+      }),
+  ],
+  [
+    "as a stream of 1-byte chunks",
+    (worker, body) => {
+      let at = 0;
+      return postStream(
+        worker,
+        new ReadableStream({
+          pull(controller) {
+            controller.enqueue(body.subarray(at, at + 1));
+            at += 1;
+            if (at >= body.length) controller.close();
+          },
+        }),
+      );
+    },
+  ],
+];
+
+/**
+ * A good envelope's bytes with some that no UTF-8 decoder takes as they are, put where a sender could put them: in place
+ * of a character of the signature or of the payload, or around the whole.
+ */
+function notUtf8(good: string): [string, Buffer<ArrayBuffer>][] {
+  const bytes = Buffer.from(good);
+  const swapped = (at: number, ...replacement: number[]) =>
+    Buffer.concat([bytes.subarray(0, at), Buffer.from(replacement), bytes.subarray(at + 1)]);
+  const sigStart = bytes.indexOf('"sig":"') + '"sig":"'.length;
+  assert.ok(sigStart > 0 && bytes.indexOf("@") > 0, good);
+  return [
+    ["a lone 0xFF", Buffer.from([0xff])],
+    ["0xFF in place of the first sig character", swapped(sigStart, 0xff)],
+    ["two of the three bytes of 沖 in place of the payload's @", swapped(bytes.indexOf("@"), 0xe6, 0xb2)],
+    ["0xFF after the envelope", Buffer.concat([bytes, Buffer.from([0xff])])],
+  ];
+}
+
 async function storedCatalog(worker: TestWorker): Promise<Catalog> {
   return canonicalCatalog(await readCatalog(worker.db));
 }
@@ -263,6 +310,27 @@ test("unsigned, stale and tampered requests get 401 without outbound calls", asy
   });
 });
 
+test("a tampered body that is not UTF-8 gets 401 without outbound calls", async () => {
+  // Anyone can send any bytes. Read as text, with U+FFFD for what is not UTF-8, these reach the signature check and get
+  // its one answer, and not the empty 404 of an error the route did not catch.
+  const google = fakeGoogle(validWorkbook());
+  await withWorker(google, {}, async (worker) => {
+    for (const [name, body] of notUtf8(JSON.stringify(envelope(SECRET, PAYLOAD)))) {
+      for (const [how, send] of BYTE_SENDS) {
+        const label = `${name} ${how}`;
+        const res = await send(worker, body);
+        assert.equal(res.status, 401, `${label} got ${res.status}`);
+        assert.equal(await res.text(), "Unauthorized", label);
+      }
+    }
+
+    assert.deepEqual(google.requests, [], "no Google calls");
+    assert.equal(await readCatalog(worker.db), null);
+    // The same Worker publishes a good envelope, so what turned these down was the signature check.
+    assert.equal((await signedPost(worker)).status, 200);
+  });
+});
+
 test("methods other than POST get 405 without outbound calls", async () => {
   const google = fakeGoogle(validWorkbook());
   await withWorker(google, {}, async (worker) => {
@@ -330,6 +398,47 @@ test("a body over 64 KB is refused without Google calls", async () => {
         assert.equal(((await res.json()) as { ok: boolean }).ok, true, label);
       }
     }
+  });
+});
+
+test("a body over 64 KB gets 413 in the words staff read", async () => {
+  // apps-script/Publish.js prints an answer as it stands, after "Publish failed: the Worker answered 413: ", so this one
+  // is words and no document, as it was before the reader moved to a helper both publish routes share (#103).
+  const TOO_LARGE = "The request is too large.";
+
+  /** A good envelope of exactly `bytes`, padded with "x". */
+  const sized = (bytes: number): string => {
+    const ts = Date.now();
+    const room = bytes - Buffer.byteLength(JSON.stringify(envelope(SECRET, { requestedBy: "" }, ts)));
+    const body = JSON.stringify(envelope(SECRET, { requestedBy: "x".repeat(room) }, ts));
+    assert.equal(Buffer.byteLength(body), bytes);
+    return body;
+  };
+  const BODIES: [string, string][] = [
+    ["a signed envelope one byte past 64 KiB", sized(65_537)],
+    ["a signed envelope of 100,000 bytes", sized(100_000)],
+    ["junk", "x".repeat(70_000)],
+  ];
+
+  const SENDS: [string, (worker: TestWorker, body: string) => Promise<Response>][] = [
+    ["as a string", post],
+    ["with a Content-Length", postWithLength],
+  ];
+
+  const google = fakeGoogle(validWorkbook());
+  await withWorker(google, {}, async (worker) => {
+    for (const [name, body] of BODIES) {
+      for (const [how, send] of SENDS) {
+        const label = `${name} ${how}`;
+        const res = await send(worker, body);
+        assert.equal(res.status, 413, `${label} got ${res.status}`);
+        const text = await res.text();
+        assert.equal(text, TOO_LARGE, `${label}: staff would read ${JSON.stringify(text)}`);
+      }
+    }
+
+    assert.deepEqual(google.requests, [], "no Google calls");
+    assert.equal(await readCatalog(worker.db), null);
   });
 });
 

@@ -6,9 +6,8 @@ import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { publishCatalog, PublishError, type PublishStep } from "../../../lib/catalog/publish.ts";
 import { verifyEnvelope } from "../../../lib/crypto.ts";
+import { readBody } from "../../../lib/request-body.ts";
 import { createGoogleClients } from "../../../server/google.ts";
-
-const MAX_BODY_BYTES = 64 * 1024;
 
 /** Only `write-back` runs after the commit, so it alone may say that the catalog published. */
 const FAILURES: Record<PublishStep, { status: number; message: string }> = {
@@ -19,20 +18,6 @@ const FAILURES: Record<PublishStep, { status: number; message: string }> = {
     message: "The catalog did publish, but the row statuses did not reach the sheet, so press Publish again.",
   },
 };
-
-/** The body as text, or null past the limit. Counted as it arrives, so a sender cannot keep the Worker reading. */
-async function readBody(request: Request): Promise<string | null> {
-  if (request.body === null) return "";
-  const decoder = new TextDecoder();
-  let bytes = 0;
-  let text = "";
-  for await (const chunk of request.body) {
-    bytes += chunk.byteLength;
-    if (bytes > MAX_BODY_BYTES) return null;
-    text += decoder.decode(chunk, { stream: true });
-  }
-  return text + decoder.decode();
-}
 
 export const POST: APIRoute = async ({ request }) => {
   const body = await readBody(request);
