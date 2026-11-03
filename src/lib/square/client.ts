@@ -130,9 +130,15 @@ function readRecord(value: unknown): SquareRecord | null {
 
 /**
  * One 200 page of a list, or null when it cannot be trusted. Stuck-payment expiry and reconciliation read "no payment
- * found" from these lists, so a missing list is an empty one only when the body holds nothing but a cursor.
+ * found" from these lists, so a missing list is an empty one only when the body holds nothing but a cursor. A row of
+ * another location is checked like any other and then left out: its money is not this shop's, and the callers have no
+ * location to compare with. A row with no location_id cannot be placed, so it fails the page rather than being dropped.
  */
-function readPage(body: unknown, key: "payments" | "refunds"): { records: SquareRecord[]; cursor: string } | null {
+function readPage(
+  body: unknown,
+  key: "payments" | "refunds",
+  locationId: string,
+): { records: SquareRecord[]; cursor: string } | null {
   if (!isRecord(body)) return null;
   const { errors, cursor = "", [key]: list } = body;
   if (typeof cursor !== "string") return null;
@@ -145,8 +151,8 @@ function readPage(body: unknown, key: "payments" | "refunds"): { records: Square
   const records: SquareRecord[] = [];
   for (const row of list) {
     const record = readRecord(row);
-    if (record === null) return null;
-    records.push(record);
+    if (record === null || !isText(row.location_id)) return null;
+    if (row.location_id === locationId) records.push(record);
   }
   return { records, cursor };
 }
@@ -253,7 +259,7 @@ export function createSquareClient(options: SquareClientOptions): SquareClient {
     for (let page = 0; page < PAGE_CAP; page += 1) {
       const answer = await call(`${path}?${query}`, { method: "GET" });
       if (answer.kind !== "ok") return answer;
-      const read = readPage(answer.body, key);
+      const read = readPage(answer.body, key, locationId);
       if (read === null) return unknown(`Square answered with an unusable page of ${key}`);
       records.push(...read.records);
       if (read.cursor === "") return { kind: "ok", [key]: records } as Ok<Key, SquareRecord[]>;
