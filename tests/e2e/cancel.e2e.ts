@@ -1,10 +1,12 @@
 // The cancel page, through the built Worker, with Square faked in `outbound` at the sandbox URL, so the real client runs
 // and no seam is needed. The Worker reads the real clock, so a pickup is a whole number of days from now, and a run that
-// crosses midnight JST starts again. Tokens are signed here with node:crypto. A POST sends what the page's own form sends,
-// so where the form carries the booking and the token stays the page's choice, and tampering changes the value wherever
-// it sits, or in one place at a time to set two places against each other. Quotes are looked for by their numbers, so the
-// wording stays free. Every test ends on a request that must work, because a 404 or an unchanged database proves nothing
-// about a route that does not exist.
+// crosses midnight JST starts again. Tokens are signed here with node:crypto. The booking and the token come from the
+// link's URL alone: the form has no action and no fields, so it posts back to the link, and the body is never read. A POST
+// sends what the page's own form sends, and tampering changes the value wherever it sits, or in one place at a time to set
+// two places against each other. A booking that cannot be cancelled answers as no booking at all, and so does a bad token
+// in every state. Quotes are looked for by their numbers, and the pickup by its JST month, day, hour and minute, so the
+// wording and the date format stay free. Every test ends on a request that must work, because a 404 or an unchanged
+// database proves nothing about a route that does not exist.
 import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 import { after, afterEach, before, beforeEach, test } from "node:test";
@@ -299,10 +301,21 @@ async function cancelForm(locale: Locale, booking: BookingRow): Promise<Submissi
   assert.equal(res.status, 200, path);
   const forms = postForms(html);
   assert.equal(forms.length, 1, `${path}: POST forms`);
-  const form = submissionOf(forms[0] as string, new URL(path, ORIGIN));
+  const link = new URL(path, ORIGIN);
+  const form = submissionOf(forms[0] as string, link);
   assert.ok(carries(form, booking.id), `${path}: the form does not name the booking`);
   assert.ok(carries(form, tokenOf(booking.id)), `${path}: the form carries no token`);
+  // b and t come from the URL alone. With no action the form posts back to the link itself; an action that comes to the
+  // same path with the same b and t sends the same request. It sends no fields, so there is no body for a page to read.
+  assert.equal(form.url.pathname, link.pathname, `${path}: the form posts to another path`);
+  assert.deepEqual(paramsOf(form.url), paramsOf(link), `${path}: the form posts to another query`);
+  assert.deepEqual(form.fields, [], `${path}: the form sends fields`);
   return form;
+}
+
+/** The query of `url` as sorted pairs, so the order b and t come in does not count. */
+function paramsOf(url: URL): [string, string][] {
+  return [...url.searchParams].sort(([a], [b]) => a.localeCompare(b));
 }
 
 /** The form a browser holds for `target`, which the page itself offers none for, made from a live booking's. */
@@ -323,6 +336,46 @@ function figure(value: number): RegExp {
 
 function percent(value: number): RegExp {
   return new RegExp(`(?<![\\d.,])${value}\\s*%`);
+}
+
+/** `value` as written, never as part of a longer word or ref, so REF-1 does not count inside REF-12. */
+function standalone(value: string): RegExp {
+  return new RegExp(`(?<![\\w-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`);
+}
+
+/** The JST wall clock of `at`, worked out here by adding the offset: JST has no clock changes. */
+function jstClock(at: number): { month: number; day: number; hour: number; minute: number } {
+  const wall = new Date(at + 9 * HOUR_MS);
+  return { month: wall.getUTCMonth() + 1, day: wall.getUTCDate(), hour: wall.getUTCHours(), minute: wall.getUTCMinutes() };
+}
+
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * The JST date of `at` as a page may write it: month and day as numbers side by side in either order, as in 2026-11-23,
+ * 11/23, 23.11, 11月23日 or 11월 23일, or the month by its English name. The year, the weekday and the order are free.
+ */
+function pickupDate(at: number): RegExp {
+  const { month, day } = jstClock(at);
+  const [m, d, name] = [`0?${month}`, `0?${day}`, `${MONTH_NAMES[month - 1]}[a-z]*\\.?`];
+  const ways = [
+    `(?<!\\d)${m}\\D{1,3}${d}(?!\\d)`,
+    `(?<!\\d)${d}\\D{1,3}${m}(?!\\d)`,
+    `\\b${name}\\s*${d}(?!\\d)`,
+    `(?<!\\d)${d}(?:st|nd|rd|th)?\\s+(?:of\\s+)?${name}`,
+  ];
+  return new RegExp(ways.join("|"), "i");
+}
+
+/** The JST time of `at` as a clock, 24-hour or 12-hour, as in 07:05, 9:48 PM, 21時48分, 21点48分 or 오후 9시 48분. */
+function pickupTime(at: number): RegExp {
+  const { hour, minute } = jstClock(at);
+  return new RegExp(`(?<!\\d)(?:0?${hour}|0?${hour % 12 || 12})\\s*(?::|時|时|시|点|點)\\s*0?${minute}(?!\\d)`);
+}
+
+/** A pickup `days` JST dates from now at the JST clock `time`, so its day count is `days` and its time is not the run's. */
+function pickupAt(days: number, time: string): number {
+  return Date.parse(`${jstDate(Date.now() + days * DAY_MS)}T${time}:00+09:00`);
 }
 
 const HTML_LANG: Record<Locale, string> = { ja: "ja", en: "en", "zh-cn": "zh-CN", ko: "ko" };
@@ -399,6 +452,12 @@ const QUOTES: [number, number, number, number][] = [
   [1, 9000, 0, 0],
 ];
 
+// [days to pickup, JST clock]. One morning before 09:00 JST, and one evening, where a 12-hour clock reads differently.
+const PICKUP_CLOCKS: [number, string][] = [
+  [10, "07:05"],
+  [12, "21:48"],
+];
+
 test("GET shows the quote and changes nothing", async () => {
   await setTiers(TIERS);
   await steady(async () => {
@@ -419,6 +478,9 @@ test("GET shows the quote and changes nothing", async () => {
         assert.match(text, figure(days), `${label}: days before pickup in\n${text}`);
         assert.match(text, percent(refundPercent), `${label}: percent in\n${text}`);
         assert.match(text, figure(refund), `${label}: refund in\n${text}`);
+        assert.match(text, standalone(booking.ref), `${label}: the booking ref in\n${text}`);
+        assert.match(text, pickupDate(booking.start_at), `${label}: the pickup date in\n${text}`);
+        assert.match(text, pickupTime(booking.start_at), `${label}: the pickup time in\n${text}`);
         assertInLocale(text, locale, label);
         assert.equal(postForms(html).length, 1, `${label}: POST forms`);
 
@@ -430,6 +492,24 @@ test("GET shows the quote and changes nothing", async () => {
       }
     }
   });
+
+  // The quotes above pick up at the time of day the run started. These pick up at a set time, so the page shows the
+  // booking's own clock and not the run's, and one is before 09:00 JST, when the UTC date is still the day before.
+  for (const locale of LOCALES) {
+    for (const [days, time] of PICKUP_CLOCKS) {
+      const label = `${locale}, pickup at ${time} JST in ${days} days`;
+      const start_at = pickupAt(days, time);
+      const booking = await confirmed(days, 9000, { start_at, end_at: start_at + 8 * HOUR_MS });
+
+      const res = await getPage(linkTo(locale, booking.id, tokenOf(booking.id)));
+      const html = await res.text();
+      assert.equal(res.status, 200, label);
+      const text = mainText(html, label);
+      assert.match(text, standalone(booking.ref), `${label}: the booking ref in\n${text}`);
+      assert.match(text, pickupDate(start_at), `${label}: the pickup date in\n${text}`);
+      assert.match(text, pickupTime(start_at), `${label}: the pickup time in\n${text}`);
+    }
+  }
 });
 
 // [page locale, booking locale, paid, refund at 40%]. The booking's own locale differs from the page's: the page answers
@@ -657,14 +737,16 @@ test("bad tokens get the same 404 whatever state the booking is in", async () =>
   const now = Date.now();
   const cancelled = { status: "CANCELLED", cancel_reason: "guest", cancelled_at: now - HOUR_MS };
   const started = { start_at: now - HOUR_MS, end_at: now + DAY_MS };
-  // [what, booking, what its own link answers]. A null is a state no real link reaches, so the page may answer either way.
-  const targets: [string, BookingRow, number | null][] = [
+  // [what, booking, what its own link answers]. A 404 is a booking no real link names, because it is not a confirmed web
+  // booking: NOT_CANCELLABLE gets the 404 of NOT_FOUND, so even its real token answers as no booking at all.
+  const targets: [string, BookingRow, 200 | 404][] = [
     ["a cancelled booking", await confirmed(10, 9000, cancelled), 200],
     ["a booking past its pickup", await confirmed(0, 9000, started), 200],
     ["a cancelled booking past its pickup", await confirmed(0, 9000, { ...started, ...cancelled }), 200],
-    ["a hold", await confirmed(10, 9000, { status: "ON_HOLD", expires_at: now + HOUR_MS }), null],
-    ["an expired hold", await confirmed(10, 9000, { status: "EXPIRED" }), null],
-    ["a staff block", await confirmed(10, 9000, { source: "block", external_ref: "e2e-block-bad-token" }), null],
+    ["a hold", await confirmed(10, 9000, { status: "ON_HOLD", expires_at: now + HOUR_MS }), 404],
+    ["a booking in payment", await confirmed(10, 9000, { status: "PAYMENT_PENDING" }), 404],
+    ["an expired hold", await confirmed(10, 9000, { status: "EXPIRED" }), 404],
+    ["a staff block", await confirmed(10, 9000, { source: "block", external_ref: "e2e-block-bad-token" }), 404],
   ];
   const other = await confirmed(10, 8000);
 
@@ -705,9 +787,14 @@ test("bad tokens get the same 404 whatever state the booking is in", async () =>
       ];
       for (const [how, change] of tampered) await assertRefused(await send(changed(form, change)), "POST", how);
 
-      // The booking and the page are there: this link with its real token gets past the check.
-      if (ownLink !== null) {
+      // The booking and the page are there: this link with its real token gets past the check, and one that cannot be
+      // cancelled then reads exactly as no booking, on GET and on POST.
+      if (ownLink === 404) {
+        await assertRefused(await getPage(linkTo(locale, target.id, good)), "GET", "its own link");
+        await assertRefused(await send(form), "POST", "its own link");
+      } else {
         assert.equal(await statusOf(await getPage(linkTo(locale, target.id, good))), ownLink, `${locale}, ${what}: its own link`);
+        assert.equal(await statusOf(await send(form)), ownLink, `${locale} POST, ${what}: its own link`);
       }
     }
   }
@@ -1066,8 +1153,15 @@ test("a booking past its pickup cannot be cancelled", async () => {
 
 test("only confirmed web bookings can be cancelled", async () => {
   await setTiers(FULL_REFUND);
-  // A real link can only exist for a confirmed booking, so these are links signed by the one who holds the secret, and
-  // the page may answer either way. What matters is that nothing moves.
+  // A real link can only exist for a confirmed booking, so these are links signed by the one who holds the secret. The
+  // page answers them as it answers no booking at all: NOT_CANCELLABLE gets the 404 of NOT_FOUND, body and all, and
+  // nothing moves.
+  const ghost = randomUUID();
+  const ghostPages = { GET: await getPage(linkTo("en", ghost, tokenOf(ghost))), POST: await send(await formFor("en", { id: ghost })) };
+  assert.equal(ghostPages.GET.status, 404, "GET of no booking");
+  assert.equal(ghostPages.POST.status, 404, "POST of no booking");
+  const nothing = { GET: await ghostPages.GET.text(), POST: await ghostPages.POST.text() };
+
   const states: [string, Partial<BookingRow>][] = [
     ["a hold", { status: "ON_HOLD", expires_at: Date.now() + HOUR_MS }],
     ["a booking in payment", { status: "PAYMENT_PENDING" }],
@@ -1079,9 +1173,12 @@ test("only confirmed web bookings can be cancelled", async () => {
     const form = await formFor("en", booking);
     const before = await stored();
 
-    for (const res of [await getPage(linkTo("en", booking.id, tokenOf(booking.id))), await send(form)]) {
+    const answers = { GET: await getPage(linkTo("en", booking.id, tokenOf(booking.id))), POST: await send(form) };
+    for (const method of ["GET", "POST"] as const) {
+      const res = answers[method];
       const html = await res.text();
-      assert.ok(res.status === 200 || res.status === 404, `${what}: status ${res.status}`);
+      assert.equal(res.status, 404, `${what} ${method}: status ${res.status}`);
+      assert.equal(html, nothing[method], `${what} ${method}: this 404 is not the 404 of no booking`);
       assert.deepEqual(postForms(html), [], `${what}: a form to cancel`);
     }
 
@@ -1175,19 +1272,19 @@ test("an unreadable body on a good link does not break the page", async () => {
   const first = await confirmed(10, 9000);
   const bodies = unreadableBodies(await cancelForm("en", first));
 
-  // Sent to the URL the form posts to, past a page's check of the query. A page that goes by the URL alone never reads
-  // the body and cancels. One that reads the body has no booking to go on, and a throw there must not reach the guest.
+  // Sent to the link itself, which is where the form posts back to. The page goes by the URL alone and never reads the
+  // body, so whatever the body is, the booking is cancelled, once. A page that reads the body, or throws on it, fails here.
   for (const [what, contentType, body] of bodies) {
     const booking = await confirmed(10, 9000);
-    const { url } = await cancelForm("en", booking);
+    await cancelForm("en", booking);
     const callsBefore = refundCalls.length;
 
-    const status = await statusOf(await postRaw(`${url.pathname}${url.search}`, contentType, body));
+    const status = await statusOf(await postRaw(linkTo("en", booking.id, tokenOf(booking.id)), contentType, body));
 
-    assert.ok(status === 200 || status === 404, `${what}: status ${status}`);
-    const cancelled = status === 200;
-    assert.equal((await bookingNow(booking.id)).status, cancelled ? "CANCELLED" : "CONFIRMED", what);
-    assert.equal(refundCalls.length, callsBefore + (cancelled ? 1 : 0), `${what}: refund calls`);
+    assert.equal(status, 200, `${what}: status ${status}`);
+    assert.equal((await bookingNow(booking.id)).status, "CANCELLED", what);
+    assert.equal(refundCalls.length, callsBefore + 1, `${what}: refund calls`);
+    assert.equal(refundCalls.at(-1)?.paymentId, booking.payment_id, `${what}: the refund call`);
   }
 
   assert.equal(await statusOf(await send(await cancelForm("en", first))), 200, "the page's own form");
