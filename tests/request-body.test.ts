@@ -1,5 +1,6 @@
 // The one reader of a publish route's body, src/lib/request-body.ts (#103). A copy of it in a route behaves just like the
-// shared one, so no e2e test can tell them apart: this file calls the reader directly, then reads the two routes' source.
+// shared one, so no e2e test can tell them apart: this file calls the reader directly, then reads the routes' source. The
+// blocks route carried a copy of its own until #108, and the assignments route read the whole body with request.text().
 //
 // Each expected text is the text the test started from. The limit is written out here and not imported, so that moving it
 // is the only thing that keeps this file green.
@@ -19,7 +20,12 @@ const FILLERS = ["x", "é", "沖", "𠮷"];
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const HELPER = resolve(ROOT, "src/lib/request-body.ts");
-const ROUTES = ["src/pages/api/publish/index.ts", "src/pages/api/publish/photos.ts"];
+const ROUTES = [
+  "src/pages/api/publish/index.ts",
+  "src/pages/api/publish/photos.ts",
+  "src/pages/api/publish/blocks.ts",
+  "src/pages/api/publish/assignments.ts",
+];
 
 function post(body?: BodyInit): Request {
   return new Request("https://worker.test/api/publish", { method: "POST", body, duplex: "half" } as RequestInit);
@@ -232,18 +238,17 @@ function readerParts(source: ts.SourceFile): string[] {
   return found;
 }
 
-test("both publish routes import readBody from the one module", () => {
-  for (const route of ROUTES) {
-    const names = importedFrom(parse(resolve(ROOT, route)), HELPER);
-    assert.ok(names.includes("readBody"), `${route} does not import readBody from src/lib/request-body.ts`);
-  }
+// Each check below covers every route at once, so a failure names all the routes that fail it.
+
+test("every publish route imports readBody from the one module", () => {
+  const without = ROUTES.filter((route) => !importedFrom(parse(resolve(ROOT, route)), HELPER).includes("readBody"));
+  assert.deepEqual(without, [], "these routes do not import readBody from src/lib/request-body.ts");
 });
 
-test("neither publish route keeps its own limit or reads the body itself", () => {
+test("no publish route keeps its own limit or reads the body itself", () => {
   // The same search has to find the reader where it does live, or the empty lists below would prove nothing.
   assert.notDeepEqual(readerParts(parse(HELPER)), [], "the search found no reader in the helper");
 
-  for (const route of ROUTES) {
-    assert.deepEqual(readerParts(parse(resolve(ROOT, route))), [], route);
-  }
+  const found = Object.fromEntries(ROUTES.map((route) => [route, readerParts(parse(resolve(ROOT, route)))]));
+  assert.deepEqual(found, Object.fromEntries(ROUTES.map((route) => [route, []])));
 });
