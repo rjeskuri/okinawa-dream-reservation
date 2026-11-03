@@ -167,10 +167,14 @@ function walletMarkup(html: string): string[] {
   });
 }
 
-/** A built file's static imports and re-exports, which are not import(). Paths are relative or from the site's root. */
-const STATIC_IMPORT = /\b(?:import|export)\s*(?:[\w$*{}\s,]*?\s*from\s*)?["']((?:\.\.?\/|\/(?!\/))[^"']+\.js)["']/g;
-/** Any path to a built file, import() included. */
-const ANY_IMPORT = /["']((?:\.\.?\/|\/(?!\/))[^"']+\.js)["']/g;
+/**
+ * A built file's static imports and re-exports, which are not import(). Paths are relative or from the site's root. A
+ * static specifier can only be a quoted string, never a template literal, so this misses none.
+ */
+const STATIC_IMPORT =
+  /\b(?:import|export)\s*(?:[\w$*{}\s,]*?\s*from\s*)?(["'])(?<path>(?:\.\.?\/|\/(?!\/))[^"'`]+\.js)\1/g;
+/** Any path to a built file in a string, import() included, which the minifier writes as a template literal. */
+const ANY_IMPORT = /(["'`])(?<path>(?:\.\.?\/|\/(?!\/))[^"'`]+\.js)\1/g;
 
 const BUILT_CLIENT = new URL("../../dist/client/", import.meta.url);
 
@@ -190,8 +194,9 @@ function clientCode(html: string, reach: "opens" | "reachable"): string {
     if (read.has(url.href) || !existsSync(url)) return;
     const code = readFileSync(url, "utf8");
     read.set(url.href, code);
-    for (const [, file] of code.matchAll(reach === "opens" ? STATIC_IMPORT : ANY_IMPORT))
-      load(builtFile(file as string, url));
+    for (const { groups } of code.matchAll(reach === "opens" ? STATIC_IMPORT : ANY_IMPORT)) {
+      load(builtFile(groups?.path as string, url));
+    }
   };
   for (const { name, attributes } of tagsOutsideCode(html)) {
     const preload = name === "link" && /\bmodulepreload\b/i.test(attributes.rel ?? "");
@@ -516,6 +521,78 @@ test("a wallet that cannot start leaves the card form as it was", async (t) => {
         [{ posted: `/api/holds/${hold.id}/confirm`, body: { sourceId: token, guest, locale } }],
         label,
       );
+      checkout.close();
+    }
+  } finally {
+    await shop.worker.stop();
+  }
+});
+
+test("a wallet whose tokenize fails posts nothing and leaves every way to pay", async (t) => {
+  const shop = await openShop({ googlePay: "true", applePay: "true" });
+  type Replies = NonNullable<OpenOptions["walletTokens"]>;
+  type Reply = NonNullable<Replies[Wallet]>[number];
+  // What a wallet's tokenize can do short of a token: throw, answer an error, or answer OK with no token in it.
+  const throws = () => {
+    throw new Error("the wallet's sheet failed");
+  };
+  try {
+    const cases: { stay: PublishedStay; locale: Locale; wallet: Wallet; fails: Reply; then: Wallet | "card" }[] = [
+      { stay: shop.stays[0], locale: "en", wallet: "googlePay", fails: throws, then: "card" },
+      {
+        stay: shop.stays[1],
+        locale: "ko",
+        wallet: "applePay",
+        fails: { status: "Error", errors: [{ type: "TokenizationError", message: "declined by the wallet" }] },
+        then: "googlePay",
+      },
+      { stay: shop.stays[0], locale: "zh-cn", wallet: "googlePay", fails: { status: "OK" }, then: "applePay" },
+      { stay: shop.stays[1], locale: "ja", wallet: "applePay", fails: throws, then: "applePay" },
+    ];
+    for (const { stay, locale, wallet, fails, then } of cases) {
+      const hold = await book(shop, stay, holdRow());
+      const { html, path } = await page(shop, locale, hold.id);
+      const label = `${path} after ${wallet} failed to tokenize, then ${then}`;
+      const guest: Guest = {
+        familyName: "Nakandakari",
+        givenName: "Yui",
+        email: `yui.${hold.id}@example.jp`,
+        phone: "098-333-4444",
+      };
+      const next = `cnon:${then}-${hold.id}`;
+      const walletTokens: Replies = { [wallet]: [fails] };
+      if (then !== "card") walletTokens[then] = [...(walletTokens[then] ?? []), next];
+
+      const checkout = await openCheckout(t, html, { now: Date.now(), walletTokens, tokens: [next] });
+      await startWallets(checkout, [...WALLETS]);
+      checkout.fill(guest);
+      await checkout.wallet(wallet).pay();
+
+      assert.equal(checkout.square.walletTokenize[wallet].length, 1, `${label}: ${wallet} was not tokenized`);
+      assert.deepEqual(checkout.confirms, [], `${label}: posted without a token`);
+      const said = checkout.message();
+      assert.notEqual(said, "", `${label}: the guest is not told`);
+      assert.doesNotMatch(said, /\bundefined\b|\bnull\b|\bNaN\b|\[object Object\]|\{\w+\}/, `${label}: ${said}`);
+      assert.equal(checkout.payable(), true, `${label}: the card cannot pay`);
+      for (const each of WALLETS) assert.equal(checkout.wallet(each).shown(), true, `${label}: ${each} is gone`);
+
+      // The payment that failed holds nothing back: the next one goes out as it would have first.
+      if (then === "card") await checkout.pay();
+      else await checkout.wallet(then).pay();
+      assert.deepEqual(
+        checkout.confirms,
+        [
+          {
+            method: "POST",
+            path: `/api/holds/${hold.id}/confirm`,
+            contentType: "application/json",
+            body: { sourceId: next, guest, locale },
+          },
+        ],
+        label,
+      );
+      assert.equal(checkout.square.tokenize.length, then === "card" ? 1 : 0, `${label}: card tokenizations`);
+      assert.equal(checkout.reloads, 1, `${label}: the paid hold does not reload`);
       checkout.close();
     }
   } finally {
