@@ -2,23 +2,33 @@
 // SquareClient seam, the one external thing here, and for pages and locations the real createSquareClient runs over a fake
 // fetch. Ids, refs and amounts are drawn fresh on every run. Each tier is worked out by hand from JST dates whose day count
 // is written beside them, and every expected amount is arithmetic on the drawn values, so no expected value passes through
-// src/lib/booking/cancel.ts, src/lib/time.ts or the code under test.
+// src/lib/booking/cancel.ts, src/lib/time.ts or the code under test. One test reads #35's quote afterwards, as an outcome.
 //
 // What the ticket leaves open and this file decides, each one a Ruling in the PR:
 // - expectedJpy is what D1 holds and actualJpy what Square holds, for the money the issue is about. A side with no record of
 //   that money leaves its field out (0 is accepted too). status_mismatch may give the booking's deposit or paid as expected.
-// - retained_mismatch reports retained amounts: expectedJpy = paid - the tier's refund, actualJpy = paid - refunded. The tier
-//   is the one at cancelled_at (JST calendar days to pickup), never at `now`. Refunded counts PENDING and COMPLETED refunds,
-//   as #35's quote does, after this run's fixes, so a refund Square rejected no longer counts and one just recorded does.
+// - retained_mismatch covers CANCELLED bookings only, under today's tiers, and reports retained amounts: expectedJpy = paid -
+//   the tier's refund, actualJpy = paid - refunded. The tier is the one at cancelled_at (JST calendar days to pickup), never
+//   at `now`. Refunded counts PENDING and COMPLETED refunds, as #35's quote does, after this run's fixes: REJECTED, FAILED
+//   and RETRY never count, and a refund just recorded does.
 // - Only COMPLETED payments are reconciled: a FAILED one, such as a declined card, moved no money.
 // - A payment belongs to the booking whose payment_id it is, or else to the booking its reference_id names (#34 sets it to
 //   the booking id). The window is [now - days, now] for both lists, and a booking is in scope when its confirmed_at is in it.
+// - A Square refund belongs to a booking (recorded, counted) only when its payment_id is that booking's payment_id, whether
+//   or not that payment is in the window's listing. A refund of any other payment is never recorded.
+// - A COMPLETED payment no booking holds but whose reference_id names one is a #34 send-back. It is no issue when its
+//   PENDING and COMPLETED refunds in Square add up to all of it. Short of that it is status_mismatch on a booking neither
+//   CONFIRMED nor CANCELLED, and payment_without_booking with that booking's ref on one another payment settled.
+// - A Square refund of a payment no booking holds or names, or one D1 lacks that is FAILED or REJECTED, is neither recorded
+//   nor reported. A partial refund on a CONFIRMED booking shows once, as refund_not_recorded.
+// - A PAYMENT_PENDING booking with no payment, and a RETRY refund row with no Square id, are the ten-minute cron's: no issue.
 // - A failed listing rejects with an Error that carries Square's detail, and changes nothing in D1.
 // - A payment or refund from another location never counts, even when Square's answer holds one: the reconciler has no
 //   location to compare with, so the client has to drop such rows.
 import assert from "node:assert/strict";
 import { randomInt, randomUUID } from "node:crypto";
 import { test } from "node:test";
+import { quoteCancellation } from "../src/lib/booking/cancel.ts";
 import { createSquareClient } from "../src/lib/square/client.ts";
 import type { SquareClient, SquareFailure, SquareRecord, SquareTimeWindow } from "../src/lib/square/client.ts";
 import { createTestDb } from "./helpers/d1.ts";
@@ -300,6 +310,73 @@ async function refundOf(
   return { square, row };
 }
 
+/** A refunds row with no Square id, as #35 leaves one before Square answers or after Square refused the call. */
+function unsentRefund(
+  world: World,
+  booking: BookingRow,
+  { at, origin, amount, status }: { at: string; origin: "cancel" | "dashboard"; amount: number; status: string },
+): Promise<RefundRow> {
+  const when = jst(at);
+  return insertRow<RefundRow>(world.db, "refunds", {
+    id: randomUUID(),
+    booking_id: booking.id,
+    square_refund_id: null,
+    amount_jpy: amount,
+    status,
+    origin,
+    idempotency_key: origin === "cancel" ? `rf:${booking.id}` : null,
+    created_at: when,
+    updated_at: when + 2000,
+  });
+}
+
+/** A refund in Square of any payment, which D1 has no row for. */
+function squareRefund(
+  world: World,
+  payment: SquareRecord,
+  { at, amount, status }: { at: string; amount: number; status: string },
+): SquareRecord {
+  const refund: SquareRecord = {
+    id: `${payment.id}_${randomUUID().slice(0, 8)}`,
+    status,
+    amount,
+    currency: "JPY",
+    payment_id: payment.id,
+    created_at: iso(jst(at) + 30_000),
+  };
+  world.refunds.push(refund);
+  return refund;
+}
+
+/**
+ * Two payments #34 sent back in full, which D1 records nowhere: one that came in after its hold expired, and a wrong amount
+ * on a booking a second payment then confirmed, sent back in two parts with one still pending.
+ */
+async function seedSentBack(world: World): Promise<{ expired: BookingRow; confirmed: BookingRow }> {
+  const expired = await unpaidBooking(world, "EXPIRED", "2030-05-17 10:00");
+  const late = squarePayment(world, { at: "2030-05-17 10:20", amount: must(expired.deposit_jpy, "deposit"), referenceId: expired.id });
+  squareRefund(world, late, { at: "2030-05-17 10:20", amount: late.amount, status: "COMPLETED" });
+
+  const { booking: confirmed } = await paidBooking(world, { confirmed: "2030-05-23 16:12", pickup: "2030-06-21 09:00" });
+  const wrong = squarePayment(world, { at: "2030-05-23 16:05", amount: confirmed.paid_jpy + randomInt(1, 3000), referenceId: confirmed.id });
+  const part = randomInt(1, wrong.amount);
+  squareRefund(world, wrong, { at: "2030-05-23 16:05", amount: part, status: "COMPLETED" });
+  squareRefund(world, wrong, { at: "2030-05-23 16:06", amount: wrong.amount - part, status: "PENDING" });
+  return { expired, confirmed };
+}
+
+/** A payment #34 should have sent back, on a booking another payment confirmed. */
+function strayIssue(booking: BookingRow, stray: SquareRecord): ExpectedIssue {
+  return {
+    type: "payment_without_booking",
+    bookingRef: booking.ref,
+    paymentId: stray.id,
+    refundId: undefined,
+    expectedJpy: oneOf(undefined, 0, booking.deposit_jpy ?? undefined),
+    actualJpy: stray.amount,
+  };
+}
+
 /**
  * Everything that agrees: the bookings, payments and refunds of an ordinary month, including the ones a careless reading
  * would flag. Each tier comment counts JST calendar days from the cancellation to the pickup date.
@@ -399,6 +476,28 @@ async function seedClean(world: World): Promise<void> {
     amount: tierRefund(longAgo.booking.paid_jpy, 50),
     status: "COMPLETED",
   });
+
+  await seedSentBack(world);
+
+  // A charge Square has not answered yet: the ten-minute resolver's.
+  await unpaidBooking(world, "PAYMENT_PENDING", "2030-06-01 02:40");
+
+  // 24 days, 100%. A webhook recorded Square's refund in a row of its own, and the cancellation's row still waits as RETRY
+  // with no Square id (#35's note for #36). Counted, the RETRY row would make it twice the tier.
+  const stuck = await paidBooking(world, { confirmed: "2030-05-09 09:00", pickup: "2030-06-17 09:00", cancelled: "2030-05-24 13:00" });
+  await unsentRefund(world, stuck.booking, { at: "2030-05-24 13:00", origin: "cancel", amount: stuck.booking.paid_jpy, status: "RETRY" });
+  await refundOf(world, stuck.booking, { at: "2030-05-24 13:00", origin: "dashboard", amount: stuck.booking.paid_jpy, status: "COMPLETED" });
+
+  // Refunds Square refused that D1 never heard of: no money moved, on a confirmed booking and on a cancelled one.
+  const tried = await paidBooking(world, { confirmed: "2030-05-18 11:00", pickup: "2030-06-27 09:00" });
+  await refundOf(world, tried.booking, {
+    at: "2030-05-26 15:00",
+    origin: "dashboard",
+    amount: randomInt(500, tried.booking.paid_jpy),
+    status: "FAILED",
+    d1: null,
+  });
+  await refundOf(world, early.booking, { at: "2030-05-13 09:00", origin: "dashboard", amount: early.booking.paid_jpy, status: "REJECTED", d1: null });
 }
 
 const DISCREPANCIES: Case[] = [
@@ -523,6 +622,64 @@ const DISCREPANCIES: Case[] = [
     },
   },
   {
+    type: "status_mismatch",
+    what: "a payment on an expired hold whose send-back failed",
+    seed: async (world) => {
+      // The failed refund moved no money, so it is neither recorded nor reported.
+      const booking = await unpaidBooking(world, "EXPIRED", "2030-05-08 14:00");
+      const deposit = must(booking.deposit_jpy, "deposit");
+      const payment = squarePayment(world, { at: "2030-05-08 14:25", amount: deposit, referenceId: booking.id });
+      squareRefund(world, payment, { at: "2030-05-08 14:25", amount: deposit, status: "FAILED" });
+      const issue: ExpectedIssue = {
+        type: "status_mismatch",
+        bookingRef: booking.ref,
+        paymentId: payment.id,
+        refundId: undefined,
+        expectedJpy: oneOf(undefined, 0, deposit),
+        actualJpy: deposit,
+      };
+      return { issues: [issue], fixes: [] };
+    },
+  },
+  {
+    type: "payment_without_booking",
+    what: "a wrong amount on a booking another payment confirmed, never sent back",
+    seed: async (world) => {
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-19 12:40", pickup: "2030-06-24 09:00" });
+      const stray = squarePayment(world, { at: "2030-05-19 12:31", amount: booking.paid_jpy - randomInt(1, 2000), referenceId: booking.id });
+      return { issues: [strayIssue(booking, stray)], fixes: [] };
+    },
+  },
+  {
+    type: "payment_without_booking",
+    what: "a wrong amount on a booking another payment confirmed, sent back short",
+    seed: async (world) => {
+      // The refund is of a payment the booking does not hold, so it is not recorded against the booking.
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-27 09:15", pickup: "2030-07-03 09:00" });
+      const stray = squarePayment(world, { at: "2030-05-27 09:08", amount: booking.paid_jpy + randomInt(1, 3000), referenceId: booking.id });
+      squareRefund(world, stray, { at: "2030-05-27 09:08", amount: stray.amount - randomInt(1, 1000), status: "COMPLETED" });
+      return { issues: [strayIssue(booking, stray)], fixes: [] };
+    },
+  },
+  {
+    type: "payment_without_booking",
+    what: "a walk-in Dashboard sale, partly refunded",
+    seed: async (world) => {
+      // The payment's own issue covers its refund, which belongs to no booking.
+      const payment = squarePayment(world, { at: "2030-05-13 17:20", amount: yen(5000, 40_000) });
+      squareRefund(world, payment, { at: "2030-05-14 10:00", amount: randomInt(1000, payment.amount), status: "COMPLETED" });
+      const issue: ExpectedIssue = {
+        type: "payment_without_booking",
+        bookingRef: undefined,
+        paymentId: payment.id,
+        refundId: undefined,
+        expectedJpy: ABSENT,
+        actualJpy: payment.amount,
+      };
+      return { issues: [issue], fixes: [] };
+    },
+  },
+  {
     type: "refund_not_recorded",
     what: "a Dashboard refund D1 never heard of",
     seed: async (world) => {
@@ -628,6 +785,69 @@ const DISCREPANCIES: Case[] = [
       return { issues: [issue], fixes: [] };
     },
   },
+  {
+    type: "retained_mismatch",
+    what: "a cancellation whose refund failed, with nothing in Square",
+    seed: async (world) => {
+      // 10 days, 50%. The failed refund gave nothing back.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-12 09:00", pickup: "2030-06-08 09:00", cancelled: "2030-05-29 09:00", paid });
+      const tier = tierRefund(paid, 50);
+      await unsentRefund(world, booking, { at: "2030-05-29 09:00", origin: "cancel", amount: tier, status: "FAILED" });
+      const issue: ExpectedIssue = {
+        type: "retained_mismatch",
+        bookingRef: booking.ref,
+        paymentId: must(booking.payment_id, "payment id"),
+        refundId: ANY,
+        expectedJpy: paid - tier,
+        actualJpy: paid,
+      };
+      return { issues: [issue], fixes: [] };
+    },
+  },
+  {
+    type: "refund_not_recorded",
+    what: "a Dashboard refund of a payment older than the window, on a cancelled booking",
+    seed: async (world) => {
+      // Paid 49 days back, so the payment is not in the listing. 43 days, 100%, all of it in this refund.
+      const { booking } = await paidBooking(world, { confirmed: "2030-04-12 09:00", pickup: "2030-07-08 09:00", cancelled: "2030-05-26 09:00" });
+      const { square } = await refundOf(world, booking, {
+        at: "2030-05-26 11:00",
+        origin: "dashboard",
+        amount: booking.paid_jpy,
+        status: "COMPLETED",
+        d1: null,
+      });
+      const issue: ExpectedIssue = {
+        type: "refund_not_recorded",
+        bookingRef: booking.ref,
+        paymentId: oneOf(undefined, must(booking.payment_id, "payment id")),
+        refundId: square.id,
+        expectedJpy: ABSENT,
+        actualJpy: booking.paid_jpy,
+      };
+      return { issues: [issue], fixes: [{ kind: "insert", booking, square }] };
+    },
+  },
+  {
+    type: "refund_not_recorded",
+    what: "a partial Dashboard refund of a payment older than the window, on a confirmed booking",
+    seed: async (world) => {
+      // Paid 43 days back, so the payment is not in the listing.
+      const { booking } = await paidBooking(world, { confirmed: "2030-04-18 09:00", pickup: "2030-07-15 09:00", paid: yen(5000, 40_000) });
+      const back = randomInt(500, booking.paid_jpy - 500);
+      const { square } = await refundOf(world, booking, { at: "2030-05-19 14:00", origin: "dashboard", amount: back, status: "COMPLETED", d1: null });
+      const issue: ExpectedIssue = {
+        type: "refund_not_recorded",
+        bookingRef: booking.ref,
+        paymentId: oneOf(undefined, must(booking.payment_id, "payment id")),
+        refundId: square.id,
+        expectedJpy: ABSENT,
+        actualJpy: back,
+      };
+      return { issues: [issue], fixes: [{ kind: "insert", booking, square }] };
+    },
+  },
 ];
 
 /** More of what the two fixes have to get right, for the test of the fixes. */
@@ -665,6 +885,22 @@ const MORE_FIXES: Case[] = [
         { type: "retained_mismatch", bookingRef: booking.ref, paymentId, refundId: ANY, expectedJpy: paid - tier, actualJpy: paid },
       ];
       return { issues, fixes: [{ kind: "status", row: must(refund.row, "refund row"), status: "REJECTED" }] };
+    },
+  },
+  {
+    type: "refund_status_mismatch",
+    what: "a pending refund Square failed, which leaves the shop holding all of it",
+    seed: async (world) => {
+      // 15 days, 100%. Once D1 has the failure, nothing has gone back.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-19 09:00", pickup: "2030-06-14 09:00", cancelled: "2030-05-30 15:00", paid });
+      const refund = await refundOf(world, booking, { at: "2030-05-30 15:00", origin: "cancel", amount: paid, status: "FAILED", d1: { status: "PENDING" } });
+      const paymentId = must(booking.payment_id, "payment id");
+      const issues: ExpectedIssue[] = [
+        { type: "refund_status_mismatch", bookingRef: booking.ref, paymentId: oneOf(undefined, paymentId), refundId: refund.square.id, expectedJpy: paid, actualJpy: paid },
+        { type: "retained_mismatch", bookingRef: booking.ref, paymentId, refundId: ANY, expectedJpy: 0, actualJpy: paid },
+      ];
+      return { issues, fixes: [{ kind: "status", row: must(refund.row, "refund row"), status: "FAILED" }] };
     },
   },
   {
@@ -919,6 +1155,28 @@ test("only refund status and dashboard refunds are fixed", async () => {
     assertIssues(again.issues, issues.filter(({ type }) => !settled.has(type)), "the run after");
     assert.equal(again.fixed, 0, "fixed by the run after");
     assertOnlyFixes(fixed, await snapshot(world.db), [], "the run after");
+  });
+});
+
+test("payments sent back in full are not counted against a booking", async () => {
+  await withWorld(async (world) => {
+    const { expired, confirmed } = await seedSentBack(world);
+    const fake = fakeSquare(world);
+    const before = await snapshot(world.db);
+
+    const result = await reconcile(world, fake.square);
+
+    assertIssues(result.issues, [], "sent back in full");
+    assert.equal(result.fixed, 0, "fixed");
+    assertOnlyFixes(before, await snapshot(world.db), [], "sent back in full");
+    for (const booking of [expired, confirmed]) {
+      const { results } = await world.db.prepare("SELECT id FROM refunds WHERE booking_id = ?1").bind(booking.id).all();
+      assert.deepEqual(results, [], `${booking.status}: a refund recorded on the booking`);
+    }
+    // 20 days from now to the pickup, 100%: the guest still gets back all of the payment that confirmed the booking.
+    const quote = await quoteCancellation(world.db, confirmed.id, NOW);
+    assert.ok(quote.ok, JSON.stringify(quote));
+    assert.equal(quote.refundJpy, confirmed.paid_jpy, "a cancellation quoted after the reconciliation");
   });
 });
 
@@ -1183,7 +1441,8 @@ test("a failed Square listing is not read as no payments", async () => {
     await seedClean(world);
     // Fixes the run would make if it had both lists.
     const pending = DISCREPANCIES.filter(({ type }) => type === "refund_status_mismatch" || type === "refund_not_recorded");
-    for (const { seed } of pending) await seed(world);
+    let pendingFixes = 0;
+    for (const { seed } of pending) pendingFixes += (await seed(world)).fixes.length;
     const { reconcileSquare } = await reconcileModule();
 
     for (const [what, list, failure] of failures) {
@@ -1202,6 +1461,6 @@ test("a failed Square listing is not read as no payments", async () => {
 
     // With both lists the same state has its fixes, so the failures above held them back.
     const result = await reconcileSquare({ db: world.db, square: fakeSquare(world).square, now: NOW });
-    assert.equal(result.fixed, pending.length, "fixed once Square answers");
+    assert.equal(result.fixed, pendingFixes, "fixed once Square answers");
   });
 });
