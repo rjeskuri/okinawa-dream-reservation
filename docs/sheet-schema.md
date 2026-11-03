@@ -32,8 +32,11 @@ Every value in the examples is a placeholder, not a real price, deposit or plate
 - **Money.** Whole yen. `5000`, `5,000`, `¥5,000` and `5000円` all read as 5000.
 - **Whole numbers.** Digits only, with no decimals. `sort`, `odometer_km` and `base_usage_days` are 0 or more.
 - **TRUE/FALSE.** A checkbox, or the text `TRUE` or `FALSE`.
-- **Dates.** A date cell, or text as `2030-07-15`.
-- **Date and time.** A date-time cell, or text as `2030-07-15 09:00`. Times are Japan time.
+- **Dates.** A date cell, or text as `2027-07-15`.
+- **Date and time.** A date-time cell, or text as `2027-07-15 09:00`. Times are Japan time.
+- **Plausible dates.** In ClosedDates and Blocks, a date more than 2 years before or after the publish date (Japan time)
+  is refused with a row status and the row is skipped. This catches a date typed as digits, such as `260105`, which
+  Sheets reads as a day number in the year 2612.
 - **Times of day.** A time cell, or text as `09:00`.
 - **A number in a text column** is fine: plate `2002` is the text `2002`.
 - **Repeats.** Where an id must be unique, the first row owns it and each later row gets an error, even if the first row
@@ -238,7 +241,9 @@ Example: `7`, `100`.
 | `date` | Yes | A date, unique. A date cell and the same date as text count as the same date. |
 | `note` | No | Text. Not published. |
 
-Example: `2030-01-01`, `New Year`.
+Example: `2027-01-01`, `New Year`.
+
+A date more than 2 years before or after the publish date is an error: the row is skipped and the date is not closed.
 
 ## Blocks
 
@@ -257,16 +262,37 @@ a plate in maintenance or retired.
 | `reference` | No | Text, the booking number on that channel |
 | `note` | No | Text |
 
-Example: `BLK-1`, `pcx-125`, blank, `2030-07-15 09:00`, `2030-07-16 18:00`, `Klook`, `KL-1234`, `Group of two`.
+Example: `BLK-1`, `pcx-125`, blank, `2027-07-15 09:00`, `2027-07-16 18:00`, `Klook`, `KL-1234`, `Group of two`.
 
 A missing Blocks tab, a tab with no header row (as when its contents were cleared), or a missing header stops the blocks
-step: stored blocks stay as they are, and nothing is cancelled. A row with an error does not change the block already
-stored under its id, so fix the row and press Publish again.
+step: stored blocks stay as they are, nothing is cancelled, and nothing is written to the tab. A row with an error does
+not change the block already stored under its id, so fix the row and press Publish again. That includes a `start` or
+`end` more than 2 years before or after the publish date: the row is skipped, its status names the column, and the block
+stored under that id stays as it is.
 
-A tab that keeps its header row but has no data rows is not an error for the check: it reads as no blocks. Cancelling
-the future blocks that are no longer on the sheet is task #21, which is not built yet. By its ticket, #21 cancels
-nothing and reports an error when the tab has no data rows while future blocks are stored, so that clearing the tab by
-accident cannot free bikes that an OTA has sold.
+Each Publish then brings the stored blocks in line with the tab, and `publish_status` says what became of each row:
+
+- **A new row** takes the plate it names, or with a blank plate the least-used free vehicle of the model. A named plate
+  is the only vehicle it can take, even when others are free.
+- **A changed row** keeps its vehicle if that is free for the new times. With a blank plate it otherwise moves to the
+  least-used free vehicle. A change to `channel`, `reference` or `note` alone moves nothing.
+- **A row that cannot get a vehicle** shows an error naming what is in the way, a booking's ref or a block's `block_id`,
+  and the plate. No new block is stored, and a stored block stays exactly as it was until a Publish finds the times free.
+- **A row deleted from the tab** cancels its block, unless the block has ended. Ended blocks are never changed: a later
+  edit to one shows a warning. A row put back later takes its block back, if the times are still free.
+- **A row that shows it was not synced yet** was past the limit of one Publish, which works through 200 changes. Press
+  Publish again.
+
+Two blocks on one named plate cannot swap times in one Publish, because each is in the other's way: both rows show an
+error. Move one to a free time, Publish, and then set the times you want.
+
+Two mistakes cancel nothing, so that they cannot free a bike an OTA has sold:
+
+- **A row with a blank `block_id`.** It may be the row of any stored block, so no block is cancelled while the tab has
+  one. Creates and edits still run, and when a block would otherwise have been cancelled, the alert says so. Fill in the
+  id and press Publish again.
+- **A tab with its header but no data rows**, while blocks that have not ended are stored. The alert reports an error.
+  To cancel every block on purpose, keep one row on the tab, such as a block that has ended, while removing the others.
 
 ## Bookings
 
@@ -279,6 +305,15 @@ until it is named or removed.
 Staff type in one column, `override_plate`, to move a booking to another bike. Publish moves it if that bike is active,
 of the same model and free for the booking's time. `override_status` then shows the result, and the booking keeps its
 bike if the move was refused.
+
+Only a confirmed booking that has not ended can move. A plate that already matches the booking is left alone, with no
+result, so an old override can stay on the row. One Publish moves at most 20 bookings: a row past that says so in
+`override_status`, and the next Publish applies it. Rows run top to bottom, so when two rows want one bike for
+overlapping times, the higher row gets it.
+
+If Publish fails on writing to this tab, the moves it made still stand, and publishing again finds nothing to do for
+those rows. Each move is queued for the Worker's own update of the tab, which writes its `plate`. That update leaves
+`override_status` alone, so the cell stays as it was.
 
 | Column | Holds |
 | --- | --- |

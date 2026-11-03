@@ -72,6 +72,28 @@ curl 'http://localhost:8787/cdn-cgi/handler/scheduled?cron=*/10+*+*+*+*'
 
 [Crons locally](#crons-locally) has the details.
 
+### Export the mock to PDF
+
+The mock goes to the customer as PDFs, not as a link. With the demo site running, from a second terminal:
+
+```sh
+scripts/export-pdf.sh
+```
+
+It prints each page through headless Chrome (the macOS install at `/Applications/Google Chrome.app`, or set `CHROME`),
+in English and Japanese, into `mock-pdfs/` (gitignored), as `en-home.pdf`, `ja-rentals-search.pdf` and so on. Rerunning
+replaces each PDF and removes the one of a page that fails or is skipped, so the folder holds only this run's output.
+The pages are home, rentals with a search two weeks out, a model page, the fee schedule in full and filtered
+to one class, FAQ, policies and access. Checkout joins once it renders from a seeded hold.
+
+- The script checks `/api/health` first and stops with a message when the site is down. If another session holds port
+  8787, start the demo elsewhere and point the script at it with `EXPORT_BASE_URL=http://localhost:8788`.
+- A page that does not answer 200, or whose PDF comes out empty, fails the run and is named at the end. The two fee
+  schedule pages are the exception until the fee schedule page exists: a 404 there is listed as skipped.
+- Chrome runs with its own throwaway profile, so an open Chrome does not get in the way. The PDFs carry no URL or print
+  date in the margins.
+- Text that is still a placeholder keeps its dashed box and "draft" label in the PDF.
+
 ## Crons locally
 
 `astro dev` does not run crons. Run the built Worker with scheduled triggers enabled. It serves `dist/server` via

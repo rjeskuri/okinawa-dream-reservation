@@ -39,8 +39,8 @@ export const testVars: Record<string, string> = {
 };
 
 export interface StartWorkerOptions {
-  /** Overrides for vars and secrets. */
-  vars?: Record<string, string>;
+  /** Overrides for vars and secrets. `undefined` leaves that var unset in the Worker. */
+  vars?: Record<string, string | undefined>;
   /** Answers the Worker's outbound `fetch()` calls. Default: every outbound request fails with a 502. */
   outbound?: (request: Request) => Response | Promise<Response>;
 }
@@ -68,6 +68,11 @@ function blockedOutbound(request: Request): Response {
   return new Response(`outbound request blocked by tests/helpers/worker.ts: ${request.method} ${request.url}`, {
     status: 502,
   });
+}
+
+/** Miniflare refuses a binding of `undefined`, so an unset var is one that is not there at all. */
+function setBindings(bindings: Record<string, Json | undefined>): Record<string, Json> {
+  return Object.fromEntries(Object.entries(bindings).filter(([, value]) => value !== undefined)) as Record<string, Json>;
 }
 
 function newestMtime(path: string): number {
@@ -160,7 +165,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<TestWo
       modulesRoot: dirname(main),
       modules: builtModules(main),
       // wrangler's `Omit` over an index-signature type leaves `bindings` as `unknown`.
-      bindings: { ...(worker.bindings as Record<string, Json> | undefined), ...testVars, ...opts.vars },
+      bindings: setBindings({ ...(worker.bindings as Record<string, Json> | undefined), ...testVars, ...opts.vars }),
       outboundService: opts.outbound ?? blockedOutbound,
     }),
   );

@@ -10,13 +10,15 @@ import "../styles/global.css";
 interface Props {
   locale: Locale;
   title: string;
+  /** False keeps the request's query out of the page, for a route that must not echo what a URL carries. */
+  keepQuery?: boolean;
 }
 
-const { locale, title } = Astro.props;
+const { locale, title, keepQuery = true } = Astro.props;
 // Pages render on demand, so the request's own origin gives the absolute hreflang URLs on any host.
 const { origin, pathname, search } = Astro.url;
 // Later tickets add these routes under src/pages/[locale]/.
-const sections = ["rentals", "faq", "policies", "access"];
+const sections = ["rentals", "rates", "faq", "policies", "access"];
 ---
 
 <!doctype html>
@@ -42,7 +44,7 @@ const sections = ["rentals", "faq", "policies", "access"];
         {
           LOCALES.map((target) => (
             <a
-              href={localePath(pathname, search, target)}
+              href={localePath(pathname, keepQuery ? search : "", target)}
               hreflang={htmlLang(target)}
               lang={htmlLang(target)}
               aria-current={target === locale ? "true" : undefined}
