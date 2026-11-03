@@ -235,6 +235,11 @@ if (status === "ON_HOLD" || status === "CONFIRMED") {
     height: 2.75rem;
     margin: var(--space-2) 0;
   }
+  /* The theme's `button { display: inline-block }` outranks the browser's own [hidden] rule. On both mounts, since a
+     wallet that cannot start must stay hidden. */
+  .wallet[hidden] {
+    display: none;
+  }
   #apple-pay-button {
     -webkit-appearance: -apple-pay-button;
     -apple-pay-button-type: plain;
