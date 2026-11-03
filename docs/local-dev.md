@@ -150,6 +150,8 @@ The real services are exercised by hand, one task each, and each task corrects t
 - Test Google Sheet and service account: task #18.
 - Square sandbox with a seller in Japan (JPY) and 3DS test cards: task #37.
 - The mail web app (Apps Script): task #45.
+- Google Pay in the Square sandbox: task #47, [below](#google-pay-and-apple-pay). Apple Pay can only be checked on the
+  production domain, in [docs/deploy.md](deploy.md#apple-pay-go-live-check) (task #48).
 
 Apps Script and Square webhooks reach local dev through a quick tunnel:
 
@@ -161,6 +163,33 @@ The tunnel URL changes on each run. Each time, update `WORKER_BASE_URL` in the A
 `SQUARE_WEBHOOK_URL` in `.dev.vars` (`https://<tunnel host>/api/webhooks/square`, then restart `npm run dev`) and the
 URL of the Square webhook subscription. `astro.config.mjs` already allows `*.trycloudflare.com` hosts; without that the
 dev server answers 403.
+
+### Google Pay and Apple Pay
+
+`ENABLE_GOOGLE_PAY` and `ENABLE_APPLE_PAY` are `"false"` in `wrangler.jsonc`. Only the exact string `true` turns a
+wallet on; `TRUE`, `1` or ` true` leave it off. With a flag on, the hold page renders that wallet's mount under the guest
+details (`#google-pay-button`, `#apple-pay-button`), and `src/scripts/checkout.ts` loads the wallet code with `import()`
+and starts it. A wallet that cannot start stays hidden and the card form works as before. With both off, the page has no
+wallet markup and loads no wallet code. A wallet's token goes to the same confirm endpoint as a card's.
+
+To turn one on locally, add `ENABLE_GOOGLE_PAY=true` (or `ENABLE_APPLE_PAY=true`) to `.dev.vars` and restart
+`npm run dev`.
+
+Manual Google Pay check in the Square sandbox (not automated; the tests use a fake SDK):
+
+1. Set up the sandbox values of task #37 in `.dev.vars`: the sandbox application id, the Japan seller's location id and the
+   sandbox access token.
+2. Add `ENABLE_GOOGLE_PAY=true` and restart `npm run dev`. Use Chrome, signed in to a Google account with a card in
+   Google Pay. If Google Pay will not start on `http://localhost:4321`, use the quick tunnel above, which is HTTPS.
+3. Make a hold and open its checkout page. Expect the Google Pay button under the guest details, and no Apple Pay button.
+4. Click it with an empty form: expect the field errors and no Google Pay sheet.
+5. Fill in the details and click it. Expect the sheet's total to be the hold's deposit in yen, labelled "Okinawa Dream
+   deposit" (in the page's language). Close the sheet: expect no message, and the card and Google Pay still usable.
+6. Click it again and pay. Expect the page to reload as confirmed, and the payment for the deposit in the sandbox Seller
+   Dashboard.
+7. Remove the line from `.dev.vars` and restart: expect no Google Pay button.
+
+Result: not run yet. Date: ____. Result: ____.
 
 ## Not enforced locally
 
