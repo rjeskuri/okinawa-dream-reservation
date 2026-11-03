@@ -1,6 +1,6 @@
 // The cancel page, through the built Worker, with Square faked in `outbound` at the sandbox URL, so the real client runs
-// and no seam is needed. The Worker reads the real clock, so a pickup is a whole number of days from now, and a run that
-// crosses midnight JST starts again. Tokens are signed here with node:crypto. The booking and the token come from the
+// and no seam is needed. The Worker reads the real clock, so a pickup is set from now, and a run that crosses midnight
+// JST starts again. Tokens are signed here with node:crypto. The booking and the token come from the
 // link's URL alone: the form has no action and no fields, so it posts back to the link, and the body is never read. A POST
 // sends what the page's own form sends, and tampering changes the value wherever it sits, or in one place at a time to set
 // two places against each other. A booking that cannot be cancelled answers as no booking at all, and so does a bad token
@@ -458,6 +458,30 @@ const PICKUP_CLOCKS: [number, string][] = [
   [12, "21:48"],
 ];
 
+// Tiers with an edge on each count below and on the day either side of it, so a count off by one has another percent.
+const DAY_TIERS: TierRow[] = [
+  { min_days_before: 41, refund_percent: 85 },
+  { min_days_before: 40, refund_percent: 70 },
+  { min_days_before: 34, refund_percent: 55 },
+  { min_days_before: 33, refund_percent: 35 },
+  { min_days_before: 0, refund_percent: 10 },
+];
+
+// [JST dates to pickup, JST clock, paid, percent, refund] under DAY_TIERS, each worked out by hand. The count is of JST
+// dates, as the tiers count, and is above 31, so no month or day of a date reads as it. Five minutes from a JST midnight,
+// the time to pickup is never a whole number of days: rounding it to days gives 32 for the first after 12:05 JST and 41
+// for the second up to 11:55 JST, and rounding it up gives 41 for the second before 23:55 JST.
+const DAY_COUNTS: [number, string, number, number, number][] = [
+  [33, "00:05", 9001, 35, 3150],
+  [40, "23:55", 9001, 70, 6300],
+];
+
+/** A ref, names and an address with no number in them but 0, so the day count cannot be found in them. */
+function withoutNumbers(): Partial<BookingRow> {
+  const letters = randomUUID().replace(/[^a-f]/g, "");
+  return { ref: `R0-${letters}`, guest_family_name: "Higa0", guest_given_name: "Naomi0", guest_email: "guest-0@example.com" };
+}
+
 test("GET shows the quote and changes nothing", async () => {
   await setTiers(TIERS);
   await steady(async () => {
@@ -510,6 +534,28 @@ test("GET shows the quote and changes nothing", async () => {
       assert.match(text, pickupTime(start_at), `${label}: the pickup time in\n${text}`);
     }
   }
+
+  // The days before pickup are the quote's count of JST dates, which sets the tier, and not the time to pickup in days.
+  await setTiers(DAY_TIERS);
+  await steady(async () => {
+    for (const locale of LOCALES) {
+      for (const [days, time, paid, refundPercent, refund] of DAY_COUNTS) {
+        const label = `${locale}, pickup at ${time} JST ${days} JST dates from now`;
+        const start_at = pickupAt(days, time);
+        const booking = await confirmed(days, paid, { start_at, end_at: start_at + 8 * HOUR_MS, ...withoutNumbers() });
+
+        const res = await getPage(linkTo(locale, booking.id, tokenOf(booking.id)));
+        const html = await res.text();
+        assert.equal(res.status, 200, label);
+        const text = mainText(html, label);
+        assert.match(text, figure(days), `${label}: days before pickup in\n${text}`);
+        assert.match(text, percent(refundPercent), `${label}: percent in\n${text}`);
+        assert.match(text, figure(refund), `${label}: refund in\n${text}`);
+        assert.match(text, pickupDate(start_at), `${label}: the pickup date in\n${text}`);
+        assert.match(text, pickupTime(start_at), `${label}: the pickup time in\n${text}`);
+      }
+    }
+  });
 });
 
 // [page locale, booking locale, paid, refund at 40%]. The booking's own locale differs from the page's: the page answers
@@ -747,6 +793,18 @@ test("bad tokens get the same 404 whatever state the booking is in", async () =>
     ["a booking in payment", await confirmed(10, 9000, { status: "PAYMENT_PENDING" }), 404],
     ["an expired hold", await confirmed(10, 9000, { status: "EXPIRED" }), 404],
     ["a staff block", await confirmed(10, 9000, { source: "block", external_ref: "e2e-block-bad-token" }), 404],
+    [
+      "a cancelled OTA block",
+      await confirmed(10, 9000, {
+        source: "block",
+        external_ref: "e2e-ota-cancelled-bad-token",
+        external_channel: "Klook",
+        status: "CANCELLED",
+        cancel_reason: "The row left the Blocks tab",
+        cancelled_at: now - HOUR_MS,
+      }),
+      404,
+    ],
   ];
   const other = await confirmed(10, 8000);
 
@@ -1162,11 +1220,15 @@ test("only confirmed web bookings can be cancelled", async () => {
   assert.equal(ghostPages.POST.status, 404, "POST of no booking");
   const nothing = { GET: await ghostPages.GET.text(), POST: await ghostPages.POST.text() };
 
+  // A block the sheet took back is CANCELLED but still no guest's to cancel, so it is no booking either, not one cancelled.
+  const blockGone = { status: "CANCELLED", cancel_reason: "The row left the Blocks tab", cancelled_at: Date.now() - HOUR_MS };
   const states: [string, Partial<BookingRow>][] = [
     ["a hold", { status: "ON_HOLD", expires_at: Date.now() + HOUR_MS }],
     ["a booking in payment", { status: "PAYMENT_PENDING" }],
     ["an expired hold", { status: "EXPIRED" }],
     ["a staff block", { source: "block", external_ref: "e2e-block" }],
+    ["a cancelled staff block", { source: "block", external_ref: "e2e-block-cancelled", ...blockGone }],
+    ["a cancelled OTA block", { source: "block", external_ref: "e2e-ota-cancelled", external_channel: "Klook", ...blockGone }],
   ];
   for (const [what, change] of states) {
     const booking = await confirmed(10, 9000, change);
