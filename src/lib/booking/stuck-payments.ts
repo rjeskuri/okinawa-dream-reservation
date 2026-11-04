@@ -103,14 +103,14 @@ async function settle(
 }
 
 /**
- * Resolves up to 20 stuck bookings from one listPayments call over [a minute before the oldest was made, now]. With nothing
- * stuck, Square is not asked. A Square failure writes nothing and is reported in `errors`; so is a booking whose write fails,
- * and the run goes on to the next.
+ * Resolves up to `limit` stuck bookings (20 unless the caller says fewer) from one listPayments call over [a minute before
+ * the oldest was made, now]. With nothing stuck, Square is not asked. A Square failure writes nothing and is reported in
+ * `errors`; so is a booking whose write fails, and the run goes on to the next.
  */
-export async function resolveStuckPayments(deps: StuckPaymentDeps): Promise<StuckPaymentResult> {
+export async function resolveStuckPayments(deps: StuckPaymentDeps, limit = RUN_LIMIT): Promise<StuckPaymentResult> {
   const { db, square, now } = deps;
   const result: StuckPaymentResult = { confirmed: 0, reopened: 0, expired: 0, errors: [] };
-  const { results: stuck } = await db.prepare(STUCK_SQL).bind(now - STUCK_AFTER_MS, RUN_LIMIT).all<StuckRow>();
+  const { results: stuck } = await db.prepare(STUCK_SQL).bind(now - STUCK_AFTER_MS, limit).all<StuckRow>();
   if (stuck.length === 0) return result;
 
   const oldest = Math.min(...stuck.map(({ created_at }) => created_at));

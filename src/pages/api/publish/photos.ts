@@ -41,7 +41,7 @@ export const POST: APIRoute = async ({ request }) => {
     const result = await syncPhotos({
       db: env.DB,
       media: env.MEDIA,
-      drive: createGoogleClients().drive,
+      drive: createGoogleClients(env).drive,
       folderId: env.GOOGLE_DRIVE_FOLDER_ID,
       now,
       maxBytes: await readMaxBytes(env.DB),
