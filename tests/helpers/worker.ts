@@ -11,7 +11,7 @@ import { unstable_getMiniflareWorkerOptions } from "wrangler";
 import { applyMigrations } from "./d1.ts";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
-const watched = ["src", "migrations", "astro.config.mjs", "wrangler.jsonc"];
+const watched = ["src", "public", "migrations", "astro.config.mjs", "wrangler.jsonc"];
 const deployConfigPath = join(root, ".wrangler", "deploy", "config.json");
 const lockDir = join(root, ".wrangler", "e2e-build.lock");
 const lockStaleMs = 10 * 60 * 1000;

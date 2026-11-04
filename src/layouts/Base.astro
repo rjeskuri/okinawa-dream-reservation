@@ -33,14 +33,17 @@ const sections = ["rentals", "rates", "faq", "policies", "access"];
       ))
     }
     <link rel="alternate" hreflang="x-default" href={`${origin}/`} />
+    <link rel="icon" type="image/png" href="/favicon.png" />
   </head>
   <body>
     <header>
-      <a href={`/${locale}/`}>{t(locale, common, "site.name")}</a>
-      <nav aria-label={t(locale, common, "nav.label")}>
+      <a class="brand" href={`/${locale}/`}>
+        <img src="/logo.png" alt={t(locale, common, "site.name")} width="662" height="68" />
+      </a>
+      <nav class="sections" aria-label={t(locale, common, "nav.label")}>
         {sections.map((section) => <a href={`/${locale}/${section}/`}>{t(locale, common, `nav.${section}`)}</a>)}
       </nav>
-      <nav aria-label={t(locale, common, "language.label")}>
+      <nav class="languages" aria-label={t(locale, common, "language.label")}>
         {
           LOCALES.map((target) => (
             <a
@@ -78,13 +81,63 @@ const sections = ["rentals", "rates", "faq", "policies", "access"];
 </style>
 
 <style>
-  header,
+  /* The mock's dark header: the rainbow logo, light links on ink and a rainbow strip along the bottom. */
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3) var(--space-6);
+    padding-bottom: calc(var(--space-4) + var(--rainbow-strip-height));
+    background-color: var(--color-header-background);
+    background-image: var(--gradient-rainbow);
+    background-size: 100% var(--rainbow-strip-height);
+    background-position: bottom;
+    background-repeat: no-repeat;
+    color: var(--color-header-text);
+  }
   nav {
     display: flex;
     flex-wrap: wrap;
-    gap: var(--space-3);
+    gap: var(--space-1);
   }
-  header {
-    justify-content: space-between;
+  .sections {
+    margin-right: auto;
+  }
+  .brand {
+    display: block;
+    line-height: 0;
+  }
+  .brand img {
+    height: var(--logo-height);
+    width: auto;
+  }
+  header a {
+    color: var(--color-header-link);
+    text-decoration: none;
+  }
+  header nav a {
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-sm);
+    white-space: nowrap;
+  }
+  header a:hover {
+    color: var(--color-header-link-hover);
+  }
+  header nav a:hover,
+  .languages a[aria-current="true"] {
+    background: var(--color-header-highlight);
+    color: var(--color-header-link-hover);
+  }
+  header a:focus-visible {
+    outline-color: var(--color-header-focus-ring);
+  }
+  .languages {
+    gap: 0;
+    border: 1px solid var(--color-header-highlight);
+    border-radius: var(--radius-sm);
+  }
+  header .languages a {
+    border-radius: 0;
   }
 </style>

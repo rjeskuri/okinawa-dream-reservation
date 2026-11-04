@@ -91,10 +91,22 @@ const now = Date.now();
   .hero {
     padding: var(--space-8) 0;
   }
+  .hero h1 {
+    font-size: var(--font-size-3xl);
+  }
+  .hero p {
+    color: var(--color-text-muted);
+    font-size: var(--font-size-lg);
+  }
+  /* The mock's raised search panel. */
   .search {
     display: flex;
     flex-wrap: wrap;
     align-items: flex-end;
     gap: var(--space-4);
+    padding: var(--space-4) var(--space-6);
+    border: 1px solid var(--color-divider);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-raised);
   }
 </style>
