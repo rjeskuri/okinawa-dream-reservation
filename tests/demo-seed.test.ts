@@ -538,3 +538,69 @@ test("scripts/demo.sh runs twice and leaves an existing .dev.vars alone", () => 
     assert.equal(readFileSync(devVars, "utf8"), values);
   });
 });
+
+// What wrangler.jsonc and `npm run dev` hold today, for astro dev on its own port: this ticket leaves them as they are.
+const JSONC_SITE_URL = "http://localhost:4321";
+const JSONC_WEBHOOK_URL = "http://localhost:4321/api/webhooks/square";
+const WRANGLER_DEFAULT_PORT = 8787;
+
+/** The vars a call passes with `--var KEY:VALUE` (wrangler's form), several to one `--var` or one each, or `--var=KEY:VALUE`. */
+function cliVars(call: string[]): Map<string, string> {
+  const vars = new Map<string, string>();
+  const add = (pair: string) => {
+    const colon = pair.indexOf(":");
+    if (colon > 0) vars.set(pair.slice(0, colon), pair.slice(colon + 1));
+  };
+  for (const [index, arg] of call.entries()) {
+    if (arg.startsWith("--var=")) add(arg.slice("--var=".length));
+    if (arg !== "--var") continue;
+    for (const value of call.slice(index + 1)) {
+      if (value.startsWith("-")) break;
+      add(value);
+    }
+  }
+  return vars;
+}
+
+/** The port wrangler dev listens on: its `--port`, else the `dev.port` of the config, else wrangler's default. */
+function devPort(call: string[], root: string): number {
+  const port = flag(call, "--port");
+  if (port !== undefined) return Number(port);
+  const config = /"dev"\s*:\s*\{[^}]*"port"\s*:\s*(\d+)/.exec(readFileSync(join(root, "wrangler.jsonc"), "utf8"));
+  return config ? Number(config[1]) : WRANGLER_DEFAULT_PORT;
+}
+
+test("the demo serves SITE_URL on its own port", () => {
+  withCheckout((root, run) => {
+    const result = run();
+    assert.equal(result.status, 0, result.output);
+    const dev = result.calls.find((call) => isWrangler(call, "dev"));
+    assert.ok(dev, "no wrangler dev");
+    const text = dev.argv.join(" ");
+
+    const port = devPort(dev.argv, root);
+    assert.ok(Number.isInteger(port) && port > 0, `wrangler dev listens on no port: ${text}`);
+    const vars = cliVars(dev.argv);
+
+    // Every link the Worker builds starts from SITE_URL, so it must be the server this script starts.
+    const site = vars.get("SITE_URL");
+    assert.ok(site, `wrangler dev gets no --var SITE_URL: ${text}`);
+    const siteUrl = new URL(site);
+    assert.equal(siteUrl.protocol, "http:", site);
+    assert.ok(["localhost", "127.0.0.1"].includes(siteUrl.hostname), site);
+    assert.equal(Number(siteUrl.port), port, `SITE_URL ${site} is not the port wrangler dev serves (${port})`);
+    assert.equal(site, siteUrl.origin, `SITE_URL is an origin with no path, as in wrangler.jsonc: ${site}`);
+
+    // Square posts to the same server, at the path wrangler.jsonc gives the webhook.
+    const webhook = vars.get("SQUARE_WEBHOOK_URL");
+    assert.ok(webhook, `wrangler dev gets no --var SQUARE_WEBHOOK_URL: ${text}`);
+    assert.equal(webhook, `${siteUrl.origin}${new URL(JSONC_WEBHOOK_URL).pathname}`);
+  });
+
+  // The demo overrides them on its own command line; the config astro dev reads is unchanged.
+  const config = readFileSync(join(repoRoot, "wrangler.jsonc"), "utf8");
+  assert.equal(/"SITE_URL":\s*"([^"]+)"/.exec(config)?.[1], JSONC_SITE_URL);
+  assert.equal(/"SQUARE_WEBHOOK_URL":\s*"([^"]+)"/.exec(config)?.[1], JSONC_WEBHOOK_URL);
+  const { scripts } = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  assert.equal(scripts.dev, "astro dev");
+});
