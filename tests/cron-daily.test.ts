@@ -16,6 +16,8 @@
 //   Whether dead items alone queue the email, and so whether `issues` counts them, is left open: no test here pins it.
 // - The report is queued as kind email, template reconcile_report, to staffEmail, with data { runAt: now, issues }, under
 //   dedupe key email:reconcile_report:{JST date of now}, so a second run the same JST day queues nothing.
+// - runDaily runs reconcileSquare over its own default window (35 days, #43) and the sheet check over its 35 days: an
+//   issue 30 to 35 days back is reported, and a booking that ended then is copied to the Bookings tab.
 // - The budgets are for the whole cron invocation. runCron's cron_runs insert and the Google token cache's read and
 //   write are three D1 queries outside runDaily, and the token exchange is one subrequest outside it, so runDaily alone
 //   must stay under 45 - 3 queries and 40 - 1 subrequests. A subrequest is a Sheets call or a Square call.
@@ -394,6 +396,21 @@ test("the report tab lists every issue", async () => {
     const strayAmount = randomInt(1000, 30_000);
     const stray = world.stray("2030-05-20 13:40", strayAmount);
 
+    // Either side of 30 days back, where a shorter window than the checks' 35 days would cut: a Dashboard sale and a
+    // booking the sync never wrote whose every time is 30 to 35 days back, and the same 37 days back.
+    const bandAmount = randomInt(1000, 30_000);
+    const bandStray = world.stray("2030-04-29 13:40", bandAmount);
+    world.stray("2030-04-24 11:00", randomInt(1000, 30_000));
+    const bandMissing = await world.book({ start: "2030-04-29 09:00", end: "2030-04-29 18:00", created: "2030-04-27 12:00" });
+    const pastBand = await world.book({ start: "2030-04-24 09:00", end: "2030-04-24 18:00" });
+    const times = (b: BookingRow) => [b.start_at, b.end_at, b.created_at, b.updated_at];
+    for (const ms of [at("2030-04-29 13:40"), ...times(bandMissing)]) {
+      assert.ok(ms >= NOW - 35 * DAY_MS && ms < NOW - 30 * DAY_MS, "fixture: 30 to 35 days back");
+    }
+    for (const ms of [at("2030-04-24 11:00"), ...times(pastBand)]) {
+      assert.ok(ms < NOW - 35 * DAY_MS, "fixture: before the window");
+    }
+
     // The sheet: a pending override, two rows D1 never had, and a booking the sync never wrote.
     const overridden = await world.book({ start: "2030-06-26 09:00", vehicle_plate: plates[0] });
     const missing = await world.book({ start: "2030-06-27 09:00" });
@@ -435,6 +452,7 @@ test("the report tab lists every issue", async () => {
         expectedJpy: mismatch.booking.paid_jpy,
         actualJpy: mismatch.booking.paid_jpy + extra,
       },
+      { type: "payment_without_booking", paymentId: bandStray.id, actualJpy: bandAmount },
     ];
     const sheetIssues: WantRow[] = [
       { type: "unknown_sheet_row", bookingRef: ghosts[0].ref },
@@ -452,9 +470,12 @@ test("the report tab lists every issue", async () => {
       `issues counts what both checks found, got ${String(first.issues)}`,
     );
     // The sheet check's repairs ran too.
-    const missingRows = rowsOf(sheet, missing.id);
-    assert.equal(missingRows.length, 1, "the missing booking was appended");
-    assert.deepEqual(schemaCells(named(BOOKINGS_HEADER, sheet.grid("Bookings")[missingRows[0]])), expectedCells(missing));
+    for (const b of [missing, bandMissing]) {
+      const missingRows = rowsOf(sheet, b.id);
+      assert.equal(missingRows.length, 1, `the missing booking ${b.ref} was appended`);
+      assert.deepEqual(schemaCells(named(BOOKINGS_HEADER, sheet.grid("Bookings")[missingRows[0]])), expectedCells(b));
+    }
+    assert.deepEqual(rowsOf(sheet, pastBand.id), [], "a booking that ended before the window is not copied");
 
     // The next day: D1 took Square's amount, staff cleared one stray row, and Publish applied the override.
     const fixedAt = NOW + 6 * HOUR_MS;
@@ -474,7 +495,7 @@ test("the report tab lists every issue", async () => {
     const secondCounts = assertReport(
       sheet,
       nextDay,
-      [squareIssues[0], squareIssues[1], sheetIssues[0]],
+      [squareIssues[0], squareIssues[1], squareIssues[3], sheetIssues[0]],
       deadKeys,
       "second run, with fewer issues: no row of the first run is left",
     );
@@ -705,11 +726,13 @@ test("a run stays within its subrequest and query budgets", async () => {
     }
 
     // The tab: by i % 10, 70 rows in sync, 42 stale and 28 missing; six rows D1 never had; four overrides waiting on
-    // bookings that have not started; and every old booking's row.
+    // bookings that have not started; and every old booking's row. Of the stale rows only a third have an older
+    // updated_at cell: the rest differ in paid_jpy alone, or in a plate staff typed over.
     const overrideAt = new Set([41, 61, 81, 121]);
     const laid: unknown[][] = [];
     const ghosts: string[] = [];
     const pending: string[] = [];
+    let keptStamp = 0;
     for (const [i, b] of recent.entries()) {
       if (i % 24 === 0) {
         const ghost = ghostOf();
@@ -718,8 +741,16 @@ test("a run stays within its subrequest and query budgets", async () => {
       }
       const kind = i % 10;
       if (kind >= 8) continue;
-      if (kind >= 5) {
+      if (kind === 5) {
         laid.push(world.row({ ...b, status: "CONFIRMED", paid_jpy: b.paid_jpy + 1, updated_at: b.updated_at - DAY_MS }));
+        continue;
+      }
+      if (kind >= 6) {
+        const drift = kind === 6 ? { paid_jpy: b.paid_jpy + 1 } : { vehicle_plate: plates[(i + 3) % plates.length] };
+        const row = world.row({ ...b, ...drift }, {}, refunds.get(b.id));
+        assert.equal(named(BOOKINGS_HEADER, row).updated_at, wall(b.updated_at), "fixture: the updated_at cell is D1's");
+        keptStamp += 1;
+        laid.push(row);
         continue;
       }
       const overriding = overrideAt.has(i);
@@ -733,6 +764,7 @@ test("a run stays within its subrequest and query budgets", async () => {
     world.lay(laid);
     assert.equal(pending.length, 4, "fixture: four pending overrides");
     assert.equal(ghosts.length, 6, "fixture: six unknown rows");
+    assert.equal(keptStamp, 28, "fixture: 28 stale rows keep D1's updated_at cell");
 
     const deadKeys = [0, 1, 2].map((n) => `email:guest_confirmation:dead-${n}-${randomUUID()}`);
     for (const [n, key] of deadKeys.entries()) await world.outbox("email", key, NOW - (n + 1) * DAY_MS);

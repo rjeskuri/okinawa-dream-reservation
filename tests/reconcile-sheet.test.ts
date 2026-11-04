@@ -9,6 +9,9 @@
 //   the window, so reading the window off start_at, end_at, created_at or updated_at all agree on them.
 // - A row repaired is a booking row appended or rewritten; `repaired` counts rows, however many cells differed. A repair
 //   is not an issue: `issues` holds only what staff must act on.
+// - A row is stale when any cell the Worker owns differs from D1, whatever its updated_at cell says. That cell is no
+//   version stamp: it is minute-precise, a refund settling leaves the booking's updated_at as it was, and staff can type
+//   over any cell. Staff text in a Worker-owned cell is put back.
 // - A row "unknown to D1" is a row whose booking_id no booking in D1 has, whatever its status or time. A row of a
 //   booking D1 knows but the window leaves out is not reported and not written. A blank row is nothing.
 // - Sheet issues extend ReconcileIssueType: `unknown_sheet_row` (bookingRef is the row's booking_ref cell) and
@@ -30,6 +33,7 @@ import {
   rowUnder,
   schemaCells,
   seedRefund,
+  wall,
   type Cells,
   type RefundFact,
 } from "./helpers/bookings-tab.ts";
@@ -261,6 +265,19 @@ test("missing and stale rows are repaired", async () => {
       end: "2030-12-05 18:00",
       created: "2030-03-15 10:00",
     });
+    // Booked, cancelled and due 30 to 35 days back, all of it in the window.
+    const missingLastMonth = await world.book({
+      status: "CANCELLED",
+      start: "2030-04-30 09:00",
+      end: "2030-04-30 18:00",
+      created: "2030-04-27 15:00",
+      updated: "2030-04-28 09:00",
+      cancelled_at: at("2030-04-28 09:00"),
+    });
+    const { start_at, end_at, created_at, updated_at } = missingLastMonth;
+    for (const ms of [start_at, end_at, created_at, updated_at]) {
+      assert.ok(ms >= NOW - 35 * DAY_MS && ms < NOW - 30 * DAY_MS, "fixture: 30 to 35 days back");
+    }
 
     // On the tab as they stood before a change that never reached it.
     const staleCancelled = await world.book({ vehicle_plate: plates[7], start: "2030-06-14 09:00", end: "2030-06-14 18:00" });
@@ -284,20 +301,57 @@ test("missing and stale rows are repaired", async () => {
       updated_at: changedAt + 3 * HOUR_MS,
     });
 
+    // Stale with the updated_at cell D1 has: staff typed over a phone number, a refund settled without touching the
+    // booking, and a second change landed in the same JST minute as the one the sync wrote.
+    const overtyped = await world.book({ vehicle_plate: plates[3], start: "2030-07-08 09:00", end: "2030-07-09 18:00" });
+    const overtypedRow = rowOf(world, { ...expectedCells(overtyped), guest_phone: "+81-00-0000-0000" });
+    const refundSettles = await world.book({
+      status: "CANCELLED",
+      vehicle_plate: plates[5],
+      start: "2030-06-06 09:00",
+      end: "2030-06-06 18:00",
+      created: "2030-05-20 10:00",
+      updated: "2030-05-29 16:00",
+      cancelled_at: at("2030-05-29 16:00"),
+    });
+    await refund(refundSettles, 1300, "PENDING", "2030-05-29 16:02");
+    const refundSettlesRow = rowOf(world, expectedCells(refundSettles, refunds.get(refundSettles.id)));
+    await db
+      .prepare("UPDATE refunds SET status = 'COMPLETED', updated_at = ?1 WHERE booking_id = ?2")
+      .bind(at("2030-05-31 02:10"), refundSettles.id)
+      .run();
+    refunds.set(refundSettles.id, [{ amount_jpy: 1300, status: "COMPLETED", created_at: at("2030-05-29 16:02") }]);
+    const sameMinute = await world.book({ vehicle_plate: plates[1], start: "2030-06-17 09:00", end: "2030-06-18 18:00" });
+    const minute = at("2030-05-31 14:00");
+    const syncedAt14 = await change(db, sameMinute.id, { paid_jpy: sameMinute.paid_jpy + 800, updated_at: minute + 5_000 });
+    const sameMinuteRow = rowOf(world, expectedCells(syncedAt14));
+    await change(db, sameMinute.id, { guest_email: "new-address@example.com", updated_at: minute + 41_000 });
+
     const synced = [syncedFuture, syncedCancelled, syncedBlock];
-    const missing = [missingFuture, missingCancelled, missingOngoing, missingFarAhead];
-    const stale = [staleCancelled, staleMoved, stalePhone, staleTimes];
+    const missing = [missingFuture, missingCancelled, missingOngoing, missingFarAhead, missingLastMonth];
+    const stale = [staleCancelled, staleMoved, stalePhone, staleTimes, overtyped, refundSettles, sameMinute];
     world.lay([
       rowOf(world, expectedCells(syncedFuture)),
       staleRows[0],
+      overtypedRow,
       rowOf(world, expectedCells(syncedCancelled, refunds.get(syncedCancelled.id))),
       staleRows[1],
+      sameMinuteRow,
       staleRows[2],
       rowOf(world, expectedCells(syncedBlock)),
+      refundSettlesRow,
       staleRows[3],
     ]);
     const before = rows(sheet);
     const placed = new Map([...synced, ...stale].map((b) => [b.id, onlyRowOf(world, b.id)]));
+    for (const b of stale) {
+      const current = await stored(db, b.id);
+      const laid = cellsAt(world, placed.get(b.id) as number);
+      assert.notDeepEqual(schemaCells(laid), expectedCells(current, refunds.get(b.id)), `fixture: ${b.ref}'s row is stale`);
+      if ([overtyped, refundSettles, sameMinute].includes(b)) {
+        assert.equal(laid.updated_at, wall(current.updated_at), `fixture: ${b.ref}'s updated_at cell is D1's`);
+      }
+    }
     sheet.writes.length = 0;
     sheet.calls.length = 0;
 
@@ -320,6 +374,9 @@ test("missing and stale rows are repaired", async () => {
     assert.equal(cellsAt(world, onlyRowOf(world, staleTimes.id)).start, "2030-08-04 09:00");
     assert.equal(cellsAt(world, onlyRowOf(world, missingCancelled.id)).refund_jpy, 2100);
     assert.equal(cellsAt(world, onlyRowOf(world, missingCancelled.id)).refund_status, "REJECTED");
+    assert.equal(cellsAt(world, onlyRowOf(world, overtyped.id)).guest_phone, overtyped.guest_phone, "staff text is put back");
+    assert.equal(cellsAt(world, onlyRowOf(world, refundSettles.id)).refund_status, "COMPLETED");
+    assert.equal(cellsAt(world, onlyRowOf(world, sameMinute.id)).guest_email, "new-address@example.com");
     assert.deepEqual(writesOn(sheet, synced.map((b) => placed.get(b.id) as number)), [], "rows in sync are not written");
     assert.deepEqual(sheet.grid("Config"), CONFIG_TAB, "other tabs are untouched");
 
@@ -388,21 +445,55 @@ test("bookings outside the window or in other statuses are left alone", async ()
     });
     const ahead = await world.book({ status: "CANCELLED", start: "2030-06-30 09:00", end: "2030-06-30 18:00" });
 
-    world.lay([oldStaleRow, rowOf(world, expectedCells(oldSynced))]);
+    // Either side of 30 days back, where a shorter window would cut: every time of the first two is 30 to 35 days
+    // before `now`, so both are in the window; the third ended 37 days back, before it opened.
+    const bandMissing = await world.book({
+      vehicle_plate: plates[4],
+      start: "2030-04-29 09:00",
+      end: "2030-04-29 18:00",
+      created: "2030-04-27 12:00",
+    });
+    const bandStale = await world.book({
+      vehicle_plate: plates[5],
+      start: "2030-04-30 10:00",
+      end: "2030-04-30 17:00",
+      created: "2030-04-27 09:30",
+    });
+    const bandStaleRow = rowOf(world, expectedCells(bandStale));
+    const cancelledAt = at("2030-04-28 20:00");
+    const bandCancelled = await change(db, bandStale.id, { status: "CANCELLED", cancelled_at: cancelledAt, updated_at: cancelledAt });
+    const pastBand = await world.book({ vehicle_plate: plates[6], start: "2030-04-24 09:00", end: "2030-04-24 18:00" });
+    const times = (b: BookingRow) => [b.start_at, b.end_at, b.created_at, b.updated_at];
+    for (const b of [bandMissing, bandCancelled]) {
+      assert.ok(
+        times(b).every((ms) => ms >= NOW - 35 * DAY_MS && ms < NOW - 30 * DAY_MS),
+        `fixture: ${b.ref} is 30 to 35 days back`,
+      );
+    }
+    assert.ok(times(pastBand).every((ms) => ms < NOW - 35 * DAY_MS), "fixture: the third is before the window");
+    assert.ok(pastBand.end_at > NOW - 38 * DAY_MS, "fixture: the third ended under 38 days back");
+
+    world.lay([oldStaleRow, rowOf(world, expectedCells(oldSynced)), bandStaleRow]);
     const before = rows(sheet);
+    const bandRow = onlyRowOf(world, bandStale.id);
     sheet.writes.length = 0;
 
     const result = await world.reconcile();
 
-    assert.equal(result.repaired, 2, "only the two controls");
+    assert.equal(result.repaired, 4, "the two controls and the two bookings 30 to 35 days back");
     assertIssues(result.issues, [], "a row of a booking D1 knows is not unknown, in the window or not");
-    assert.deepEqual(rows(sheet).slice(0, before.length), before, "rows outside the window are not rewritten");
+    assert.deepEqual(rows(sheet).slice(0, 3), before.slice(0, 3), "rows outside the window are not rewritten");
     assert.deepEqual(writesOn(sheet, [1, 2]), []);
-    assert.equal(rows(sheet).length, before.length + 2);
-    for (const b of [nearEdge, ahead]) {
-      assert.deepEqual(schemaCells(cellsAt(world, onlyRowOf(world, b.id))), expectedCells(await stored(db, b.id)));
+    assert.equal(rows(sheet).length, before.length + 3);
+    assert.equal(onlyRowOf(world, bandStale.id), bandRow, "the stale row 30 to 35 days back keeps its row");
+    assert.deepEqual(schemaCells(cellsAt(world, bandRow)), expectedCells(bandCancelled), "and is rewritten");
+    assert.equal(cellsAt(world, bandRow).status, "CANCELLED");
+    for (const b of [nearEdge, ahead, bandMissing]) {
+      const index = onlyRowOf(world, b.id);
+      assert.ok(index >= before.length, `${b.ref} is appended`);
+      assert.deepEqual(schemaCells(cellsAt(world, index)), expectedCells(await stored(db, b.id)));
     }
-    for (const b of [oldMissing, held, pending, expiredPast, expiredAhead]) {
+    for (const b of [oldMissing, pastBand, held, pending, expiredPast, expiredAhead]) {
       assert.deepEqual(rowsOf(world, b.id), [], `${b.status} ${b.ref} is not copied to the tab`);
     }
   });
