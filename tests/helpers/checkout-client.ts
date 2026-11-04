@@ -14,6 +14,21 @@
 //   #countdown, anywhere on the page, which the client keeps filled with the time left, as 12:05 or 12分05秒.
 // The error elements and #checkout-message show no text until the client fills them.
 //
+// The wallets (task #47). The page renders a wallet's mount only when its flag is on, and the client starts a wallet only
+// when its mount is on the page. At most one of each, anywhere on the page:
+//   #google-pay-button, the mount for googlePay.attach, and what the guest clicks to pay with Google Pay;
+//   #apple-pay-button, what the guest clicks to pay with Apple Pay. Square's Apple Pay has no attach, so the page draws it.
+// A mount need not show before its wallet has started. One whose wallet cannot start (Apple Pay outside Safari or off the
+// domain registered with Square, Google Pay refused) does not show, and the card form goes on as if it were not there.
+//
+// What the client has to do with them:
+// - make the request with payments.paymentRequest, from data-deposit-jpy and data-locale, and hand what it returns to
+//   payments.googlePay or payments.applePay;
+// - on a click of a started wallet, check the guest as for a card, tokenize with that wallet, and post the token to the
+//   card's endpoint in the card's body. One payment at a time, whichever way it started;
+// - start the wallets from src/scripts/checkout.ts, itself or through an import() of its own, so that a page with neither
+//   mount loads none of their code. A module it imports runs once per test process, so it reads the page only when called.
+//
 // What the client has to do with it:
 // - start itself on import, as plain code, since this DOM has no customElements. An Astro <script> is a deferred module: it
 //   runs at readyState "interactive", and then DOMContentLoaded, load and pageshow fire. Nothing else does, so no
@@ -45,6 +60,13 @@ export type HoldPage = {
   locationId: string;
   expiresAt: number;
 };
+
+export const WALLETS = ["googlePay", "applePay"] as const;
+
+export type Wallet = (typeof WALLETS)[number];
+
+/** The id of each wallet's mount, by the name of the payments method that starts that wallet. */
+export const WALLET_MOUNTS: Record<Wallet, string> = { googlePay: "google-pay-button", applePay: "apple-pay-button" };
 
 const CLIENT = new URL("../../src/scripts/checkout.ts", import.meta.url).href;
 const SITE = "https://okinawa-dream.example";
@@ -826,6 +848,20 @@ export function readHoldPage(html: string, label: string): HoldPage {
   return readSeam(parsePage(html), label);
 }
 
+function readWalletSeam(document: FakeDocument, label: string): Record<Wallet, boolean> {
+  const mounted = (wallet: Wallet): boolean => {
+    const found = document.querySelectorAll(`#${WALLET_MOUNTS[wallet]}`);
+    assert.ok(found.length <= 1, `${label}: ${found.length} of #${WALLET_MOUNTS[wallet]}, where the client needs one at most`);
+    return found.length === 1;
+  };
+  return { googlePay: mounted("googlePay"), applePay: mounted("applePay") };
+}
+
+/** Which wallets' mounts are on `html`, which is which wallets the client is to start. */
+export function readWallets(html: string, label: string): Record<Wallet, boolean> {
+  return readWalletSeam(parsePage(html), label);
+}
+
 /**
  * Where the form goes with `guest` typed in it if nothing stops it, by the browser's form submission rules, for a page at
  * `pageUrl`. A GET, which is the default and what any unknown method falls back to, writes every named control that is not
@@ -978,8 +1014,27 @@ export type OpenOptions = {
   card?: () => Promise<void>;
   /** Stands in for what card.attach() resolves after, to reject or to wait. */
   attach?: () => Promise<void>;
+  /**
+   * Stands in for what payments.googlePay() or payments.applePay() resolves after, to reject as Apple Pay does outside
+   * Safari or off a registered domain, or to wait.
+   */
+  wallets?: Partial<Record<Wallet, () => Promise<void>>>;
+  /** Stands in for what googlePay.attach() resolves after, to reject or to wait. */
+  googlePayAttach?: () => Promise<void>;
+  /** What each tokenize of a wallet answers, in turn, as `tokens` does for the card. */
+  walletTokens?: Partial<Record<Wallet, TokenReply[]>>;
   /** Runs as soon as the client's script has run, before DOMContentLoaded or anything that script waits for. */
   onStart?: (checkout: Checkout) => void;
+};
+
+/** One wallet on the opened page, as a guest finds it. */
+export type WalletHandle = {
+  /** Whether its mount is on the page and shows, so that a guest could click it. */
+  shown(): boolean;
+  /** Clicks it, if a guest could: the button Google's script drew in the mount, or the mount itself. */
+  click(): void;
+  /** The same, and lets the page settle. */
+  pay(): Promise<void>;
 };
 
 /** One call to fetch, read back. */
@@ -996,6 +1051,18 @@ export type Checkout = {
     attach: unknown[];
     tokenize: unknown[][];
     verifyBuyer: unknown[][];
+    /** The options of each payments.paymentRequest() call. */
+    paymentRequest: unknown[];
+    /** What each of those calls returned, the only thing payments.googlePay() and payments.applePay() take. */
+    requests: object[];
+    /** The argument of each payments.googlePay() call. */
+    googlePay: unknown[];
+    /** The argument of each payments.applePay() call. */
+    applePay: unknown[];
+    /** The target of each googlePay.attach() call: a selector or an element. */
+    googlePayAttach: unknown[];
+    /** The arguments of each tokenize() of each wallet. */
+    walletTokenize: Record<Wallet, unknown[][]>;
   };
   confirms: Confirm[];
   /** Each time the page reloaded. After one the page is gone and nothing on it can be clicked. */
@@ -1024,6 +1091,12 @@ export type Checkout = {
   message(): string;
   fieldError(field: GuestField): string;
   countdown(): string;
+  wallet(wallet: Wallet): WalletHandle;
+  /**
+   * Lets the page run until `condition` holds, for up to `ms` of real time, and says whether it did. For what the client
+   * may do after an import() of its own, which can take longer than `settle` waits.
+   */
+  waitFor(condition: () => boolean, ms?: number): Promise<boolean>;
   /** Ends the page and puts the globals back, before the test next needs them. Runs by itself when the test ends. */
   close(): void;
 };
@@ -1105,14 +1178,31 @@ export async function openCheckout(t: TestContext, html: string, options: OpenOp
   closeCurrent?.();
   const document = parsePage(html);
   const hold = readSeam(document, "the opened page");
+  readWalletSeam(document, "the opened page");
   const form = document.getElementById("checkout") as FakeElement;
   const button = document.getElementById("pay-button") as FakeElement;
   const present = document.querySelectorAll("script[src]");
   const added = (): FakeElement[] => document.querySelectorAll("script[src]").filter((script) => !present.includes(script));
 
   const tokens = [...(options.tokens ?? [])];
+  const walletTokens: Record<Wallet, TokenReply[]> = {
+    googlePay: [...(options.walletTokens?.googlePay ?? [])],
+    applePay: [...(options.walletTokens?.applePay ?? [])],
+  };
   const replies = [...(options.confirms ?? [])];
-  const square: Checkout["square"] = { payments: [], card: 0, attach: [], tokenize: [], verifyBuyer: [] };
+  const square: Checkout["square"] = {
+    payments: [],
+    card: 0,
+    attach: [],
+    tokenize: [],
+    verifyBuyer: [],
+    paymentRequest: [],
+    requests: [],
+    googlePay: [],
+    applePay: [],
+    googlePayAttach: [],
+    walletTokenize: { googlePay: [], applePay: [] },
+  };
   const confirms: Confirm[] = [];
   let reloads = 0;
 
@@ -1131,6 +1221,49 @@ export async function openCheckout(t: TestContext, html: string, options: OpenOp
     addEventListener: () => {},
   };
 
+  const walletTokenize =
+    (wallet: Wallet) =>
+    async (...args: unknown[]): Promise<unknown> => {
+      const calls = square.walletTokenize[wallet];
+      calls.push(args);
+      const reply = walletTokens[wallet].shift() ?? `cnon:unnamed-${wallet}-token-${calls.length}`;
+      if (typeof reply === "string") return { status: "OK", token: reply };
+      return typeof reply === "function" ? reply() : reply;
+    };
+
+  // Square's Google Pay draws Google's button into the mount. Apple Pay has no attach, since the page draws that button.
+  const googlePay = {
+    attach: async (target: unknown) => {
+      square.googlePayAttach.push(target);
+      await options.googlePayAttach?.();
+      const mount = typeof target === "string" ? document.querySelector(target) : target;
+      if (!(mount instanceof FakeElement) || !mount.isConnected) throw new Error(`no element to attach Google Pay to`);
+      const drawn = document.createElement("button");
+      drawn.setAttribute("type", "button");
+      drawn.setAttribute("aria-label", "Google Pay");
+      mount.appendChild(drawn);
+    },
+    tokenize: walletTokenize("googlePay"),
+    detach: async () => {},
+    destroy: async () => {},
+    addEventListener: () => {},
+  };
+  const applePay = {
+    tokenize: walletTokenize("applePay"),
+    destroy: async () => {},
+    addEventListener: () => {},
+  };
+
+  /** As the SDK does, a wallet takes only a request that payments.paymentRequest() made. */
+  const startWallet = async <T>(wallet: Wallet, request: unknown, started: T): Promise<T> => {
+    square[wallet].push(request);
+    if (!square.requests.includes(request as object)) {
+      throw new Error(`payments.${wallet}() takes what payments.paymentRequest() returned`);
+    }
+    await options.wallets?.[wallet]?.();
+    return started;
+  };
+
   const sdk = {
     payments: (...ids: unknown[]) => {
       square.payments.push(ids);
@@ -1145,6 +1278,14 @@ export async function openCheckout(t: TestContext, html: string, options: OpenOp
           square.verifyBuyer.push(args);
           return { token: "verf:should-never-be-asked-for" };
         },
+        paymentRequest: (request: unknown) => {
+          square.paymentRequest.push(request);
+          const made = { update: () => true, addEventListener: () => {} };
+          square.requests.push(made);
+          return made;
+        },
+        googlePay: (request: unknown) => startWallet("googlePay", request, googlePay),
+        applePay: (request: unknown) => startWallet("applePay", request, applePay),
       };
     },
   };
@@ -1219,6 +1360,16 @@ export async function openCheckout(t: TestContext, html: string, options: OpenOp
     if (payable()) click(button);
   };
 
+  const walletShown = (wallet: Wallet): boolean => {
+    const mount = document.getElementById(WALLET_MOUNTS[wallet]);
+    return reloads === 0 && mount !== null && mount.isConnected && isShown(mount);
+  };
+  const clickWallet = (wallet: Wallet): void => {
+    const mount = document.getElementById(WALLET_MOUNTS[wallet]);
+    const target = mount?.querySelector("button") ?? mount;
+    if (walletShown(wallet) && target !== null && !target.disabled && isShown(target)) click(target);
+  };
+
   const checkout: Checkout = {
     document,
     button,
@@ -1259,6 +1410,24 @@ export async function openCheckout(t: TestContext, html: string, options: OpenOp
     message: () => visibleText(document.getElementById("checkout-message")),
     fieldError: (field) => visibleText(document.querySelector(`[data-error-for="${field}"]`)),
     countdown: () => visibleText(document.getElementById("countdown")),
+    wallet: (wallet) => ({
+      shown: () => walletShown(wallet),
+      click: () => clickWallet(wallet),
+      async pay() {
+        clickWallet(wallet);
+        await settle();
+      },
+    }),
+    async waitFor(condition, ms = 3_000) {
+      // performance, since the test's mock holds Date still.
+      const end = performance.now() + ms;
+      while (!condition()) {
+        if (performance.now() > end) return false;
+        await new Promise<void>((resolve) => nextTurn(resolve));
+      }
+      await settle();
+      return true;
+    },
     close,
   };
 

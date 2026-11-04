@@ -53,7 +53,10 @@ Replace the placeholders under `vars` in `wrangler.jsonc`. They are committed an
 | `GOOGLE_DRIVE_FOLDER_ID` | The photo folder's id. |
 | `APPS_SCRIPT_MAIL_URL` | The deployed mail web app's URL, from step 1. |
 | `STAFF_EMAIL` | The shop's staff address. |
-| `ENABLE_GOOGLE_PAY`, `ENABLE_APPLE_PAY` | `false` unless task #47 ran. |
+| `ENABLE_GOOGLE_PAY` | `true` offers Google Pay on the hold page, beside the card form. Leave it `false` until the sandbox check in [docs/local-dev.md](local-dev.md#google-pay-and-apple-pay) has passed. |
+| `ENABLE_APPLE_PAY` | `true` offers Apple Pay on the hold page, in Safari only. `false` until the [Apple Pay go-live check](#apple-pay-go-live-check) passes. |
+
+Only the exact string `true` turns a wallet on; anything else leaves it off. A wallet that cannot start in the guest's browser stays hidden, and the card form works as before.
 
 Run `npm run typegen` after the edit, and commit `wrangler.jsonc` and `worker-configuration.d.ts` together. Without credentials set, that push still skips.
 
@@ -83,6 +86,19 @@ gh secret set CLOUDFLARE_ACCOUNT_ID
 ```
 
 Run the first deploy by hand with `gh workflow run Deploy --ref main` and watch it with `gh run watch`.
+
+## Apple Pay go-live check
+
+For task #48, after the first deploy. Apple Pay on the web needs the domain registered with Square and served over HTTPS, so it cannot be checked locally or in the sandbox.
+
+1. The site answers on `https://<domain>` from the custom domain in step 1.
+2. In the Square Developer Console, open the production application, then Apple Pay, and add the domain. Square gives a domain association file to serve at `https://<domain>/.well-known/apple-developer-merchantid-domain-association`. Add it to the site, deploy, then choose Verify.
+3. Set `ENABLE_APPLE_PAY` to `"true"` in `wrangler.jsonc` and deploy.
+4. In Safari on an iPhone or Mac with a card in Wallet, make a hold and open its checkout page. Expect the Apple Pay button under the guest details. Fill in the details, click it, and expect the sheet's total to be the deposit in yen. Pay, and expect the page to reload as confirmed and the payment in the Square Dashboard.
+5. Refund that payment the way the shop refunds any booking, so Square and the site agree.
+6. In Chrome or Firefox, open a hold page: expect no Apple Pay button and a card form that works.
+
+Result: not run yet. Date: ____. Result: ____.
 
 ## Migrations stay additive
 
