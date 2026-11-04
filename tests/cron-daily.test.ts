@@ -25,6 +25,8 @@ import assert from "node:assert/strict";
 import { randomInt, randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { BOOKINGS_COLUMNS, SHEET_TABS } from "../src/lib/catalog/sheet-schema.ts";
+import { renderEmail } from "../src/lib/mail/templates.ts";
+import type { EmailPayload } from "../src/lib/outbox.ts";
 import type { SquareClient, SquareRecord, SquareTimeWindow } from "../src/lib/square/client.ts";
 import {
   at,
@@ -560,6 +562,166 @@ test("email only when issues exist, once per day", async () => {
     assert.deepEqual(outcome(await world.run(later)), { issues: 0, emailed: false });
     assert.equal((await reports(db)).length, 2);
     assertReport(sheet, later, [], [], "a clean run after issues");
+  });
+});
+
+// #128: a check that fails is itself something to tell staff. The report is the same reconcile_report under the same
+// daily key; what it says about the failed check is read from the email as renderEmail renders the queued payload, so
+// this file pins no payload field for it. The Square check is named when the email says Square; the Bookings sheet check
+// when it says Bookings, シート or タブ. Fixture issue texts are checked not to say these, so the name comes from the report.
+
+const SQUARE_NAMED = /Square|スクエア/;
+const SHEET_NAMED = /Bookings|シート|タブ/;
+
+type Check = "square" | "sheet";
+
+/** Square stops answering both listings until the returned function is called. */
+function failSquare(world: World): () => void {
+  const working = world.square.client;
+  const down = { kind: "error" as const, code: "SERVICE_UNAVAILABLE", detail: "the upstream timed out" };
+  world.square.client = { ...working, listPayments: async () => down, listRefunds: async () => down };
+  return () => {
+    world.square.client = working;
+  };
+}
+
+const ID_COLUMN = BOOKINGS_HEADER.indexOf("booking_id");
+
+/** Staff type over the Bookings tab's booking_id header, so the sheet check cannot read the tab, until restored. */
+function failSheet(world: World): () => void {
+  assert.ok(ID_COLUMN >= 0, "fixture: the Bookings tab has a booking_id column");
+  world.sheet.setCell("Bookings", 0, ID_COLUMN, "retired_column");
+  return () => world.sheet.setCell("Bookings", 0, ID_COLUMN, "booking_id");
+}
+
+function failCheck(world: World, check: Check): () => void {
+  return check === "square" ? failSquare(world) : failSheet(world);
+}
+
+/** The queued report as staff read it: its subject and plain text. */
+function reportText(row: OutboxRow): string {
+  const { subject, text } = renderEmail(JSON.parse(row.payload) as EmailPayload);
+  return `${subject}\n${text}`;
+}
+
+/** Paid bookings Square agrees with, all on the tab: nothing for either check to find. */
+async function cleanShop(world: World): Promise<BookingRow> {
+  const paid = await world.paid({ start: "2030-06-08 09:00", confirmed: "2030-05-24 10:00" });
+  const synced = await world.book({ start: "2030-06-12 09:00" });
+  world.lay([world.row(paid.booking), world.row(synced)]);
+  return synced;
+}
+
+test("a failed check is reported to staff even with no issues", async () => {
+  const cases: { name: string; fail: Check[]; named: RegExp[] }[] = [
+    { name: "the Square check", fail: ["square"], named: [SQUARE_NAMED] },
+    { name: "the Bookings sheet check", fail: ["sheet"], named: [SHEET_NAMED] },
+    { name: "both checks", fail: ["square", "sheet"], named: [SQUARE_NAMED, SHEET_NAMED] },
+  ];
+  const texts = new Map<string, string>();
+
+  for (const { name, fail, named } of cases) {
+    await withWorld(async (world) => {
+      const { db, staffEmail } = world;
+      await cleanShop(world);
+      const restores = fail.map((check) => failCheck(world, check));
+
+      // 03:00 JST: the failed check finds nothing, the other finds nothing either, and the run still rejects.
+      await assert.rejects(world.run(NOW), Error, `${name}: runDaily rejects, so cron_runs records the error`);
+      let queued = await reports(db);
+      assert.equal(queued.length, 1, `${name} failed: one report is queued though no issue was found`);
+      assertQueued(queued[0], { staffEmail, runAt: NOW, want: [] });
+      const text = reportText(queued[0]);
+      for (const pattern of named) assert.match(text, pattern, `${name} failed: the report names it\n${text}`);
+      texts.set(name, text);
+
+      // 22:00 JST the same day it fails again: the day's report is already queued.
+      await assert.rejects(world.run(at("2030-06-01 22:00")), Error, `${name}: the second run rejects too`);
+      queued = await reports(db);
+      assert.equal(queued.length, 1, `${name}: one report a JST day`);
+      assertQueued(queued[0], { staffEmail, runAt: NOW, want: [] });
+
+      // The next JST day both checks pass and nothing disagrees: nothing more is sent.
+      for (const restore of restores) restore();
+      assert.deepEqual(outcome(await world.run(NOW + DAY_MS)), { issues: 0, emailed: false }, `${name}: a clean run`);
+      assert.equal((await reports(db)).length, 1, `${name}: a clean run queues nothing`);
+
+      // The day after, it fails again: that day's report.
+      failCheck(world, fail[0]);
+      const third = NOW + 2 * DAY_MS;
+      await assert.rejects(world.run(third), Error, `${name}: a later failing run rejects`);
+      queued = await reports(db);
+      assert.equal(queued.length, 2, `${name}: a failure on another JST day is that day's report`);
+      assertQueued(queued[1], { staffEmail, runAt: third, want: [] });
+    });
+  }
+
+  assert.notEqual(
+    texts.get("the Square check"),
+    texts.get("the Bookings sheet check"),
+    "the report says which check failed: the two failures read differently",
+  );
+});
+
+test("the report names a failed check beside the other check's issues", async () => {
+  await withWorld(async (world) => {
+    const { db, staffEmail } = world;
+    const synced = await cleanShop(world);
+
+    // Square finds a Dashboard sale no booking holds; the sheet check finds a row D1 never had.
+    const strayAmount = randomInt(500, 20_000);
+    const stray = world.stray("2030-05-30 13:40", strayAmount);
+    const ghost = ghostOf();
+    world.lay([world.row({ ...synced, ...ghost })]);
+    const squareWant: WantRow[] = [{ type: "payment_without_booking", paymentId: stray.id, actualJpy: strayAmount }];
+    const sheetWant: WantRow[] = [{ type: "unknown_sheet_row", bookingRef: ghost.ref }];
+
+    /** The day's report: the other check's issues, listed, and the failed check named by the report itself. */
+    const assertNamed = (row: OutboxRow, runAt: number, want: WantRow[], named: RegExp, label: string): void => {
+      assertQueued(row, { staffEmail, runAt, want });
+      const { issues } = (JSON.parse(row.payload) as { data: { issues: Record<string, unknown>[] } }).data;
+      for (const listed of issues) {
+        const said = Object.values(listed).map(String).join(" ");
+        assert.doesNotMatch(said, named, `fixture: ${label}: the other check's issues do not name the failed one`);
+      }
+      const text = reportText(row);
+      for (const listed of want) {
+        for (const value of [listed.paymentId, listed.bookingRef]) {
+          if (value !== undefined) assert.ok(text.includes(value), `${label}: the report lists ${value}\n${text}`);
+        }
+      }
+      assert.match(text, named, `${label}: the report names the failed check\n${text}`);
+    };
+
+    // 03:00 JST: the Bookings sheet check fails, Square's issue is found. The run rejects and the report goes out.
+    const restoreSheet = failSheet(world);
+    await assert.rejects(world.run(NOW), Error, "runDaily rejects when the sheet check fails");
+    let queued = await reports(db);
+    assert.equal(queued.length, 1, "one report: Square's issue and the failed sheet check");
+    assertNamed(queued[0], NOW, squareWant, SHEET_NAMED, "the sheet check failed");
+
+    // 23:30 JST, the same JST day: the sheet reads again and Square fails. Still the one report of the day.
+    restoreSheet();
+    const restoreSquare = failSquare(world);
+    await assert.rejects(world.run(at("2030-06-01 23:30")), Error, "runDaily rejects when the Square check fails");
+    queued = await reports(db);
+    assert.equal(queued.length, 1, "one report a JST day, whichever check failed");
+    assertNamed(queued[0], NOW, squareWant, SHEET_NAMED, "the day's report keeps its place");
+
+    // 00:30 JST is the next JST day: the sheet's issue, and the failed Square check.
+    const pastMidnight = at("2030-06-02 00:30");
+    await assert.rejects(world.run(pastMidnight), Error, "runDaily rejects again");
+    queued = await reports(db);
+    assert.equal(queued.length, 2, "the next JST day's report");
+    assertNamed(queued[1], pastMidnight, sheetWant, SQUARE_NAMED, "the Square check failed");
+
+    // Both checks pass the day after: the issues alone, and the run resolves.
+    restoreSquare();
+    const later = at("2030-06-03 03:00");
+    assert.deepEqual(outcome(await world.run(later)), { issues: 2, emailed: true });
+    queued = await reports(db);
+    assert.equal(queued.length, 3);
+    assertQueued(queued[2], { staffEmail, runAt: later, want: [...squareWant, ...sheetWant] });
   });
 });
 

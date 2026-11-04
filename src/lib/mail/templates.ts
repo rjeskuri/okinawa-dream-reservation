@@ -49,7 +49,8 @@ type ReconcileIssue = {
   actualJpy?: number;
   detail: string;
 };
-type ReconcileReport = { runAt: number; issues: ReconcileIssue[] };
+/** `failedChecks`: the checks that did not run (#128), "square" or "sheet" (the Bookings tab); absent or [] when both ran. */
+type ReconcileReport = { runAt: number; issues: ReconcileIssue[]; failedChecks?: ("square" | "sheet")[] };
 
 /** The wording a refund status reads as, under `email.refund.` and `email.staff.refund.`. */
 export const REFUND_WORDING: Record<RefundStatus, string> = {
@@ -241,11 +242,17 @@ function issueBlock(say: Say, issue: ReconcileIssue): Block {
   ]);
 }
 
-function reconcileReport(say: Say, { runAt, issues }: ReconcileReport): Message {
+function reconcileReport(say: Say, { runAt, issues, failedChecks = [] }: ReconcileReport): Message {
   const values = { runAt: jst(runAt), count: String(issues.length) };
+  // A failed check leads the report and marks the subject, so staff do not read a partial report as a full one.
+  const subject = failedChecks.length > 0 ? "email.staff.reconcile.subjectPartial" : "email.staff.reconcile.subject";
   return {
-    subject: say("email.staff.reconcile.subject", values),
-    blocks: [paragraph(say("email.staff.reconcile.intro", values)), ...issues.map((issue) => issueBlock(say, issue))],
+    subject: say(subject, values),
+    blocks: [
+      ...failedChecks.map((check) => paragraph(say(`email.staff.reconcile.failed.${check}`))),
+      paragraph(say("email.staff.reconcile.intro", values)),
+      ...issues.map((issue) => issueBlock(say, issue)),
+    ],
   };
 }
 

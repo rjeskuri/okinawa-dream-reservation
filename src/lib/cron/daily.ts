@@ -1,8 +1,9 @@
 // The daily check (#44), which the 0 18 * * * cron runs at 03:00 JST: D1 against Square and against the Bookings tab, the
 // Reconciliation tab rewritten with what both found and with the outbox items that died, and one report a JST day to
-// staff when either check found an issue. A dead item goes on the tab but sends no report by itself: it stays dead, so it
-// would send one every day. A check that fails does not stop the other. The tab and the report carry what was found, the
-// run row says what failed, and the run then throws, so that cron_runs records the failure.
+// staff when either check found an issue or failed (#128). A dead item goes on the tab but sends no report by itself: it
+// stays dead, so it would send one every day. A check that fails does not stop the other. The tab and the report carry
+// what was found, the run row says what failed, the report names the failed check so staff do not read it as a full one,
+// and the run then throws, so that cron_runs records the failure.
 import { SHEET_TABS } from "../catalog/sheet-schema.ts";
 import type { SheetsClient } from "../google/sheets.ts";
 import { enqueueStatements } from "../outbox.ts";
@@ -109,6 +110,7 @@ export async function runDaily({ db, sheets, square, now, staffEmail }: DailyDep
     .bind(now - DEAD_DAYS * DAY_MS, DEAD_LIMIT)
     .all<DeadItem>();
   const issues = [...(squareCheck?.issues ?? []), ...(sheetCheck?.issues ?? [])];
+  const failedChecks = [...(squareCheck === null ? ["square"] : []), ...(sheetCheck === null ? ["sheet"] : [])];
 
   const deadTotal = dead[0]?.total ?? 0;
   const counts = [
@@ -124,14 +126,14 @@ export async function runDaily({ db, sheets, square, now, staffEmail }: DailyDep
   );
 
   let emailed = false;
-  if (issues.length > 0) {
+  if (issues.length > 0 || failedChecks.length > 0) {
     const [queue] = enqueueStatements(
       db,
       [
         {
           kind: "email",
           dedupeKey: `email:reconcile_report:${jstToday(now)}`,
-          payload: { template: "reconcile_report", to: staffEmail, locale: "ja", data: { runAt: now, issues } },
+          payload: { template: "reconcile_report", to: staffEmail, locale: "ja", data: { runAt: now, issues, failedChecks } },
         },
       ],
       now,
