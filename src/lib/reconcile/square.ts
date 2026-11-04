@@ -16,7 +16,10 @@ export type ReconcileIssueType =
   | "refund_not_recorded"
   | "refund_status_mismatch"
   | "refund_amount_mismatch"
-  | "retained_mismatch";
+  | "retained_mismatch"
+  // The Bookings tab's, from src/lib/reconcile/sheet.ts.
+  | "unknown_sheet_row"
+  | "pending_override";
 
 export type ReconcileIssue = {
   type: ReconcileIssueType;
