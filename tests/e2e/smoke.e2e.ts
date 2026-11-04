@@ -24,12 +24,14 @@ async function poll<T>(read: () => Promise<T | null | undefined>, timeoutMs = 20
   }
 }
 
-async function cronRun(scheduledAt: number) {
-  return poll(() =>
-    worker.db
-      .prepare("SELECT cron, scheduled_at, status, detail FROM cron_runs WHERE scheduled_at = ?1")
-      .bind(scheduledAt)
-      .first<{ cron: string; scheduled_at: number; status: string; detail: string | null }>(),
+async function cronRun(scheduledAt: number, timeoutMs?: number) {
+  return poll(
+    () =>
+      worker.db
+        .prepare("SELECT cron, scheduled_at, status, detail FROM cron_runs WHERE scheduled_at = ?1")
+        .bind(scheduledAt)
+        .first<{ cron: string; scheduled_at: number; status: string; detail: string | null }>(),
+    timeoutMs,
   );
 }
 
@@ -60,12 +62,15 @@ test("the ten-minute cron records a cron_runs row", async () => {
   assert.deepEqual(row, { cron: "*/10 * * * *", scheduled_at: scheduledAt, status: "ok", detail: null });
 });
 
+// Since #44 the daily cron runs the reconciliation, which needs Square and Google. Every outbound request fails here,
+// so the run is recorded as an error with its reason; tests/e2e/cron-daily.e2e.ts runs it with both faked.
 test("the daily cron records its own expression", async () => {
   const scheduledAt = 1_800_000_060_000;
   await worker.scheduled("0 18 * * *", scheduledAt);
-  const row = await cronRun(scheduledAt);
+  const row = await cronRun(scheduledAt, 15_000);
   assert.equal(row.cron, "0 18 * * *");
-  assert.equal(row.status, "ok");
+  assert.equal(row.status, "error", "a daily run that reaches neither Square nor Google failed");
+  assert.ok(row.detail !== null && row.detail.trim() !== "", "and says why");
 });
 
 test("an unregistered cron is recorded as unknown", async () => {
