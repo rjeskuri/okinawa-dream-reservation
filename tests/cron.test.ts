@@ -49,8 +49,24 @@ test("a job that throws records status error with its message, and later jobs st
   assert.deepEqual(ran, ["second"]);
 });
 
+// An expression of its own, with jobs that pass: the registered crons run real jobs (#42 put the ten-minute one under
+// */10), which need Square, Google and the mail web app, and this test is about the row a passing run leaves.
 test("a run with every job passing records status ok once", async () => {
-  await runCron("*/10 * * * *", 43, envWith(testDb.db));
+  const ran: string[] = [];
+  registry["2 2 2 2 2"] = [
+    async () => {
+      ran.push("first");
+    },
+    async () => {
+      ran.push("second");
+    },
+  ];
+  try {
+    await runCron("2 2 2 2 2", 43, envWith(testDb.db));
+  } finally {
+    delete registry["2 2 2 2 2"];
+  }
   const { results } = await runRow(43);
-  assert.deepEqual(results, [{ cron: "*/10 * * * *", status: "ok", detail: null }]);
+  assert.deepEqual(results, [{ cron: "2 2 2 2 2", status: "ok", detail: null }]);
+  assert.deepEqual(ran, ["first", "second"]);
 });
