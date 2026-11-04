@@ -14,7 +14,7 @@ const TAB = "Bookings";
 const NEEDED_COLUMNS = ["booking_id", "plate", "override_plate", "override_status"];
 
 /** A cell as text. An unticked checkbox counts as blank, as it does on every tab. */
-function textOf(value: unknown): string {
+export function textOf(value: unknown): string {
   const cell = readCell(value);
   return cell === false ? "" : String(cell);
 }
