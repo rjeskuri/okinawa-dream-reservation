@@ -6,8 +6,9 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { readBody } from "../../../lib/request-body.ts";
-import { handleSquareEvent } from "../../../lib/square/webhook-handler.ts";
+import { handleSquareEvent, type WebhookOutcome } from "../../../lib/square/webhook-handler.ts";
 import { verifySquareSignature } from "../../../lib/square/webhook-signature.ts";
+import { drainSoon } from "../../../server/outbox.ts";
 import { squareClient } from "../../../server/square.ts";
 
 const SIGNATURE_HEADER = "x-square-hmacsha256-signature";
@@ -21,7 +22,7 @@ function parseJson(text: string): unknown {
   }
 }
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   const body = await readBody(request);
   if (body === null) return new Response("The request is too large.", { status: 413 });
 
@@ -33,6 +34,7 @@ export const POST: APIRoute = async ({ request }) => {
   });
   if (!signed) return new Response("Unauthorized", { status: 401 });
 
+  let outcome: WebhookOutcome;
   try {
     const deps = {
       db: env.DB,
@@ -42,11 +44,14 @@ export const POST: APIRoute = async ({ request }) => {
       cancelSecret: env.CANCEL_LINK_SECRET,
       staffEmail: env.STAFF_EMAIL,
     };
-    await handleSquareEvent(deps, parseJson(body));
+    outcome = await handleSquareEvent(deps, parseJson(body));
   } catch (error) {
     console.error("A Square event was not handled, and Square will send it again", error);
     return new Response("The event was not handled.", { status: 500 });
   }
+  // Only a handled event can have queued anything; a duplicate or an ignored one wrote nothing. What it queued goes out
+  // after Square has its answer.
+  if (outcome === "processed") drainSoon(locals.cfContext, env);
   return new Response("OK");
 };
 

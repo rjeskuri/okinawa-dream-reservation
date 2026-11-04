@@ -78,6 +78,12 @@ async function publish(db: D1Database, names: Record<Locale, string>, priceJpy: 
 before(async () => {
   worker = await startWorker({
     outbound: async (request) => {
+      // A confirm drains the outbox after it commits (#42). The mail web app and Google are down in this file, so the items
+      // stay for deliver(), and `sent` holds only what the Worker asked of Square.
+      if (new URL(request.url).origin !== SQUARE_HOST) {
+        await request.body?.cancel();
+        return new Response("the mail web app and Google are down in this file", { status: 503 });
+      }
       const text = await request.text();
       const call: Sent = {
         url: new URL(request.url),
@@ -239,8 +245,10 @@ async function deliver(): Promise<{ emails: EmailPayload[]; sheets: string[] }> 
   return { emails, sheets };
 }
 
+/** Items queued and not delivered. The drain after a confirm (#42) may hold them as 'sending' when this reads. */
 async function waitingItems(): Promise<number> {
-  const row = await worker.db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE status = 'pending'").first<{ n: number }>();
+  const sql = "SELECT COUNT(*) AS n FROM outbox WHERE status IN ('pending', 'sending')";
+  const row = await worker.db.prepare(sql).first<{ n: number }>();
   return row?.n ?? -1;
 }
 
@@ -461,7 +469,8 @@ test("a confirmed booking's items wait in the outbox, built from the Worker's ow
 
     assert.equal((await post(hold.id, payBody(guest, locale))).status, 200);
 
-    // Immediate sending comes with #42, so until then Square is the only thing a confirm talks to.
+    // Square is charged once. The mail web app is down in this file, so whatever the drain after the confirm tried, the
+    // items wait for deliver().
     assert.deepEqual(paths(), [PAYMENTS]);
     const { emails, sheets } = await deliver();
     assert.deepEqual(sheets, [hold.id]);

@@ -7,6 +7,7 @@ import { env } from "cloudflare:workers";
 import { confirmHold, type ConfirmReason } from "../../../../lib/booking/confirm.ts";
 import type { Guest } from "../../../../lib/checkout.ts";
 import { isLocale } from "../../../../lib/locale.ts";
+import { drainSoon } from "../../../../server/outbox.ts";
 import { squareClient } from "../../../../server/square.ts";
 
 /** Far past a guest's details and a nonce, and far short of what D1 stores in one value. */
@@ -49,7 +50,7 @@ function refuse(status: number, reason: string): Response {
   return Response.json({ ok: false, reason }, { status });
 }
 
-export const POST: APIRoute = async ({ params, request }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   const text = await readBody(request);
   if (text === null) return refuse(413, "TOO_LARGE");
   const body = parseJson(text);
@@ -67,7 +68,11 @@ export const POST: APIRoute = async ({ params, request }) => {
   };
   // confirmHold checks the guest itself and answers INVALID_GUEST, naming each field that fails.
   const result = await confirmHold(deps, params.id ?? "", { sourceId, guest: guest as Guest, locale });
-  if (result.ok) return Response.json({ ok: true });
+  if (result.ok) {
+    // The confirmation's emails and Bookings row, committed with the booking, go out after this answer.
+    drainSoon(locals.cfContext, env);
+    return Response.json({ ok: true });
+  }
 
   const { reason, fields } = result;
   const answer = fields === undefined ? { ok: false, reason } : { ok: false, reason, fields };

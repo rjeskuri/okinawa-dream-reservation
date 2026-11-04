@@ -58,7 +58,7 @@ async function syncTab(cursor: string | null, now: number): Promise<Answer> {
   const catalog = await readCatalogKeys(env.DB);
   if (catalog === null) return stopped(["no catalog has been published, so the tab cannot be checked"]);
 
-  const { sheets } = createGoogleClients();
+  const { sheets } = createGoogleClients(env);
   const workbook = await sheets.batchGet([TAB]);
   const validated = validateBlocks(workbook, catalog, now);
   if (validated.fatal.length > 0) return stopped(validated.fatal);

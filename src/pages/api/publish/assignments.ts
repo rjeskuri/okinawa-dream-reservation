@@ -23,5 +23,5 @@ export const POST: APIRoute = async ({ request }) => {
   }
   if (!authorized) return Response.json({ error: "unauthorized" }, { status: 401 });
 
-  return Response.json(await syncAssignments({ db: env.DB, sheets: createGoogleClients().sheets, now }));
+  return Response.json(await syncAssignments({ db: env.DB, sheets: createGoogleClients(env).sheets, now }));
 };
