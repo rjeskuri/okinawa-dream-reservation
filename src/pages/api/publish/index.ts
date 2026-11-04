@@ -34,7 +34,7 @@ export const POST: APIRoute = async ({ request }) => {
   if (!authorized) return new Response("Unauthorized", { status: 401 });
 
   try {
-    return Response.json(await publishCatalog({ db: env.DB, sheets: createGoogleClients().sheets, now }));
+    return Response.json(await publishCatalog({ db: env.DB, sheets: createGoogleClients(env).sheets, now }));
   } catch (error) {
     console.error(error);
     // Every step that writes is marked, so an unmarked error stopped before the commit.

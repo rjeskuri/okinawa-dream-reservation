@@ -34,7 +34,9 @@ npm run dev
 - `.dev.vars` holds the secrets declared in `src/env.d.ts`. It is gitignored and never committed. The placeholders in the
   example are enough for `npm run dev` and the tests; real values are needed only for the live checks.
 - The non-secret vars (`SITE_URL`, `SQUARE_ENV`, `SQUARE_WEBHOOK_URL`, ...) come from `wrangler.jsonc`. To override one
-  locally, add `NAME=value` to `.dev.vars` and restart the server; a value there wins over `wrangler.jsonc`.
+  locally, add `NAME=value` to `.dev.vars` and restart the server; a value there wins over `wrangler.jsonc`. The
+  [demo site](#demo-site) sets `SITE_URL` and `SQUARE_WEBHOOK_URL` on its own command line, so values for those two in
+  `.dev.vars` reach `npm run dev` only.
 - The local D1 database is one SQLite file under `.wrangler/state/v3/d1/`. `npm run dev`, `npx wrangler d1 execute DB --local`
   and `npx wrangler dev` all use it, so what you seed or migrate is what the site sees. Delete `.wrangler/state` to start over.
 - Check it is up: `curl http://localhost:4321/api/health` answers `{"ok":true,"db":true}`.
@@ -55,6 +57,10 @@ the site, applies the migrations, loads `seed/demo.sql`, puts the photos in the 
 http://localhost:8787 until you press Ctrl-C. Run it again whenever you like: nothing fails or doubles, and bookings you
 made stay. An existing `.dev.vars` is left alone.
 
+- The demo's links point at the demo. It starts `wrangler dev` with `--var` for `SITE_URL` (http://localhost:8787) and
+  `SQUARE_WEBHOOK_URL` (http://localhost:8787/api/webhooks/square), which win over `wrangler.jsonc` and `.dev.vars`, so
+  the cancel link in its emails opens http://localhost:8787 too. `wrangler.jsonc` keeps http://localhost:4321 for
+  `npm run dev`.
 - `seed/demo.sql` is transcribed from the shop's site. Its header lists what is a placeholder, including every deposit,
   refund tier, plate and closed date. Models and vehicles it does not name, such as those of `seed/local.sql`, end up
   inactive and retired.
@@ -105,11 +111,10 @@ node scripts/demo-mail.ts
 
 It reads the `email` items of the local D1 outbox (`npx wrangler d1 execute DB --local`), whatever their status, and writes
 `.demo-mail/<outbox id>.html` and `.txt` for each. Open the HTML in a browser; the cancel link in a guest confirmation
-points at `SITE_URL`, which `wrangler.jsonc` sets to http://localhost:4321 (`astro dev`), while the demo serves on 8787. To
-reach the right server, run `npm run dev` too (it reads the same local D1), or add `SITE_URL=http://localhost:8787` to
-`.dev.vars` and restart the demo before you book. The cancel page itself arrives with #105: until it is merged the link is
-correct (origin, path, booking id and a valid token) but opens a 404. Rerunning overwrites the files. Set `DEMO_MAIL_DIR` to
-write elsewhere.
+points at the `SITE_URL` of the server that confirmed the booking: http://localhost:8787 for a booking made on the demo,
+http://localhost:4321 for one made on `npm run dev`. The link is written when the booking is confirmed, so an email queued
+before the demo set `SITE_URL` keeps the old origin; book again for a fresh one. Rerunning overwrites the files. Set
+`DEMO_MAIL_DIR` to write elsewhere.
 `.demo-mail/` is gitignored because it holds test guest data.
 
 ## Crons locally

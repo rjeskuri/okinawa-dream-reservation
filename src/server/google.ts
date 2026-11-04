@@ -1,11 +1,14 @@
 // The Google auth, Sheets and Drive clients, built from `env`, with the access token shared across requests through D1.
-import { env } from "cloudflare:workers";
+// `env` is an argument because `scheduled()` hands the cron jobs theirs, so the routes and the jobs can share this one
+// factory, and the cron entry stays importable in Node.
 import { createGoogleAuth, type TokenCache } from "../lib/google/auth.ts";
 import { createDriveClient } from "../lib/google/drive.ts";
 import { createSheetsClient } from "../lib/google/sheets.ts";
 
 // The Sheets client needs the first, the Drive photo copy of task #17 the second, and both use the one token.
 const SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.readonly"];
+
+type GoogleVars = Pick<Env, "DB" | "GOOGLE_SA_EMAIL" | "GOOGLE_SA_PRIVATE_KEY" | "GOOGLE_SHEET_ID">;
 
 function d1TokenCache(db: D1Database): TokenCache {
   return {
@@ -32,7 +35,7 @@ function d1TokenCache(db: D1Database): TokenCache {
  * Builds the clients for one request or cron run. They are not kept at module level: a token request in flight belongs
  * to the request that started it in workerd, and a shared one would hang any other request if that one were cancelled.
  */
-export function createGoogleClients() {
+export function createGoogleClients(env: GoogleVars) {
   const auth = createGoogleAuth({
     clientEmail: env.GOOGLE_SA_EMAIL,
     privateKeyPem: env.GOOGLE_SA_PRIVATE_KEY,

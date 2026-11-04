@@ -115,6 +115,8 @@ export const email: Dictionary = {
   "email.staff.alert.intro": japanese("確認が必要な問題があります。"),
   "email.staff.alert.refund.title": japanese("キャンセルの返金が拒否されました"),
   "email.staff.alert.refund.action": japanese("予約はキャンセル済みです。Square を確認し、お客様にご連絡ください。"),
+  "email.staff.alert.outbox.title": japanese("メールまたはシート更新を送れませんでした"),
+  "email.staff.alert.outbox.action": japanese("これらは自動では再送されません。内容を確認し、必要ならお客様やシートに直接対応してください。"),
   "email.staff.reconcile.subject": japanese("【照合レポート】{runAt} {count}件"),
   "email.staff.reconcile.intro": japanese("{runAt} の照合で {count} 件の問題が見つかりました。"),
 };

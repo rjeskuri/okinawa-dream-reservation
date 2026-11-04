@@ -82,7 +82,17 @@ function refundAs(status: string): (body: RefundBody) => Response {
 
 let answerRefund = refundAs("PENDING");
 
+/** The mail web app and Google, which the drain after a cancel (#42) calls. They are down in this file, and no strays. */
+function isDelivery(request: Request): boolean {
+  const url = new URL(request.url);
+  return `${url.origin}${url.pathname}` === testVars.APPS_SCRIPT_MAIL_URL || url.hostname.endsWith(".googleapis.com");
+}
+
 async function fakeSquare(request: Request): Promise<Response> {
+  if (isDelivery(request)) {
+    await request.body?.cancel();
+    return new Response("the mail web app and Google are down in this file", { status: 503 });
+  }
   if (request.method !== "POST" || request.url !== REFUNDS_URL) {
     strayRequests.push(`${request.method} ${request.url}`);
     return new Response(`no fake for ${request.url}`, { status: 502 });

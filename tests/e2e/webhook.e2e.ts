@@ -94,6 +94,12 @@ function refundReply(call: Sent): Response {
 before(async () => {
   worker = await startWorker({
     outbound: async (request) => {
+      // A handled event drains the outbox after it commits (#42). The mail web app and Google are down in this file, so the
+      // items stay for deliver(), and `sent` holds only what the Worker asked of Square.
+      if (new URL(request.url).origin !== SQUARE_HOST) {
+        await request.body?.cancel();
+        return new Response("the mail web app and Google are down in this file", { status: 503 });
+      }
       const text = await request.text();
       const call: Sent = {
         url: new URL(request.url),
@@ -213,8 +219,10 @@ async function snapshot(withEvents = true): Promise<unknown[]> {
   return withEvents ? [...tables, await rows("SELECT * FROM webhook_events ORDER BY event_id")] : tables;
 }
 
+/** Items queued and not delivered. The drain after an event (#42) may hold them as 'sending' when this reads. */
 async function waitingItems(): Promise<number> {
-  const row = await worker.db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE status = 'pending'").first<{ n: number }>();
+  const sql = "SELECT COUNT(*) AS n FROM outbox WHERE status IN ('pending', 'sending')";
+  const row = await worker.db.prepare(sql).first<{ n: number }>();
   return row?.n ?? -1;
 }
 
