@@ -632,13 +632,13 @@ test("a run stays within its subrequest and query budgets", async () => {
   await withWorld(async (world) => {
     const { db, sheet, plates, modelId } = world;
 
-    // 140 bookings in the window and 300 that ended long before it: too many for a statement per booking, a bound
+    // 250 bookings in the window and 300 that ended long before it: too many for a statement per booking, a bound
     // parameter per id, or a Sheets call per row. The window's web bookings confirmed in the last 30 days are paid in
     // Square, three of them for another amount.
     const recentRows: SeedRow[] = [];
     const charged = new Map<string, number>();
     let inScope = 0;
-    for (let i = 0; i < 140; i += 1) {
+    for (let i = 0; i < 250; i += 1) {
       const start = at("2030-05-05 09:00") + i * 18 * HOUR_MS;
       const cancelled = i % 7 === 3;
       const web = i % 5 !== 4;
@@ -700,7 +700,7 @@ test("a run stays within its subrequest and query budgets", async () => {
       });
     }
     const stored = await seedMany(db, [...recentRows, ...oldRows]);
-    assert.equal(stored.size, 440, "fixture: every booking stored");
+    assert.equal(stored.size, 550, "fixture: every booking stored");
     const recent = recentRows.map((row) => stored.get(row.id as string) as BookingRow);
     const old = oldRows.map((row) => stored.get(row.id as string) as BookingRow);
 
@@ -725,13 +725,16 @@ test("a run stays within its subrequest and query budgets", async () => {
       refunds.set(b.id, [await seedRefund(db, b.id, { amount: Math.floor(b.paid_jpy / 2), status: "COMPLETED", at: b.updated_at })]);
     }
 
-    // The tab: by i % 10, 70 rows in sync, 42 stale and 28 missing; six rows D1 never had; four overrides waiting on
-    // bookings that have not started; and every old booking's row. Of the stale rows only a third have an older
-    // updated_at cell: the rest differ in paid_jpy alone, or in a plate staff typed over.
+    // The tab: by i % 10, 125 rows in sync, 75 stale and 50 missing, so a Sheets call per missing row, or per stale row,
+    // is over the subrequest budget by itself; eleven rows D1 never had; four overrides waiting on bookings that have
+    // not started; and every old booking's row. Of the stale rows only a third have an older updated_at cell: the rest
+    // differ in paid_jpy alone, or in a plate staff typed over.
     const overrideAt = new Set([41, 61, 81, 121]);
     const laid: unknown[][] = [];
     const ghosts: string[] = [];
     const pending: string[] = [];
+    let missing = 0;
+    let stale = 0;
     let keptStamp = 0;
     for (const [i, b] of recent.entries()) {
       if (i % 24 === 0) {
@@ -740,12 +743,17 @@ test("a run stays within its subrequest and query budgets", async () => {
         laid.push(world.row({ ...b, ...ghost }));
       }
       const kind = i % 10;
-      if (kind >= 8) continue;
+      if (kind >= 8) {
+        missing += 1;
+        continue;
+      }
       if (kind === 5) {
+        stale += 1;
         laid.push(world.row({ ...b, status: "CONFIRMED", paid_jpy: b.paid_jpy + 1, updated_at: b.updated_at - DAY_MS }));
         continue;
       }
       if (kind >= 6) {
+        stale += 1;
         const drift = kind === 6 ? { paid_jpy: b.paid_jpy + 1 } : { vehicle_plate: plates[(i + 3) % plates.length] };
         const row = world.row({ ...b, ...drift }, {}, refunds.get(b.id));
         assert.equal(named(BOOKINGS_HEADER, row).updated_at, wall(b.updated_at), "fixture: the updated_at cell is D1's");
@@ -763,8 +771,14 @@ test("a run stays within its subrequest and query budgets", async () => {
     for (const b of old) laid.push(world.row(b));
     world.lay(laid);
     assert.equal(pending.length, 4, "fixture: four pending overrides");
-    assert.equal(ghosts.length, 6, "fixture: six unknown rows");
-    assert.equal(keptStamp, 28, "fixture: 28 stale rows keep D1's updated_at cell");
+    assert.equal(ghosts.length, 11, "fixture: eleven unknown rows");
+    assert.equal(keptStamp, 50, "fixture: 50 stale rows keep D1's updated_at cell");
+    assert.equal(missing, 50, "fixture: 50 missing bookings");
+    assert.equal(stale, 75, "fixture: 75 stale rows");
+    assert.ok(
+      Math.min(missing, stale) + SUBREQUESTS_OUTSIDE >= SUBREQUEST_LIMIT,
+      "fixture: a Sheets call per missing row, or per stale row, is over the subrequest budget by itself",
+    );
 
     const deadKeys = [0, 1, 2].map((n) => `email:guest_confirmation:dead-${n}-${randomUUID()}`);
     for (const [n, key] of deadKeys.entries()) await world.outbox("email", key, NOW - (n + 1) * DAY_MS);
@@ -807,7 +821,7 @@ test("a run stays within its subrequest and query budgets", async () => {
     // And the run did all its work within them.
     assertReport(sheet, NOW, want, deadKeys, "the big run's report");
     const grid = sheet.grid("Bookings");
-    assert.equal(grid.length, tabBefore.length + 28, "the 28 missing bookings appended");
+    assert.equal(grid.length, tabBefore.length + missing, `the ${missing} missing bookings appended`);
     for (const b of recent) {
       const found = rowsOf(sheet, b.id);
       assert.equal(found.length, 1, `${b.ref} is on the tab once`);
