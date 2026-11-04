@@ -65,7 +65,7 @@ type PaymentRow = {
 };
 
 /** Statuses of a payment that took no money. */
-const NOTHING_TAKEN = new Set(["FAILED", "CANCELED"]);
+export const NOTHING_TAKEN: ReadonlySet<string> = new Set(["FAILED", "CANCELED"]);
 
 /** Fixed, because Square compares the whole request under one key, and a mismatch and a lost payment share theirs. */
 const SEND_BACK_REASON = "Payment returned: it did not confirm a booking";
@@ -116,7 +116,8 @@ function answerFor(booking: Booking | null, now: number): ConfirmResult {
   return refuse("HOLD_EXPIRED");
 }
 
-function matchesDeposit(payment: DepositPayment, depositJpy: number | null): boolean {
+/** What markConfirmed takes as the deposit paid: the booking's deposit to the yen, in JPY. */
+export function matchesDeposit(payment: DepositPayment, depositJpy: number | null): boolean {
   return payment.amountJpy === depositJpy && payment.currency === "JPY";
 }
 
