@@ -30,13 +30,13 @@ Staff publish these from the Google Sheet, and one publish replaces them togethe
 | Table | Holds |
 | --- | --- |
 | `catalog_meta` | One row: the published version, when, and whether it came from `sheet` or `admin`. |
-| `vehicle_types` | `scooter`, `motorcycle` or `car`, each with its deposit. |
-| `rate_classes` | The rows of the shop's fee schedule, for example 125cc or K-Car, in group `bike` or `car`. |
-| `models` | What a guest books: type, rate class, engine, license class and photos. A model carries no prices. |
+| `vehicle_types` | `scooter`, `motorcycle`, `car` or `ebike`, each with its deposit. |
+| `rate_classes` | The rows of the shop's fee schedule, for example 125cc or K-Car, in group `bike`, `car` or `ebike`. |
+| `models` | What a guest books: type, rate class, engine, license class and photos. A model carries no prices. An e-bike has no engine and needs no license: `engine_cc` may be NULL and `license_class` may be `none` only on type `ebike`, and table CHECKs refuse either on any other type. |
 | `packages` | A rental length: exactly one of `days` (1 to 60) or `hours` (1 to 72). |
 | `prices` | The price of one package in one rate class. A model inherits its class's prices. |
-| `options` | Priced extras shown on the fee schedule. Choosing them while booking is out of scope. |
-| `vehicles` | One bike or car, by plate, with status `active`, `maintenance` or `retired`. |
+| `options` | Priced extras shown on the fee schedule, in group `bike`, `car` or `ebike`. Choosing them while booking is out of scope. |
+| `vehicles` | One bike, car or e-bike, by plate, with status `active`, `maintenance` or `retired`. |
 | `config` | The shop settings as text, read through `readShopConfig`. |
 | `cancellation_tiers` | The refund percent from a number of days before pickup. |
 | `closed_dates` | Dates the shop is closed, as YYYY-MM-DD. |

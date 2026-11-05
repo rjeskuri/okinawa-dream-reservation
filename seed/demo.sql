@@ -4,8 +4,13 @@
 --   every bike and car tile, the 9 bike classes and 3 car classes, the 4-hour, same-day and 24-hour bike prices, hourly
 --   extensions, the 1 to 7 day car prices, the options table, seats per car class, and shop hours 09:00 to 17:00.
 --   Prices include tax. A tile drawn twice in two colours is one model with two vehicles.
+-- The e-bike rows (#130) come from the shop's e-bike flyer of 2026-11-04, which is not committed: the regular 1, 2 and 3 day
+--   prices, the 4-hour and 24-hour prices on the bikes' hours packages, and the ¥500 helmet. Its 2-hour price waits for an
+--   hours package of that length (#50), and its advance-booking price is a later ticket. The 1 day price sits on
+--   bike-same-day and the 2 and 3 day prices on car-2d and car-3d, so the e-bike table reads in the flyer's order.
 --
 -- PLACEHOLDERS, which the site does not state and which the shop replaces:
+--   the e-bike's deposit (0 until the shop says otherwise), its brand (TBC), its two vehicles and its photo.
 --   deposit_jpy on every type, engine_cc on every car, the brand of the Nightster Special and Street Bob117 (their tiles
 --   show unfilled template text), every plate, model summary wording and description, every config value other than
 --   shop_open and shop_close, every refund tier, and every closed date (the site says it is open all year).
@@ -29,10 +34,11 @@ UPDATE vehicles SET status = 'retired';
 INSERT INTO vehicle_types (id, deposit_jpy, sort, texts) VALUES
   ('scooter', 1000, 1, '{"ja":{"name":"スクーター"},"en":{"name":"Scooter"},"zh-cn":{"name":"踏板车"},"ko":{"name":"스쿠터"}}'),
   ('motorcycle', 1000, 2, '{"ja":{"name":"バイク"},"en":{"name":"Motorcycle"},"zh-cn":{"name":"摩托车"},"ko":{"name":"오토바이"}}'),
-  ('car', 1000, 3, '{"ja":{"name":"レンタカー"},"en":{"name":"Car"},"zh-cn":{"name":"汽车"},"ko":{"name":"자동차"}}')
+  ('car', 1000, 3, '{"ja":{"name":"レンタカー"},"en":{"name":"Car"},"zh-cn":{"name":"汽车"},"ko":{"name":"자동차"}}'),
+  ('ebike', 0, 4, '{"ja":{"name":"電動アシスト自転車"},"en":{"name":"E-bike"},"zh-cn":{"name":"电动助力自行车"},"ko":{"name":"전기자전거"}}')
 ON CONFLICT (id) DO UPDATE SET deposit_jpy = excluded.deposit_jpy, sort = excluded.sort, texts = excluded.texts;
 
--- PLACEHOLDER: the car classes' NULL extension. The site states none.
+-- PLACEHOLDER: the car and e-bike classes' NULL extension. Neither the site nor the flyer states one.
 INSERT INTO rate_classes (id, grp, sort, extension_per_hour_jpy, texts) VALUES
   ('r-50cc', 'bike', 1, 1000, '{"ja":{"name":"50cc原付"},"en":{"name":"50cc moped"},"zh-cn":{"name":"50cc轻便摩托车"},"ko":{"name":"50cc 원동기"}}'),
   ('r-110cc', 'bike', 2, 1000, '{"ja":{"name":"110cc"},"en":{"name":"110cc"},"zh-cn":{"name":"110cc"},"ko":{"name":"110cc"}}'),
@@ -45,12 +51,14 @@ INSERT INTO rate_classes (id, grp, sort, extension_per_hour_jpy, texts) VALUES
   ('r-over-1000cc', 'bike', 9, 4000, '{"ja":{"name":"1000cc以上"},"en":{"name":"1000cc and over"},"zh-cn":{"name":"1000cc以上"},"ko":{"name":"1000cc 이상"}}'),
   ('r-k-car', 'car', 10, NULL, '{"ja":{"name":"K-Car"},"en":{"name":"K-Car"},"zh-cn":{"name":"K-Car（轻型车）"},"ko":{"name":"K-Car (경차)"}}'),
   ('r-standard', 'car', 11, NULL, '{"ja":{"name":"Standard"},"en":{"name":"Standard"},"zh-cn":{"name":"Standard（标准型）"},"ko":{"name":"Standard (일반형)"}}'),
-  ('r-van', 'car', 12, NULL, '{"ja":{"name":"Van"},"en":{"name":"Van"},"zh-cn":{"name":"Van（厢式车）"},"ko":{"name":"Van (밴)"}}')
+  ('r-van', 'car', 12, NULL, '{"ja":{"name":"Van"},"en":{"name":"Van"},"zh-cn":{"name":"Van（厢式车）"},"ko":{"name":"Van (밴)"}}'),
+  ('ebike', 'ebike', 13, NULL, '{"ja":{"name":"電動アシスト自転車"},"en":{"name":"E-bike"},"zh-cn":{"name":"电动助力自行车"},"ko":{"name":"전기자전거"}}')
 ON CONFLICT (id) DO UPDATE SET grp = excluded.grp, sort = excluded.sort,
   extension_per_hour_jpy = excluded.extension_per_hour_jpy, texts = excluded.texts;
 
 -- engine_cc and the rate class are the figures on each tile. PLACEHOLDER: engine_cc of the cars, and the Placeholder
--- brand rows. The FORZA250 tile really does say 160cc. The license class is the sheet default for the engine.
+-- brand rows. The FORZA250 tile really does say 160cc. The license class is the sheet default for the engine. The e-bike
+-- has no engine, so its engine_cc is NULL and its license class none.
 INSERT INTO models (id, type_id, engine_cc, license_class, sort, active, rate_class_id, brand, seats, texts, photos) VALUES
   ('yamaha-vino', 'scooter', 50, 'moped', 1, 1, 'r-50cc', 'Yamaha', NULL,
     '{"ja":{"name":"VINO","summary":"50ccのスクーター","description":"デモ用の仮の説明文です。お色や仕様が異なる場合がございます。"},"en":{"name":"VINO","summary":"50cc scooter","description":"Placeholder description for the demo. Colour and specification may differ."},"zh-cn":{"name":"VINO","summary":"50cc踏板车","description":"演示用的占位说明。颜色和规格可能有所不同。"},"ko":{"name":"VINO","summary":"50cc 스쿠터","description":"데모용 임시 설명입니다. 색상과 사양은 다를 수 있습니다."}}',
@@ -144,7 +152,10 @@ INSERT INTO models (id, type_id, engine_cc, license_class, sort, active, rate_cl
     '["mazda-cx-5.jpg"]'),
   ('nissan-serena', 'car', 1000, 'car', 31, 1, 'r-van', 'Nissan', 8,
     '{"ja":{"name":"Serena","summary":"Van、最大8名","description":"デモ用の仮の説明文です。お色や仕様が異なる場合がございます。"},"en":{"name":"Serena","summary":"Van, up to 8 people","description":"Placeholder description for the demo. Colour and specification may differ."},"zh-cn":{"name":"Serena","summary":"Van，最多8人","description":"演示用的占位说明。颜色和规格可能有所不同。"},"ko":{"name":"Serena","summary":"Van, 최대 8명","description":"데모용 임시 설명입니다. 색상과 사양은 다를 수 있습니다."}}',
-    '["nissan-serena.jpg"]')
+    '["nissan-serena.jpg"]'),
+  ('ebike-assist', 'ebike', NULL, 'none', 32, 1, 'ebike', 'TBC', NULL,
+    '{"ja":{"name":"E-bike Assist","summary":"電動アシスト自転車、免許不要","description":"デモ用の仮の説明文です。お色や仕様が異なる場合がございます。"},"en":{"name":"E-bike Assist","summary":"Electric-assist bicycle, no license needed","description":"Placeholder description for the demo. Colour and specification may differ."},"zh-cn":{"name":"E-bike Assist","summary":"电动助力自行车，无需驾照","description":"演示用的占位说明。颜色和规格可能有所不同。"},"ko":{"name":"E-bike Assist","summary":"전기자전거, 면허 불필요","description":"데모용 임시 설명입니다. 색상과 사양은 다를 수 있습니다."}}',
+    '["ebike-assist.jpg"]')
 ON CONFLICT (id) DO UPDATE SET type_id = excluded.type_id, engine_cc = excluded.engine_cc,
   license_class = excluded.license_class, sort = excluded.sort, active = excluded.active,
   rate_class_id = excluded.rate_class_id, brand = excluded.brand, seats = excluded.seats, texts = excluded.texts,
@@ -186,7 +197,9 @@ INSERT INTO vehicles (plate, model_id, status, odometer_km, base_usage_days) VAL
   ('DEMO-032', 'daihatsu-tanto', 'active', NULL, 0),
   ('DEMO-033', 'toyota-roomy', 'active', NULL, 0),
   ('DEMO-034', 'mazda-cx-5', 'active', NULL, 0),
-  ('DEMO-035', 'nissan-serena', 'active', NULL, 0)
+  ('DEMO-035', 'nissan-serena', 'active', NULL, 0),
+  ('DEMO-036', 'ebike-assist', 'active', NULL, 0),
+  ('DEMO-037', 'ebike-assist', 'active', NULL, 0)
 ON CONFLICT (plate) DO UPDATE SET model_id = excluded.model_id, status = excluded.status,
   odometer_km = excluded.odometer_km, base_usage_days = excluded.base_usage_days;
 
@@ -251,7 +264,12 @@ INSERT INTO prices (rate_class_id, package_id, price_jpy) VALUES
   ('r-van', 'car-4d', 36000),
   ('r-van', 'car-5d', 45000),
   ('r-van', 'car-6d', 54000),
-  ('r-van', 'car-7d', 63000);
+  ('r-van', 'car-7d', 63000),
+  ('ebike', 'bike-4h', 3500),
+  ('ebike', 'bike-same-day', 4500),
+  ('ebike', 'bike-24h', 5000),
+  ('ebike', 'car-2d', 8000),
+  ('ebike', 'car-3d', 10000);
 
 -- base_jpy is the first 24 hours. A free option has no extra charges on the site.
 INSERT INTO options (id, grp, sort, base_jpy, extra_per_hour_jpy, extra_per_24h_jpy, texts) VALUES
@@ -263,7 +281,8 @@ INSERT INTO options (id, grp, sort, base_jpy, extra_per_hour_jpy, extra_per_24h_
   ('opt-rainwear', 'bike', 6, 1000, 200, 500, '{"ja":{"name":"レインウエア"},"en":{"name":"Rainwear"},"zh-cn":{"name":"雨衣"},"ko":{"name":"우비"}}'),
   ('opt-bike-lock', 'bike', 7, 300, 100, 200, '{"ja":{"name":"車体ロック"},"en":{"name":"Bike lock"},"zh-cn":{"name":"车锁"},"ko":{"name":"바이크 잠금장치"}}'),
   ('opt-rubber-band', 'bike', 8, 200, 100, 200, '{"ja":{"name":"ゴムバンド"},"en":{"name":"Rubber band"},"zh-cn":{"name":"橡皮绑带"},"ko":{"name":"고무 밴드"}}'),
-  ('opt-luggage-storage', 'bike', 9, 0, NULL, NULL, '{"ja":{"name":"荷物預かり"},"en":{"name":"Luggage storage"},"zh-cn":{"name":"行李寄存"},"ko":{"name":"짐 보관"}}');
+  ('opt-luggage-storage', 'bike', 9, 0, NULL, NULL, '{"ja":{"name":"荷物預かり"},"en":{"name":"Luggage storage"},"zh-cn":{"name":"行李寄存"},"ko":{"name":"짐 보관"}}'),
+  ('opt-ebike-helmet', 'ebike', 10, 500, NULL, NULL, '{"ja":{"name":"自転車用ヘルメット"},"en":{"name":"Bicycle helmet"},"zh-cn":{"name":"自行车头盔"},"ko":{"name":"자전거 헬멧"}}');
 
 -- shop_open and shop_close are the site's shop hours. PLACEHOLDER: the rest.
 INSERT INTO config (key, value) VALUES
@@ -320,7 +339,8 @@ INSERT INTO photos (name, drive_file_id, md5, r2_key, content_type, bytes, copie
   ('daihatsu-tanto.jpg', 'demo-seed', '1649222278b3537a24caddcbb1655c74', 'photos/1649222278b3537a24caddcbb1655c74.jpg', 'image/jpeg', 7605, 1793577600000),
   ('toyota-roomy.jpg', 'demo-seed', '7fb68acbe68179dec3cde9043712e7e1', 'photos/7fb68acbe68179dec3cde9043712e7e1.jpg', 'image/jpeg', 7789, 1793577600000),
   ('mazda-cx-5.jpg', 'demo-seed', '751be8db58150fd7a4c53eaf21d590fa', 'photos/751be8db58150fd7a4c53eaf21d590fa.jpg', 'image/jpeg', 8223, 1793577600000),
-  ('nissan-serena.jpg', 'demo-seed', 'b0b8fe692fa76b3b188674d1adf99633', 'photos/b0b8fe692fa76b3b188674d1adf99633.jpg', 'image/jpeg', 7911, 1793577600000)
+  ('nissan-serena.jpg', 'demo-seed', 'b0b8fe692fa76b3b188674d1adf99633', 'photos/b0b8fe692fa76b3b188674d1adf99633.jpg', 'image/jpeg', 7911, 1793577600000),
+  ('ebike-assist.jpg', 'demo-seed', '14823ceb850a4492de6e7e35c06db040', 'photos/14823ceb850a4492de6e7e35c06db040.jpg', 'image/jpeg', 11486, 1793577600000)
 ON CONFLICT (name) DO UPDATE SET drive_file_id = excluded.drive_file_id, md5 = excluded.md5, r2_key = excluded.r2_key,
   content_type = excluded.content_type, bytes = excluded.bytes, copied_at = excluded.copied_at;
 

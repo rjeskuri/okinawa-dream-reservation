@@ -65,6 +65,7 @@ export const rentals: Dictionary = {
     ko: "대형 이륜 면허",
   },
   "rentals.license.car": { ja: "普通自動車免許", en: "Car license", "zh-cn": "汽车驾照", ko: "자동차 면허" },
+  "rentals.license.none": { ja: "免許不要", en: "No license required", "zh-cn": "无需驾照", ko: "면허 불필요" },
 
   "rentals.error.showingAll": {
     ja: "すべての車両を表示しています。",

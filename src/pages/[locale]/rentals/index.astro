@@ -16,7 +16,15 @@ import { pickupSlots } from "../../../lib/booking/pickup-window.ts";
 import { photoUrl, readPhotoIndex } from "../../../lib/catalog/photos.ts";
 import { readCatalog, type PublishedCatalog } from "../../../lib/db/catalog-store.ts";
 import { isLocale } from "../../../lib/locale.ts";
-import { cardPrice, carriedQuery, chosenPackage, findModels, listedModels, parseSearch } from "../../../lib/search.ts";
+import {
+  cardPrice,
+  carriedQuery,
+  chosenPackage,
+  findModels,
+  hasEngineBand,
+  listedModels,
+  parseSearch,
+} from "../../../lib/search.ts";
 import { addDaysToDate, epochToJst, jstToday } from "../../../lib/time.ts";
 import type { Package } from "../../../lib/types.ts";
 
@@ -104,7 +112,10 @@ const listing = catalog && (await list(catalog));
               ))}
             </select>
           </label>
-          <label data-engine-filter hidden={listing.search.typeId === "car"}>
+          <label
+            data-engine-filter
+            hidden={listing.search.typeId !== undefined && !hasEngineBand(listing.search.typeId)}
+          >
             {t(locale, rentals, "rentals.form.engine")}
             <select name="cc">
               <option value="">{t(locale, rentals, "rentals.form.any")}</option>
@@ -151,14 +162,16 @@ const listing = catalog && (await list(catalog));
 </Base>
 
 <script>
-  // Without JavaScript the server hides the engine select and ignores a band sent with a car, so this is only the live view.
+  // Without JavaScript the server hides the engine select and ignores a band sent with a car or an e-bike, so this is only the
+  // live view. The types are hasEngineBand's in src/lib/search.ts.
+  const BANDLESS_TYPES = ["car", "ebike"];
   const form = document.querySelector("form.filters");
   const engine = form?.querySelector<HTMLElement>("[data-engine-filter]");
   const picker = form?.querySelector("date-picker");
 
   form?.addEventListener("change", (event) => {
     const select = event.target as HTMLSelectElement;
-    if (select.name === "type" && engine) engine.hidden = select.value === "car";
+    if (select.name === "type" && engine) engine.hidden = BANDLESS_TYPES.includes(select.value);
     if (select.name === "package") {
       const days = select.selectedOptions[0]?.dataset.days;
       if (days === undefined) picker?.removeAttribute("package-days");

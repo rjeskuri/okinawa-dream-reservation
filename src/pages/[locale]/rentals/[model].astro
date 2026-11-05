@@ -88,12 +88,24 @@ const error = errorKey in model ? t(locale, model, errorKey) : null;
   <dl>
     <dt>{t(locale, model, "model.details.type")}</dt>
     <dd>{type.texts[locale].name}</dd>
-    <dt>{t(locale, model, "model.details.engine")}</dt>
-    <dd>{entry.engineCc}cc</dd>
+    {
+      entry.engineCc !== null && (
+        <>
+          <dt>{t(locale, model, "model.details.engine")}</dt>
+          <dd>{entry.engineCc}cc</dd>
+        </>
+      )
+    }
     <dt>{t(locale, model, "model.details.license")}</dt>
     <dd>
       {t(locale, model, `model.license.${entry.licenseClass}`)}
-      (<a href={`/${locale}/faq#license-classes`}>{t(locale, model, "model.license.more")}</a>)
+      {
+        entry.licenseClass !== "none" && (
+          <>
+            (<a href={`/${locale}/faq#license-classes`}>{t(locale, model, "model.license.more")}</a>)
+          </>
+        )
+      }
     </dd>
   </dl>
   <section id="prices">

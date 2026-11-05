@@ -33,6 +33,7 @@ export const model: Dictionary = {
     ko: "대형 이륜 면허",
   },
   "model.license.car": { ja: "普通自動車免許", en: "Car license", "zh-cn": "汽车驾照", ko: "자동차 면허" },
+  "model.license.none": { ja: "免許不要", en: "No license required", "zh-cn": "无需驾照", ko: "면허 불필요" },
   "model.license.more": {
     ja: "免許の区分について",
     en: "About license classes",

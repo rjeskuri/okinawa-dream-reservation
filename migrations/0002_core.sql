@@ -12,7 +12,7 @@ CREATE TABLE catalog_meta (
 ) STRICT;
 
 CREATE TABLE vehicle_types (
-  id TEXT PRIMARY KEY CHECK (id IN ('scooter','motorcycle','car')),
+  id TEXT PRIMARY KEY CHECK (id IN ('scooter','motorcycle','car','ebike')),
   deposit_jpy INTEGER NOT NULL CHECK (deposit_jpy >= 0),
   sort INTEGER NOT NULL,
   texts TEXT NOT NULL
@@ -21,25 +21,28 @@ CREATE TABLE vehicle_types (
 -- The rows of the shop's fee schedule, for example 125cc or K-Car.
 CREATE TABLE rate_classes (
   id TEXT PRIMARY KEY,
-  grp TEXT NOT NULL CHECK (grp IN ('bike','car')),
+  grp TEXT NOT NULL CHECK (grp IN ('bike','car','ebike')),
   sort INTEGER NOT NULL,
   extension_per_hour_jpy INTEGER CHECK (extension_per_hour_jpy >= 0),
   texts TEXT NOT NULL
 ) STRICT;
 
 -- Models carry no prices: a model inherits them from its rate class. photos is a JSON array of Drive file names.
+-- An e-bike has no engine and needs no license: engine_cc may be NULL and license_class none only on type ebike.
 CREATE TABLE models (
   id TEXT PRIMARY KEY,
   type_id TEXT NOT NULL REFERENCES vehicle_types(id),
-  engine_cc INTEGER NOT NULL CHECK (engine_cc > 0),
-  license_class TEXT NOT NULL CHECK (license_class IN ('moped','small','standard','large','car')),
+  engine_cc INTEGER CHECK (engine_cc > 0),
+  license_class TEXT NOT NULL CHECK (license_class IN ('moped','small','standard','large','car','none')),
   sort INTEGER NOT NULL,
   active INTEGER NOT NULL CHECK (active IN (0,1)),
   rate_class_id TEXT NOT NULL REFERENCES rate_classes(id),
   brand TEXT NOT NULL,
   seats INTEGER CHECK (seats > 0),
   texts TEXT NOT NULL,
-  photos TEXT NOT NULL
+  photos TEXT NOT NULL,
+  CHECK (engine_cc IS NOT NULL OR type_id = 'ebike'),
+  CHECK (license_class <> 'none' OR type_id = 'ebike')
 ) STRICT;
 
 CREATE TABLE packages (
@@ -61,7 +64,7 @@ CREATE TABLE prices (
 -- Priced extras shown on the fee schedule. Choosing them while booking is out of scope.
 CREATE TABLE options (
   id TEXT PRIMARY KEY,
-  grp TEXT NOT NULL CHECK (grp IN ('bike','car')),
+  grp TEXT NOT NULL CHECK (grp IN ('bike','car','ebike')),
   sort INTEGER NOT NULL,
   base_jpy INTEGER NOT NULL CHECK (base_jpy >= 0),
   extra_per_hour_jpy INTEGER CHECK (extra_per_hour_jpy >= 0),
