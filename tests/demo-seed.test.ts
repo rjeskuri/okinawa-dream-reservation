@@ -278,6 +278,21 @@ test("every vehicle and price references a seeded model and package", async () =
   });
 });
 
+// The deposit seed/demo.sql gives every type, marked PLACEHOLDER there.
+const DEMO_PLACEHOLDER_DEPOSIT_JPY = 1000;
+
+// Checkout charges the type's deposit through Square, which refuses a zero payment, so a type without one cannot be booked.
+test("every demo vehicle type has a deposit Square can charge", async () => {
+  await withDemoDb(async (db) => {
+    const catalog = await demoCatalog(db);
+
+    assert.ok(catalog.vehicleTypes.length > 0, "no vehicle types");
+    for (const { id, depositJpy } of catalog.vehicleTypes) {
+      assert.ok(Number.isInteger(depositJpy) && depositJpy > 0, `${id} has deposit ${depositJpy}, which Square cannot charge`);
+    }
+  });
+});
+
 // #130. The e-bike flyer's regular prices: by days, and by hours where the seed already has that hours package. The ticket
 // adds no hours package (task #50 makes them bookable), so the seed's hours stay the bikes' 4 and 24.
 const EBIKE_DAY_PRICES: Record<number, number> = { 1: 4500, 2: 8000, 3: 10000 };
@@ -290,7 +305,8 @@ test("the demo catalog publishes the e-bike with its prices, helmet and photo", 
 
     const type = catalog.vehicleTypes.find(({ id }) => id === "ebike");
     assert.ok(type, "no ebike type");
-    assert.equal(type.depositJpy, 0);
+    // The same placeholder deposit as every other demo type, until the shop states one.
+    assert.equal(type.depositJpy, DEMO_PLACEHOLDER_DEPOSIT_JPY);
 
     const classes = catalog.rateClasses.filter(({ grp }) => grp === "ebike");
     assert.deepEqual(classes.map(({ id }) => id), ["ebike"], "one rate class ebike in group ebike");

@@ -10,7 +10,7 @@
 --   bike-same-day and the 2 and 3 day prices on car-2d and car-3d, so the e-bike table reads in the flyer's order.
 --
 -- PLACEHOLDERS, which the site does not state and which the shop replaces:
---   the e-bike's deposit (0 until the shop says otherwise), its brand (TBC), its two vehicles and its photo.
+--   the e-bike's deposit (the same ¥1000 as every type), its brand (TBC), its two vehicles and its photo.
 --   deposit_jpy on every type, engine_cc on every car, the brand of the Nightster Special and Street Bob117 (their tiles
 --   show unfilled template text), every plate, model summary wording and description, every config value other than
 --   shop_open and shop_close, every refund tier, and every closed date (the site says it is open all year).
@@ -35,7 +35,7 @@ INSERT INTO vehicle_types (id, deposit_jpy, sort, texts) VALUES
   ('scooter', 1000, 1, '{"ja":{"name":"スクーター"},"en":{"name":"Scooter"},"zh-cn":{"name":"踏板车"},"ko":{"name":"스쿠터"}}'),
   ('motorcycle', 1000, 2, '{"ja":{"name":"バイク"},"en":{"name":"Motorcycle"},"zh-cn":{"name":"摩托车"},"ko":{"name":"오토바이"}}'),
   ('car', 1000, 3, '{"ja":{"name":"レンタカー"},"en":{"name":"Car"},"zh-cn":{"name":"汽车"},"ko":{"name":"자동차"}}'),
-  ('ebike', 0, 4, '{"ja":{"name":"電動アシスト自転車"},"en":{"name":"E-bike"},"zh-cn":{"name":"电动助力自行车"},"ko":{"name":"전기자전거"}}')
+  ('ebike', 1000, 4,'{"ja":{"name":"電動アシスト自転車"},"en":{"name":"E-bike"},"zh-cn":{"name":"电动助力自行车"},"ko":{"name":"전기자전거"}}')
 ON CONFLICT (id) DO UPDATE SET deposit_jpy = excluded.deposit_jpy, sort = excluded.sort, texts = excluded.texts;
 
 -- PLACEHOLDER: the car and e-bike classes' NULL extension. Neither the site nor the flyer states one.
