@@ -779,7 +779,8 @@ const SEARCH_CARDS: Record<string, { packageId: string; price: string }> = {
 };
 
 /** What a search of each type finds: m-u-lead and m-t-aqua are booked, and sort runs against the ids. */
-const FREE_OF_TYPE: Record<VehicleTypeId, string[]> = {
+/** This catalog has no e-bike, so the e-bike has no entry. */
+const FREE_OF_TYPE: Record<Exclude<VehicleTypeId, "ebike">, string[]> = {
   scooter: ["m-z-vino"],
   motorcycle: ["m-y-cub", "m-w-rebel"],
   car: ["m-x-note", "m-v-hiace"],

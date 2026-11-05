@@ -14,7 +14,7 @@ import { replaceCatalog } from "../../src/lib/db/catalog-store.ts";
 import { LOCALES, type Locale } from "../../src/lib/locale.ts";
 import { addDaysToDate, epochToJst, formatHHmm, jstToday, jstToEpoch, parseHHmm } from "../../src/lib/time.ts";
 import type { Catalog, ShopConfig, VehicleTypeId } from "../../src/lib/types.ts";
-import { addEbike, EBIKE_MODEL, EBIKE_PRICES } from "../fixtures/sheet/ebike.ts";
+import { addEbike, EBIKE_CLASS, EBIKE_MODEL, EBIKE_PRICES } from "../fixtures/sheet/ebike.ts";
 import { mainOf, tagsIn, visibleText, type Tag } from "../helpers/html.ts";
 import { insertRow, seedBooking } from "../helpers/seed.ts";
 import {
@@ -1315,7 +1315,11 @@ function ownPackages(workbook: Workbook): void {
 }
 
 /** Everything ownPackages lists with nothing booked, by type, in the order of a search. */
-const OWN_RESULTS: Record<VehicleTypeId, { id: string; packageId: string; price: string; deposit: string }[]> = {
+/** ownPackages has no e-bike, so the e-bike has no entry. */
+const OWN_RESULTS: Record<
+  Exclude<VehicleTypeId, "ebike">,
+  { id: string; packageId: string; price: string; deposit: string }[]
+> = {
   scooter: [
     { id: "pcx-125", packageId: "day-3", price: "13,800", deposit: "3,000" },
     { id: "today-50", packageId: "day-1", price: "3,500", deposit: "3,000" },
@@ -1344,7 +1348,7 @@ test("a type with a date and time and no package searches that type", async () =
   await publish(catalog);
   const [date] = openDates(catalog);
 
-  const expected: Record<VehicleTypeId, string[]> = {
+  const expected: Record<Exclude<VehicleTypeId, "ebike">, string[]> = {
     scooter: ["today-50", "pcx-125"],
     motorcycle: ["rebel-250"],
     car: ["nbox-660"],
@@ -1855,9 +1859,11 @@ test("an e-bike search lists the e-bike, with the engine filter hidden and ignor
       }
     }
 
-    const browsing = `/${locale}/rentals?type=ebike&cc=upto50`;
+    // Without dates only the class narrows, as for a car: the cc band then changes nothing about the e-bike's card.
+    const browsing = `/${locale}/rentals?type=ebike&cc=upto50&class=${EBIKE_CLASS}`;
     const listed = await listing(browsing);
     assertBrowsing(listed, [EBIKE_MODEL], browsing);
+    assert.deepEqual(amounts(card(listed, EBIKE_MODEL, browsing), "data-price"), ["4,500"], `${browsing}: price`);
     assert.equal(engineShown(filterForm(listed, browsing), browsing), false, `${browsing}: engine select shown`);
   }
 });
