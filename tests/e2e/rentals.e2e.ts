@@ -5,7 +5,7 @@
 //   data-available  on the card's link, only for a model searchAvailability returned
 //   data-price, data-deposit   the elements inside a card that show those amounts
 //   data-search-prompt, data-search-error   the prompt to choose dates, and the message about invalid params
-//   data-engine-filter   the element that holds the cc select, carrying `hidden` while the type is car
+//   data-engine-filter   the element that holds the cc select, carrying `hidden` while the type is car or ebike
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import { searchAvailability, type CcBand } from "../../src/lib/booking/availability.ts";
@@ -14,6 +14,7 @@ import { replaceCatalog } from "../../src/lib/db/catalog-store.ts";
 import { LOCALES, type Locale } from "../../src/lib/locale.ts";
 import { addDaysToDate, epochToJst, formatHHmm, jstToday, jstToEpoch, parseHHmm } from "../../src/lib/time.ts";
 import type { Catalog, ShopConfig, VehicleTypeId } from "../../src/lib/types.ts";
+import { addEbike, EBIKE_MODEL, EBIKE_PRICES } from "../fixtures/sheet/ebike.ts";
 import { mainOf, tagsIn, visibleText, type Tag } from "../helpers/html.ts";
 import { insertRow, seedBooking } from "../helpers/seed.ts";
 import {
@@ -1795,19 +1796,19 @@ test("a card shows the model's photo, or a placeholder without one", async () =>
   }
 });
 
+/** Whether a guest sees the cc select. Absent counts as hidden. */
+function engineShown(form: string, label: string): boolean {
+  const tags = tagsIn(form);
+  if (!tags.some(({ name, attributes }) => name === "select" && attributes.name === "cc")) return false;
+  const holder = tags.find(({ attributes }) => "data-engine-filter" in attributes);
+  assert.ok(holder, `${label}: the cc select has no data-engine-filter around it`);
+  return !("hidden" in holder.attributes);
+}
+
 test("the engine select is hidden for cars", async () => {
   const catalog = sheetCatalog();
   await publish(catalog);
   const [date] = openDates(catalog);
-
-  /** Whether a guest sees the cc select. Absent counts as hidden. */
-  const engineShown = (form: string, label: string): boolean => {
-    const tags = tagsIn(form);
-    if (!tags.some(({ name, attributes }) => name === "select" && attributes.name === "cc")) return false;
-    const holder = tags.find(({ attributes }) => "data-engine-filter" in attributes);
-    assert.ok(holder, `${label}: the cc select has no data-engine-filter around it`);
-    return !("hidden" in holder.attributes);
-  };
 
   for (const locale of LOCALES) {
     const carQueries = ["?type=car", `?${searchQuery(date, { type: "car" })}`];
@@ -1821,6 +1822,43 @@ test("the engine select is hidden for cars", async () => {
       const path = `/${locale}/rentals${query}`;
       assert.equal(engineShown(filterForm(await listing(path), path), path), true, `${path}: engine select hidden`);
     }
+  }
+});
+
+// E-bikes (#130): the rows of tests/fixtures/sheet/ebike.ts, an e-bike with no engine and two free bicycles.
+
+test("an e-bike search lists the e-bike, with the engine filter hidden and ignored", async () => {
+  const catalog = sheetCatalog((workbook) => addEbike(workbook));
+  assert.ok(catalog.models.some(({ id }) => id === EBIKE_MODEL), "the sheet does not publish the e-bike");
+  await publish(catalog);
+  const [date] = openDates(catalog);
+
+  for (const locale of LOCALES) {
+    const all = `/${locale}/rentals`;
+    const everything = await listing(all);
+    assert.ok(offered(filterForm(everything, all), "type").includes("ebike"), `${all}: no ebike type to choose`);
+    assert.ok(idsIn(everything).includes(EBIKE_MODEL), `${all}: the e-bike is not listed`);
+
+    // Every band would leave out a model with no engine, so a band that was applied would empty the list.
+    for (const band of ["", "upto50", "126to400", "over400"]) {
+      for (const packageId of ["day-1", "day-3"]) {
+        const path = `/${locale}/rentals?${searchQuery(date, { package: packageId, type: "ebike", cc: band })}`;
+        const main = await listing(path);
+        assertResults(main, [EBIKE_MODEL], path);
+        const shown = card(main, EBIKE_MODEL, path);
+        assert.deepEqual(amounts(shown, "data-price"), [grouped(EBIKE_PRICES[packageId] as number)], `${path}: price`);
+        assert.doesNotMatch(shown.text, /\d\s*cc\b/i, `${path}: the card shows an engine size: ${shown.text}`);
+        const href = shown.tag.attributes["href"] ?? "";
+        assert.ok(!href.includes("cc="), `${path}: the card carries the band: ${href}`);
+        assert.equal(engineShown(filterForm(main, path), path), false, `${path}: engine select shown`);
+        assert.equal(hookText(main, "data-search-error"), undefined, `${path}: a message for the ignored cc`);
+      }
+    }
+
+    const browsing = `/${locale}/rentals?type=ebike&cc=upto50`;
+    const listed = await listing(browsing);
+    assertBrowsing(listed, [EBIKE_MODEL], browsing);
+    assert.equal(engineShown(filterForm(listed, browsing), browsing), false, `${browsing}: engine select shown`);
   }
 });
 

@@ -30,7 +30,8 @@ const TABLES: Record<string, string[]> = {
   models: [
     "id TEXT PRIMARY KEY",
     "type_id TEXT NOT NULL",
-    "engine_cc INTEGER NOT NULL",
+    // Nullable since #130, for an e-bike: "engine_cc may be null only for an e-bike" holds the other types to a number.
+    "engine_cc INTEGER",
     "license_class TEXT NOT NULL",
     "sort INTEGER NOT NULL",
     "active INTEGER NOT NULL",
@@ -281,13 +282,13 @@ function column(
   };
 }
 
-// Tables with no parents. These run on an empty database: vehicle_types takes each of its three ids in turn.
+// Tables with no parents. These run on an empty database: vehicle_types takes each of its four ids in turn.
 const STANDALONE_CASES: ConstraintCase[] = [
   column("catalog_meta", "id", [0, 2], [1]),
   column("catalog_meta", "source", ["api", "SHEET"], ["sheet", "admin"]),
-  column("vehicle_types", "id", ["truck", "Car"], ["scooter", "motorcycle", "car"]),
+  column("vehicle_types", "id", ["truck", "Car", "e-bike", "Ebike"], ["scooter", "motorcycle", "car", "ebike"]),
   column("vehicle_types", "deposit_jpy", [-1, -5000], [0, 1]),
-  column("rate_classes", "grp", ["boat", "Bike"], ["bike", "car"]),
+  column("rate_classes", "grp", ["boat", "Bike", "e-bike", "EBIKE"], ["bike", "car", "ebike"]),
   column("rate_classes", "extension_per_hour_jpy", [-1], [0, 1, null]),
   column("packages", "days", [0, 61, -1], [1, 60]),
   {
@@ -316,7 +317,7 @@ const STANDALONE_CASES: ConstraintCase[] = [
       { days: null, hours: 24 },
     ],
   },
-  column("options", "grp", ["boat", "Car"], ["bike", "car"]),
+  column("options", "grp", ["boat", "Car", "e-bike", "Ebike"], ["bike", "car", "ebike"]),
   column("options", "base_jpy", [-1], [0, 1]),
   column("options", "extra_per_hour_jpy", [-1], [0, 1, null]),
   column("options", "extra_per_24h_jpy", [-1], [0, 1, null]),
@@ -329,7 +330,8 @@ const CHILD_CASES: ConstraintCase[] = [
   column("models", "type_id", ["scooter"], [TYPE_ID], "FOREIGN KEY"),
   column("models", "rate_class_id", ["no-such-class"], [RATE_ID], "FOREIGN KEY"),
   column("models", "engine_cc", [0, -125], [1, 125]),
-  column("models", "license_class", ["medium", "Small"], ["moped", "small", "standard", "large", "car"]),
+  // none goes in on an e-bike row, in "engine_cc may be null only for an e-bike". The sheet keeps it off other types.
+  column("models", "license_class", ["medium", "Small", "None", "NONE"], ["moped", "small", "standard", "large", "car"]),
   column("models", "active", [2, -1], [0, 1]),
   column("models", "seats", [0, -2], [1, 5, null]),
 
@@ -438,6 +440,61 @@ test("constraints reject bad rows", async (t) => {
     await seedParents(db);
     for (const constraint of CHILD_CASES) {
       await t.test(constraint.name, () => proveCase(db, constraint));
+    }
+  } finally {
+    await dispose();
+  }
+});
+
+// #130: an e-bike has no engine, so engine_cc may be NULL, but only on an e-bike. On a database of its own, so the cases
+// above keep their motorcycle row.
+test("engine_cc may be null only for an e-bike", async (t) => {
+  const { db, dispose } = await createTestDb();
+  try {
+    for (const id of ["scooter", "motorcycle", "car", "ebike"]) await seedType(db, { id });
+    const classes: Record<string, string> = {};
+    for (const grp of ["bike", "car", "ebike"]) classes[grp] = (await seedRateClass(db, { grp })).id;
+    const pkg = await seedPackage(db);
+
+    await t.test("an e-bike with no engine and license class none goes in, with its bicycle and price", async () => {
+      const model = await seedModel(db, {
+        id: "case-ebike",
+        type_id: "ebike",
+        engine_cc: null,
+        license_class: "none",
+        rate_class_id: classes.ebike,
+      });
+      assert.deepEqual(
+        { type_id: model.type_id, engine_cc: model.engine_cc, license_class: model.license_class },
+        { type_id: "ebike", engine_cc: null, license_class: "none" },
+      );
+      assert.equal((await seedVehicle(db, { plate: "case-ebike-1", model_id: model.id })).model_id, model.id);
+      const price = await seedPrice(db, { rate_class_id: classes.ebike, package_id: pkg.id, price_jpy: 4500 });
+      assert.equal(price.price_jpy, 4500);
+    });
+
+    for (const [type, licenseClass, grp] of [
+      ["scooter", "moped", "bike"],
+      ["motorcycle", "small", "bike"],
+      ["car", "car", "car"],
+    ]) {
+      await t.test(`a ${type} with a NULL engine_cc is refused`, async () => {
+        const row = {
+          ...VALID.models.row,
+          id: `case-null-${type}`,
+          type_id: type,
+          engine_cc: null,
+          license_class: licenseClass,
+          rate_class_id: classes[grp],
+        };
+        const before = await countRows(db, "models");
+        await assert.rejects(insertRow(db, "models", row), /constraint failed/, `${type} with no engine_cc`);
+        assert.equal(await countRows(db, "models"), before, `${type} left a row behind`);
+
+        // The same row with an engine goes in, so the refusal is about the NULL alone.
+        const stored = await insertRow<SqlRow>(db, "models", { ...row, engine_cc: 125 });
+        assert.equal(stored.engine_cc, 125);
+      });
     }
   } finally {
     await dispose();

@@ -1,7 +1,7 @@
 // The demo catalog: seed/demo.sql over the real migrations in an in-memory D1, read back with readCatalog, then
 // scripts/demo.sh in a copy of the checkout with npm, npx, wrangler and astro faked, so no test builds, starts a server or
-// reaches Cloudflare. The shop's figures are not repeated here: only the shape the ticket states is, and photos are
-// checked against their own bytes.
+// reaches Cloudflare. The shop's figures are not repeated here, except the e-bike flyer's prices that #130 states: only the
+// shape the ticket states is, and photos are checked against their own bytes.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -128,11 +128,11 @@ function sniffImageType(bytes: Buffer): string | null {
 
 const KEY_EXTENSIONS: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
 
-test("the demo seed loads and covers all three vehicle types", async () => {
+test("the demo seed loads and covers all four vehicle types", async () => {
   await withDemoDb(async (db) => {
     const catalog = await demoCatalog(db);
 
-    assert.deepEqual(sorted(catalog.vehicleTypes.map(({ id }) => id)), ["car", "motorcycle", "scooter"]);
+    assert.deepEqual(sorted(catalog.vehicleTypes.map(({ id }) => id)), ["car", "ebike", "motorcycle", "scooter"]);
     const bookable = new Set(catalog.vehicles.filter(({ status }) => status === "active").map(({ modelId }) => modelId));
     for (const { id } of catalog.vehicleTypes) {
       const models = catalog.models.filter(({ typeId, active }) => typeId === id && active);
@@ -269,10 +269,84 @@ test("every vehicle and price references a seeded model and package", async () =
       assert.ok(typeIds.has(typeId), `${id}: no type ${typeId}`);
       const rateClass = classes.get(rateClassId);
       assert.ok(rateClass, `${id}: no class ${rateClassId}`);
-      assert.equal(rateClass.grp, typeId === "car" ? "car" : "bike", `${id} is priced in the wrong group`);
+      const group = typeId === "car" || typeId === "ebike" ? typeId : "bike";
+      assert.equal(rateClass.grp, group, `${id} is priced in the wrong group`);
       assert.equal(licenseClass === "car", typeId === "car", `${id} has license class ${licenseClass}`);
+      assert.equal(licenseClass === "none", typeId === "ebike", `${id} has license class ${licenseClass}`);
       if (active) assert.ok(withVehicle.has(id), `${id} is active with no active vehicle, so it cannot be booked`);
     }
+  });
+});
+
+// #130. The e-bike flyer's regular prices: by days, and by hours where the seed already has that hours package. The ticket
+// adds no hours package (task #50 makes them bookable), so the seed's hours stay the bikes' 4 and 24.
+const EBIKE_DAY_PRICES: Record<number, number> = { 1: 4500, 2: 8000, 3: 10000 };
+const EBIKE_HOUR_PRICES: Record<number, number> = { 2: 2500, 4: 3500, 24: 5000 };
+const SEEDED_HOURS = [4, 24];
+
+test("the demo catalog publishes the e-bike with its prices, helmet and photo", async () => {
+  await withDemoDb(async (db) => {
+    const catalog = await demoCatalog(db);
+
+    const type = catalog.vehicleTypes.find(({ id }) => id === "ebike");
+    assert.ok(type, "no ebike type");
+    assert.equal(type.depositJpy, 0);
+
+    const classes = catalog.rateClasses.filter(({ grp }) => grp === "ebike");
+    assert.deepEqual(classes.map(({ id }) => id), ["ebike"], "one rate class ebike in group ebike");
+
+    const model = catalog.models.find(({ id }) => id === "ebike-assist");
+    assert.ok(model, "no model ebike-assist");
+    assert.deepEqual(
+      {
+        typeId: model.typeId,
+        engineCc: model.engineCc,
+        licenseClass: model.licenseClass,
+        brand: model.brand,
+        active: model.active,
+        rateClassId: model.rateClassId,
+        photo: model.photos[0],
+      },
+      {
+        typeId: "ebike",
+        engineCc: null,
+        licenseClass: "none",
+        brand: "TBC",
+        active: true,
+        rateClassId: "ebike",
+        photo: "ebike-assist.jpg",
+      },
+    );
+    const bikes = catalog.vehicles.filter(({ modelId, status }) => modelId === model.id && status === "active");
+    assert.equal(bikes.length, 2, "ebike-assist needs two active vehicles");
+
+    // Every price of the class is a flyer price for its length, and every day length of the flyer has one.
+    const packages = new Map(catalog.packages.map((pkg) => [pkg.id, pkg]));
+    const priced = catalog.prices.filter(({ rateClassId }) => rateClassId === "ebike");
+    for (const { packageId, priceJpy } of priced) {
+      const pkg = packages.get(packageId);
+      assert.ok(pkg, `price of unknown package ${packageId}`);
+      const expected = pkg.days !== null ? EBIKE_DAY_PRICES[pkg.days] : EBIKE_HOUR_PRICES[pkg.hours as number];
+      assert.equal(priceJpy, expected, `${packageId} (${pkg.days ?? 0} days, ${pkg.hours ?? 0} hours)`);
+    }
+    const pricedPackages = priced.map(({ packageId }) => packages.get(packageId));
+    for (const days of [1, 2, 3]) {
+      assert.ok(pricedPackages.some((pkg) => pkg?.days === days), `no ${days}-day e-bike price`);
+    }
+    const hours = sorted(catalog.packages.flatMap((pkg) => (pkg.hours === null ? [] : [String(pkg.hours)])));
+    assert.deepEqual(hours, sorted(SEEDED_HOURS.map(String)), "the seed's hours packages changed");
+    for (const hour of SEEDED_HOURS) {
+      assert.ok(pricedPackages.some((pkg) => pkg?.hours === hour), `no ${hour}-hour e-bike price`);
+    }
+
+    const options = catalog.options.filter(({ grp }) => grp === "ebike");
+    const helmets = options.filter(({ texts }) => /helmet/i.test(texts.en.name));
+    assert.equal(helmets.length, 1, `one e-bike helmet among ${options.map(({ id }) => id).join(", ") || "no options"}`);
+    assert.equal(helmets[0]?.baseJpy, 500);
+
+    const photo = (await photoRows(db)).find(({ name }) => name === "ebike-assist.jpg");
+    assert.ok(photo, "no photos row for ebike-assist.jpg");
+    assert.ok(existsSync(join(photosDir, "ebike-assist.jpg")), "ebike-assist.jpg is not in seed/photos");
   });
 });
 

@@ -7,6 +7,14 @@ import { test } from "node:test";
 import { inspect } from "node:util";
 import { BOOKINGS_COLUMNS, SHEET_TABS, validateBlocks, validateCatalog } from "../src/lib/catalog/sheet-schema.ts";
 import type { Catalog, Model, Package } from "../src/lib/types.ts";
+import {
+  addEbike,
+  EBIKE_MODEL,
+  EBIKE_MODEL_ROW,
+  EBIKE_PLATES,
+  ebikeModelCells,
+  withEbike,
+} from "./fixtures/sheet/ebike.ts";
 import { ACCEPTED_BOUNDARIES, APPENDED, RULE_TABLE, withoutDropped } from "./fixtures/sheet/rule-table.ts";
 import {
   appendCopy,
@@ -988,6 +996,122 @@ test("license class defaults from cc and type", async (t) => {
       const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
       assert.deepEqual(fatal, []);
       assert.deepEqual(canonical(catalog), canonical(expected));
+      assert.deepEqual(notOk(statuses), [`Models ${row}`]);
+      assert.deepEqual(errors(statuses), []);
+      assertWarning(statuses, "Models", row, "license_class");
+    });
+  }
+});
+
+// E-bikes (#130): no engine, no license. The rows of tests/fixtures/sheet/ebike.ts are appended to the valid fixture.
+
+/** Each sheet row of `tab` named by `keys`, as "Tab row", sorted like `errors`. */
+function rowsOf(workbook: Workbook, tab: string, keys: string[]): string[] {
+  return keys.map((key) => `${tab} ${sheetRow(workbook, tab, key)}`);
+}
+
+/** The model is an error naming `column`, its vehicles errors naming model_id, and nothing else is. */
+function assertModelSkipped(workbook: Workbook, id: string, plates: string[], column: string, expected: Catalog): void {
+  const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
+  assert.deepEqual(fatal, []);
+  assertError(statuses, "Models", sheetRow(workbook, "Models", id), [column]);
+  for (const plate of plates) assertError(statuses, "Vehicles", sheetRow(workbook, "Vehicles", plate), ["model_id"]);
+  assert.deepEqual(errors(statuses), [...rowsOf(workbook, "Models", [id]), ...rowsOf(workbook, "Vehicles", plates)].sort());
+  assert.deepEqual(canonical(catalog), canonical(withoutDropped(expected, { models: [id], vehicles: plates })));
+}
+
+test("an e-bike publishes with no engine and no license", async (t) => {
+  await t.test("a Types row ebike, a class in group ebike, its prices, an e-bike model and an ebike option", () => {
+    const workbook = validWorkbook();
+    addEbike(workbook);
+    assertPublishes(workbook, withEbike(expectedCatalog()));
+  });
+
+  // Every way a cell reads as blank, and license_class none as typed, which is no override and so no warning.
+  for (const [blank, engineCc] of [["empty", ""], ["spaces", "   "], ["an ideographic space", "　"]]) {
+    for (const licenseClass of ["", "none", " none "]) {
+      await t.test(`engine_cc ${blank}, license_class ${JSON.stringify(licenseClass)}`, () => {
+        const workbook = validWorkbook();
+        addEbike(workbook, { engine_cc: engineCc, license_class: licenseClass });
+        assertPublishes(workbook, withEbike(expectedCatalog()));
+      });
+    }
+  }
+
+  await t.test("a second e-bike model of other values publishes beside the first", () => {
+    const workbook = validWorkbook();
+    addEbike(workbook);
+    appendRow(workbook, "Models", ebikeModelCells({ model_id: "cargo-e", sort: 7, brand: "Yamaha", seats: 2, active: "FALSE" }));
+
+    const expected = withEbike(expectedCatalog());
+    expected.models.push({ ...EBIKE_MODEL_ROW, id: "cargo-e", sort: 7, brand: "Yamaha", seats: 2, active: false });
+    assertPublishes(workbook, expected);
+  });
+});
+
+test("an e-bike with an engine_cc is a row error", async (t) => {
+  // Valid and invalid numbers alike: staff most likely picked the wrong type. The rest of the e-bike rows still publish.
+  for (const cc of [1, 20, 250, 660, "50", "５０", "0", -5, 12.5, "abc"]) {
+    await t.test(`an e-bike with engine_cc ${JSON.stringify(cc)}`, () => {
+      const workbook = validWorkbook();
+      addEbike(workbook, { engine_cc: cc });
+      assertModelSkipped(workbook, EBIKE_MODEL, EBIKE_PLATES, "engine_cc", withEbike(expectedCatalog()));
+    });
+  }
+
+  // engine_cc stays required for every other type, beside a published e-bike.
+  for (const [id, type, plates] of [
+    ["today-50", "scooter", ["わ1001"]],
+    ["rebel-250", "motorcycle", ["わ1005"]],
+    ["nbox-660", "car", ["わ1006"]],
+  ] as const) {
+    await t.test(`a ${type} with a blank engine_cc`, () => {
+      const workbook = validWorkbook();
+      addEbike(workbook);
+      setCell(workbook, "Models", id, "engine_cc", "");
+      assertModelSkipped(workbook, id, [...plates], "engine_cc", withEbike(expectedCatalog()));
+    });
+  }
+});
+
+test("license_class none is only for e-bikes", async (t) => {
+  for (const [id, type, plates] of [
+    ["today-50", "scooter", ["わ1001"]],
+    ["rebel-250", "motorcycle", ["わ1005"]],
+    ["nbox-660", "car", ["わ1006"]],
+  ] as const) {
+    await t.test(`license_class none on a ${type} is a row error`, () => {
+      const workbook = validWorkbook();
+      addEbike(workbook);
+      setCell(workbook, "Models", id, "license_class", "none");
+      assertModelSkipped(workbook, id, [...plates], "license_class", withEbike(expectedCatalog()));
+    });
+  }
+
+  // none is a class the sheet knows, refused for the type: its message is not the one for a class that does not exist.
+  await t.test("none on a motorcycle reads differently from an unknown class", () => {
+    const problemOf = (value: string): string => {
+      const workbook = validWorkbook();
+      addEbike(workbook);
+      setCell(workbook, "Models", "rebel-250", "license_class", value);
+      const row = sheetRow(workbook, "Models", "rebel-250");
+      const [status] = statusesAt(validateCatalog(workbook, CATALOG_NOW).statuses, "Models", row, "error");
+      assert.ok(status, `license_class ${value} has no error`);
+      return status.message.replaceAll(value, "#");
+    };
+    assert.notEqual(problemOf("none"), problemOf("huge"));
+  });
+
+  // As for a car: an e-bike is always none, and any other class typed there is ignored with a warning.
+  for (const override of ["moped", "small", "standard", "large", "car"]) {
+    await t.test(`an e-bike with license_class ${override} stays none with a warning`, () => {
+      const workbook = validWorkbook();
+      addEbike(workbook, { license_class: override });
+      const row = sheetRow(workbook, "Models", EBIKE_MODEL);
+
+      const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
+      assert.deepEqual(fatal, []);
+      assert.deepEqual(canonical(catalog), canonical(withEbike(expectedCatalog())));
       assert.deepEqual(notOk(statuses), [`Models ${row}`]);
       assert.deepEqual(errors(statuses), []);
       assertWarning(statuses, "Models", row, "license_class");
