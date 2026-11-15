@@ -6,6 +6,7 @@ import { BLOCKING_SQL, OVERLAP_SQL, rentalEnd } from "../db/blocking.ts";
 import { readClosedDates, readShopConfig } from "../db/config.ts";
 import { isLocale } from "../locale.ts";
 import type { Locale } from "../locale.ts";
+import { bookedAhead } from "../pricing.ts";
 import { JST_OFFSET_MS, jstToday } from "../time.ts";
 import type { Booking, BookingSource, BookingStatus } from "../types.ts";
 import { pickupWindowError } from "./pickup-window.ts";
@@ -90,14 +91,16 @@ export const assignFreeVehicleSql = `SELECT v.plate FROM vehicles v
 
 /**
  * The hold. Prices and the type join through the model here, not through keys read earlier, because a publish can move
- * them between that read and this statement. A taken id or ref inserts nothing, as no free bike does, and createHold
- * tells the three apart.
+ * them between that read and this statement. ?11 is 1 when the hold is booked ahead of the pickup's JST date (#131), and
+ * then the row's advance price is locked where it has one: the row's prices are read here too, for the same reason. A taken
+ * id or ref inserts nothing, as no free bike does, and createHold tells the three apart.
  */
 const HOLD_SQL = `WITH q(s, e, buf, now, model) AS (SELECT ?1, ?2, ?3, ?4, ?5)
   INSERT INTO bookings (id, ref, status, source, model_id, package_id, vehicle_plate, start_at, end_at, expires_at,
     price_jpy, deposit_jpy, catalog_version, locale, created_at, updated_at)
   SELECT ?6, ?7, 'ON_HOLD', 'web', m.id, p.package_id, v.plate, ?1, ?2, ?8,
-    p.price_jpy, t.deposit_jpy, c.version, ?9, ?4, ?4
+    CASE WHEN ?11 = 1 AND p.advance_price_jpy IS NOT NULL THEN p.advance_price_jpy ELSE p.price_jpy END,
+    t.deposit_jpy, c.version, ?9, ?4, ?4
   FROM vehicles v
   JOIN models m ON m.id = v.model_id
   JOIN prices p ON p.rate_class_id = m.rate_class_id AND p.package_id = ?10
@@ -208,11 +211,12 @@ export async function createHold(db: D1Database, input: HoldInput, now: number):
   const endAt = rentalEnd(start, { days: catalog.days }, config);
   const bufMs = config.turnaroundMinutes * MINUTE_MS;
   const expiresAt = now + config.holdMinutes * MINUTE_MS;
+  const ahead = bookedAhead(now, start) ? 1 : 0;
   for (let attempt = 0; attempt < REF_ATTEMPTS; attempt += 1) {
     const ref = randomRef();
     const row = await db
       .prepare(HOLD_SQL)
-      .bind(start, endAt, bufMs, now, modelId, id, ref, expiresAt, locale, packageId)
+      .bind(start, endAt, bufMs, now, modelId, id, ref, expiresAt, locale, packageId, ahead)
       .first<BookingRow>();
     if (row !== null) return { ok: true, booking: toBooking(row) };
 

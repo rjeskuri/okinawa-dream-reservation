@@ -54,7 +54,7 @@ export const SHEET_TABS = {
   Types: ["type_id", "deposit_jpy", "sort", ...NAMES, STATUS],
   RateClasses: ["rate_class_id", "group", "sort", "extension_per_hour_jpy", ...NAMES, STATUS],
   Packages: ["package_id", "days", "hours", "sort", ...NAMES, STATUS],
-  Prices: ["rate_class_id", "package_id", "price_jpy", STATUS],
+  Prices: ["rate_class_id", "package_id", "price_jpy", "advance_price_jpy", STATUS],
   Models: [
     "model_id", "type_id", "rate_class_id", "brand", "seats", "engine_cc", "license_class", "sort", "active",
     ...NAMES, ...inEachLocale("summary"), ...inEachLocale("description"), "photos", STATUS,
@@ -431,8 +431,22 @@ function readPrices(rows: Row[], rateClassIds: Set<string>, packageIds: Set<stri
     const rateClassId = row.known("rate_class_id", rateClassIds, "RateClasses");
     const packageId = row.known("package_id", packageIds, "Packages");
     row.unique("rate_class_id and package_id", `${rateClassId}/${packageId}`, seen);
-    return { rateClassId, packageId, priceJpy: row.money("price_jpy", 1) };
+    const priceJpy = row.money("price_jpy", 1);
+    return { rateClassId, packageId, priceJpy, advancePriceJpy: readAdvancePrice(row, priceJpy) };
   });
+}
+
+/**
+ * The price for booking by the day before (#131), or null for a blank cell. One above price_jpy is an error, not a cap: the
+ * two columns were most likely swapped. A bad price_jpy has its own error, so it is not compared.
+ */
+function readAdvancePrice(row: Row, priceJpy: number): number | null {
+  if (row.blank("advance_price_jpy")) return null;
+  const advance = row.money("advance_price_jpy", 1);
+  if (Number.isSafeInteger(priceJpy) && Number.isSafeInteger(advance) && advance > priceJpy) {
+    row.error(`advance_price_jpy ${show(row.cell("advance_price_jpy"))} must not be above price_jpy ${show(priceJpy)}`);
+  }
+  return advance;
 }
 
 function licenseClassOfCc(cc: number): LicenseClass {

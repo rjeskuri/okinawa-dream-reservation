@@ -17,6 +17,14 @@ export const rates: Dictionary = {
   "rates.group.bike": { ja: "バイク", en: "Bikes", "zh-cn": "摩托车", ko: "오토바이" },
   "rates.group.car": { ja: "レンタカー", en: "Cars", "zh-cn": "汽车", ko: "자동차" },
   "rates.group.ebike": { ja: "電動アシスト自転車", en: "E-bikes", "zh-cn": "电动助力自行车", ko: "전기자전거" },
+  // The two prices of a row with an advance price (#131): booked by 23:59 JST the day before the pickup, or on the day.
+  "rates.price.advance": {
+    ja: "前日までに予約",
+    en: "Book by the day before",
+    "zh-cn": "最晚前一天预订",
+    ko: "전날까지 예약",
+  },
+  "rates.price.sameDay": { ja: "当日予約", en: "Same day", "zh-cn": "当天预订", ko: "당일 예약" },
 
   "rates.error.invalid": {
     ja: "絞り込み条件の一部を読み取れませんでした。料金表全体を表示しています。",

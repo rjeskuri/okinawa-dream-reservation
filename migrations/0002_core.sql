@@ -58,6 +58,8 @@ CREATE TABLE prices (
   rate_class_id TEXT NOT NULL REFERENCES rate_classes(id),
   package_id TEXT NOT NULL REFERENCES packages(id),
   price_jpy INTEGER NOT NULL CHECK (price_jpy > 0),
+  -- The price for booking by the day before (#131), NULL for none. Never above the row's own price_jpy.
+  advance_price_jpy INTEGER CHECK (advance_price_jpy > 0 AND advance_price_jpy <= price_jpy),
   PRIMARY KEY (rate_class_id, package_id)
 ) STRICT;
 

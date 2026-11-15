@@ -90,7 +90,12 @@ const PACKAGES: Table = {
 
 const PRICES: Table = {
   name: "prices",
-  columns: { rate_class_id: "rateClassId", package_id: "packageId", price_jpy: "priceJpy" },
+  columns: {
+    rate_class_id: "rateClassId",
+    package_id: "packageId",
+    price_jpy: "priceJpy",
+    advance_price_jpy: "advancePriceJpy",
+  },
   order: "rate_class_id, package_id",
 };
 

@@ -24,7 +24,8 @@ type FeeFilter = {
   errors: unknown[];
 };
 
-export type FeeCell = { packageId: string; priceJpy: number | null };
+/** Both prices of a class and package (#131): null without a price row, and advancePriceJpy null on a row without one. */
+export type FeeCell = { packageId: string; priceJpy: number | null; advancePriceJpy: number | null };
 
 export type FeeRow = { rateClass: RateClass; cells: FeeCell[] };
 
@@ -59,8 +60,13 @@ export function buildFeeTable(catalog: Pick<Catalog, "rateClasses" | "packages" 
   const { group, rateClassId, packageId }: Partial<FeeFilter> = filter.errors.length > 0 ? {} : filter;
   const classes = [...catalog.rateClasses].sort(bySort);
   const packages = [...catalog.packages].sort(bySort);
-  const priceOf = (classId: string, pkgId: string) =>
-    catalog.prices.find((row) => row.rateClassId === classId && row.packageId === pkgId)?.priceJpy ?? null;
+  const rowOf = (classId: string, pkgId: string) =>
+    catalog.prices.find((row) => row.rateClassId === classId && row.packageId === pkgId);
+  const priceOf = (classId: string, pkgId: string) => rowOf(classId, pkgId)?.priceJpy ?? null;
+  const cellOf = (classId: string, pkgId: string): FeeCell => {
+    const row = rowOf(classId, pkgId);
+    return { packageId: pkgId, priceJpy: row?.priceJpy ?? null, advancePriceJpy: row?.advancePriceJpy ?? null };
+  };
 
   return RATE_GROUPS.flatMap((grp) => {
     if (group && group !== grp) return [];
@@ -72,7 +78,7 @@ export function buildFeeTable(catalog: Pick<Catalog, "rateClasses" | "packages" 
       .filter(({ id }) => !rateClassId || id === rateClassId)
       .map((rateClass) => ({
         rateClass,
-        cells: columns.map(({ id }) => ({ packageId: id, priceJpy: priceOf(rateClass.id, id) })),
+        cells: columns.map(({ id }) => cellOf(rateClass.id, id)),
       }));
     return rows.some(({ cells }) => cells.some(({ priceJpy }) => priceJpy !== null))
       ? [{ group: grp, packages: columns, rows }]

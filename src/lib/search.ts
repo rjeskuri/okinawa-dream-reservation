@@ -2,6 +2,7 @@
 // turn the result into what the page asks searchAvailability, lists, preselects and links to.
 import { CC_BANDS, type AvailabilityQuery, type AvailableModel, type CcBand } from "./booking/availability.ts";
 import { pickupWindowError, type PickupWindowReason } from "./booking/pickup-window.ts";
+import { shownPrice } from "./pricing.ts";
 import { jstToEpoch, parseHHmm } from "./time.ts";
 import type { Catalog, Model, Package, Price, ShopConfig, VehicleTypeId } from "./types.ts";
 
@@ -196,18 +197,20 @@ export function chosenPackage(packages: Package[], search: ParsedSearch): Packag
 /**
  * The package and price a card shows for its rate class. A chosen package prices every card, and a class without a price for
  * it gets none. With none chosen, each class takes its own first day package that has a price: bikes and cars have separate
- * packages, and an hours package never stands in. `packages` is in sort order, as readCatalog returns it.
+ * packages, and an hours package never stands in. `packages` is in sort order, as readCatalog returns it. The price is the
+ * one a booking at `now`, the moment of the request, pays for the searched pickup date, or the regular one without a date.
  */
 export function cardPrice(
   packages: Package[],
   prices: Price[],
   rateClassId: string,
   search: ParsedSearch,
+  now: number,
 ): { pkg: Package; priceJpy: number } | undefined {
   const pkg = chosenPackage(packages, search) ?? defaultPackage(packages, prices, rateClassId);
   if (pkg === undefined) return undefined;
   const price = prices.find((entry) => entry.rateClassId === rateClassId && entry.packageId === pkg.id);
-  return price && { pkg, priceJpy: price.priceJpy };
+  return price && { pkg, priceJpy: shownPrice(price, search.date, now) };
 }
 
 /** The search for a card to carry, `?` included, or "" when there is none. An invalid request carries nothing. */

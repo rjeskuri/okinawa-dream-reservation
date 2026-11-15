@@ -6,8 +6,8 @@
 --   Prices include tax. A tile drawn twice in two colours is one model with two vehicles.
 -- The e-bike rows (#130) come from the shop's e-bike flyer of 2026-11-04, which is not committed: the regular 1, 2 and 3 day
 --   prices, the 4-hour and 24-hour prices on the bikes' hours packages, and the ¥500 helmet. Its 2-hour price waits for an
---   hours package of that length (#50), and its advance-booking price is a later ticket. The 1 day price sits on
---   bike-same-day and the 2 and 3 day prices on car-2d and car-3d, so the e-bike table reads in the flyer's order.
+--   hours package of that length (#50). The 1 day price sits on bike-same-day and the 2 and 3 day prices on car-2d and
+--   car-3d, so the e-bike table reads in the flyer's order. Each of those rows also has the flyer's advance price (#131).
 --
 -- PLACEHOLDERS, which the site does not state and which the shop replaces:
 --   the e-bike's deposit (the same ¥1000 as every type), its brand (TBC), its two vehicles and its photo.
@@ -264,12 +264,15 @@ INSERT INTO prices (rate_class_id, package_id, price_jpy) VALUES
   ('r-van', 'car-4d', 36000),
   ('r-van', 'car-5d', 45000),
   ('r-van', 'car-6d', 54000),
-  ('r-van', 'car-7d', 63000),
-  ('ebike', 'bike-4h', 3500),
-  ('ebike', 'bike-same-day', 4500),
-  ('ebike', 'bike-24h', 5000),
-  ('ebike', 'car-2d', 8000),
-  ('ebike', 'car-3d', 10000);
+  ('r-van', 'car-7d', 63000);
+
+-- The e-bike rows with the flyer's advance prices (#131), for booking by the day before. Every other row has none.
+INSERT INTO prices (rate_class_id, package_id, price_jpy, advance_price_jpy) VALUES
+  ('ebike', 'bike-4h', 3500, 3000),
+  ('ebike', 'bike-same-day', 4500, 4000),
+  ('ebike', 'bike-24h', 5000, 4500),
+  ('ebike', 'car-2d', 8000, 7000),
+  ('ebike', 'car-3d', 10000, 9000);
 
 -- base_jpy is the first 24 hours. A free option has no extra charges on the site.
 INSERT INTO options (id, grp, sort, base_jpy, extra_per_hour_jpy, extra_per_24h_jpy, texts) VALUES
