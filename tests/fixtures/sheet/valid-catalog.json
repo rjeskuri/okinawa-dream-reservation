@@ -233,17 +233,17 @@
     }
   ],
   "prices": [
-    { "rateClassId": "scooter-50", "packageId": "hours-6", "priceJpy": 2500 },
-    { "rateClassId": "scooter-50", "packageId": "day-1", "priceJpy": 3500 },
-    { "rateClassId": "scooter-50", "packageId": "day-3", "priceJpy": 9000 },
-    { "rateClassId": "bike-125", "packageId": "hours-6", "priceJpy": 3600 },
-    { "rateClassId": "bike-125", "packageId": "day-1", "priceJpy": 5200 },
-    { "rateClassId": "bike-125", "packageId": "day-3", "priceJpy": 13800 },
-    { "rateClassId": "bike-400", "packageId": "hours-6", "priceJpy": 6100 },
-    { "rateClassId": "bike-400", "packageId": "day-1", "priceJpy": 9100 },
-    { "rateClassId": "bike-400", "packageId": "day-3", "priceJpy": 24700 },
-    { "rateClassId": "car-k", "packageId": "day-1", "priceJpy": 7300 },
-    { "rateClassId": "car-k", "packageId": "day-3", "priceJpy": 18900 }
+    { "rateClassId": "scooter-50", "packageId": "hours-6", "priceJpy": 2500, "advancePriceJpy": null },
+    { "rateClassId": "scooter-50", "packageId": "day-1", "priceJpy": 3500, "advancePriceJpy": null },
+    { "rateClassId": "scooter-50", "packageId": "day-3", "priceJpy": 9000, "advancePriceJpy": null },
+    { "rateClassId": "bike-125", "packageId": "hours-6", "priceJpy": 3600, "advancePriceJpy": null },
+    { "rateClassId": "bike-125", "packageId": "day-1", "priceJpy": 5200, "advancePriceJpy": null },
+    { "rateClassId": "bike-125", "packageId": "day-3", "priceJpy": 13800, "advancePriceJpy": null },
+    { "rateClassId": "bike-400", "packageId": "hours-6", "priceJpy": 6100, "advancePriceJpy": null },
+    { "rateClassId": "bike-400", "packageId": "day-1", "priceJpy": 9100, "advancePriceJpy": null },
+    { "rateClassId": "bike-400", "packageId": "day-3", "priceJpy": 24700, "advancePriceJpy": null },
+    { "rateClassId": "car-k", "packageId": "day-1", "priceJpy": 7300, "advancePriceJpy": null },
+    { "rateClassId": "car-k", "packageId": "day-3", "priceJpy": 18900, "advancePriceJpy": null }
   ],
   "options": [
     {

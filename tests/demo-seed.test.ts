@@ -366,6 +366,37 @@ test("the demo catalog publishes the e-bike with its prices, helmet and photo", 
   });
 });
 
+// #131. The flyer's advance prices, for booking by the day before, on the e-bike rows whose package the seed has: by days,
+// and by hours on the seed's 4 and 24 hour packages. The flyer's 2 hours waits for a 2-hour package (#50).
+const EBIKE_ADVANCE_DAY_PRICES: Record<number, number> = { 1: 4000, 2: 7000, 3: 9000 };
+const EBIKE_ADVANCE_HOUR_PRICES: Record<number, number> = { 2: 2000, 4: 3000, 24: 4500 };
+
+test("the demo catalog gives the e-bike rows the flyer's advance prices and no other row one", async () => {
+  await withDemoDb(async (db) => {
+    const catalog = await demoCatalog(db);
+    const packages = new Map(catalog.packages.map((pkg) => [pkg.id, pkg]));
+    // The cast reaches the field on the types of today and of after #131 alike.
+    const prices = catalog.prices as (PublishedCatalog["prices"][number] & { advancePriceJpy?: number | null })[];
+
+    const ebike = prices.filter(({ rateClassId }) => rateClassId === "ebike");
+    const lengths: string[] = [];
+    for (const { packageId, priceJpy, advancePriceJpy } of ebike) {
+      const pkg = packages.get(packageId);
+      assert.ok(pkg, `price of unknown package ${packageId}`);
+      const expected = pkg.days !== null ? EBIKE_ADVANCE_DAY_PRICES[pkg.days] : EBIKE_ADVANCE_HOUR_PRICES[pkg.hours as number];
+      const label = `${packageId} (${pkg.days ?? 0} days, ${pkg.hours ?? 0} hours)`;
+      assert.equal(advancePriceJpy, expected, label);
+      assert.ok(expected <= priceJpy, `${label}: the flyer's advance price is above its regular one`);
+      lengths.push(pkg.days !== null ? `${pkg.days}d` : `${pkg.hours}h`);
+    }
+    assert.deepEqual(sorted(lengths), sorted(["1d", "2d", "3d", "4h", "24h"]), "the e-bike rows that get an advance price");
+
+    for (const { rateClassId, packageId, advancePriceJpy } of prices.filter(({ rateClassId }) => rateClassId !== "ebike")) {
+      assert.equal(advancePriceJpy, null, `${rateClassId} ${packageId} has an advance price`);
+    }
+  });
+});
+
 test("loading the demo seed twice leaves the same rows", async () => {
   await withDemoDb(async (db) => {
     const counts = await rowCounts(db);

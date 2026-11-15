@@ -29,6 +29,11 @@ function modelTexts(en: string): Model["texts"] {
   return { ja: fields(`${en} 日本語`), en: fields(en), "zh-cn": fields(`${en} 中文`), ko: fields(`${en} 한국어`) };
 }
 
+/** A price row. advancePriceJpy (#131) is null where the row has none. */
+function price(rateClassId: string, packageId: string, priceJpy: number, advancePriceJpy: number | null = null) {
+  return { rateClassId, packageId, priceJpy, advancePriceJpy };
+}
+
 // Both fixtures are written in the order readCatalog returns, which the store has to fix because vehicles and prices have
 // no sort column and upserted rows keep their old place: vehicle types, rate classes, models, packages and options by
 // sort then id, vehicles by plate, prices by rate class id then package id, refund tiers by min_days_before, highest
@@ -111,14 +116,15 @@ const FIRST: Catalog = {
     { id: "three-days", days: 3, hours: null, sort: 10, texts: names("Three days") },
     { id: "four-hours", days: null, hours: 4, sort: 100, texts: names("Four hours") },
   ],
+  // An advance price (#131) on some rows only, each below its regular price.
   prices: [
-    { rateClassId: "k-car", packageId: "three-days", priceJpy: 15000 },
-    { rateClassId: "k-car", packageId: "week", priceJpy: 30000 },
-    { rateClassId: "r-125cc", packageId: "four-hours", priceJpy: 3000 },
-    { rateClassId: "r-125cc", packageId: "three-days", priceJpy: 9000 },
-    { rateClassId: "r-125cc", packageId: "week", priceJpy: 18000 },
-    { rateClassId: "r-400cc", packageId: "three-days", priceJpy: 12000 },
-    { rateClassId: "r-400cc", packageId: "week", priceJpy: 24000 },
+    price("k-car", "three-days", 15000),
+    price("k-car", "week", 30000, 28000),
+    price("r-125cc", "four-hours", 3000),
+    price("r-125cc", "three-days", 9000, 8500),
+    price("r-125cc", "week", 18000),
+    price("r-400cc", "three-days", 12000),
+    price("r-400cc", "week", 24000),
   ],
   options: [
     { id: "insurance", grp: "bike", sort: 9, baseJpy: 500, extraPerHourJpy: 100, extraPer24hJpy: null, texts: names("Insurance") },
@@ -224,13 +230,14 @@ const SECOND: Catalog = {
     { id: "week", days: 14, hours: null, sort: 3, texts: names("One week, second") },
     { id: "z-new-package", days: 60, hours: null, sort: 4, texts: names("New package") },
   ],
+  // r-125cc/three-days loses its advance price, r-400cc/week gains one equal to its price, and a new row has its own.
   prices: [
-    { rateClassId: "k-car", packageId: "four-hours", priceJpy: 4000 },
-    { rateClassId: "k-car", packageId: "z-new-package", priceJpy: 60000 },
-    { rateClassId: "r-125cc", packageId: "three-days", priceJpy: 9500 },
-    { rateClassId: "r-400cc", packageId: "week", priceJpy: 25000 },
-    { rateClassId: "z-new-class", packageId: "week", priceJpy: 33000 },
-    { rateClassId: "z-new-class", packageId: "z-new-package", priceJpy: 70000 },
+    price("k-car", "four-hours", 4000),
+    price("k-car", "z-new-package", 60000),
+    price("r-125cc", "three-days", 9500),
+    price("r-400cc", "week", 25000, 25000),
+    price("z-new-class", "week", 33000),
+    price("z-new-class", "z-new-package", 70000, 65000),
   ],
   options: [
     { id: "child-seat", grp: "bike", sort: 1, baseJpy: 700, extraPerHourJpy: 50, extraPer24hJpy: null, texts: names("Seat 2") },
@@ -283,7 +290,7 @@ function largeCatalog(): Catalog {
     baseUsageDays: i,
   }));
   const prices = rateClasses.flatMap((rateClass, r) =>
-    packages.map((pkg, p) => ({ rateClassId: rateClass.id, packageId: pkg.id, priceJpy: 1000 + 100 * r + p })),
+    packages.map((pkg, p) => price(rateClass.id, pkg.id, 1000 + 100 * r + p, p % 2 === 0 ? 900 + 100 * r + p : null)),
   );
   return { ...FIRST, rateClasses, models, vehicles, packages, prices };
 }
@@ -585,8 +592,8 @@ test("a failing replace leaves the previous catalog", async () => {
 
     // SECOND changes every list and the bad row is a price, the child written after its parents. The foreign key error
     // shows the batch reached that statement: nothing else in these catalogs can raise one.
-    const noClass = { rateClassId: "no-such-class", packageId: "week", priceJpy: 9000 };
-    const noPackage = { rateClassId: "k-car", packageId: "no-such-package", priceJpy: 9000 };
+    const noClass = price("no-such-class", "week", 9000);
+    const noPackage = price("k-car", "no-such-package", 9000);
     const bad: Catalog[] = [
       { ...SECOND, prices: [...SECOND.prices, noClass] },
       { ...SECOND, prices: [noClass, ...SECOND.prices] },

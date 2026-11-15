@@ -51,7 +51,8 @@ const STATUS_COLUMNS: Record<string, { column: string; lastRow: number }> = {
   Types: { column: "H", lastRow: 4 },
   RateClasses: { column: "I", lastRow: 5 },
   Packages: { column: "I", lastRow: 4 },
-  Prices: { column: "D", lastRow: 12 },
+  // advance_price_jpy (#131) sits before publish_status.
+  Prices: { column: "E", lastRow: 12 },
   Models: { column: "W", lastRow: 6 },
   Vehicles: { column: "G", lastRow: 7 },
   Options: { column: "K", lastRow: 3 },

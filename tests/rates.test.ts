@@ -90,8 +90,8 @@ function dayPackage(id: string, days: number, sort: number): Package {
   return { ...copied, id, days, hours: null, sort };
 }
 
-function price(rateClassId: string, packageId: string, priceJpy: number) {
-  return { rateClassId, packageId, priceJpy };
+function price(rateClassId: string, packageId: string, priceJpy: number, advancePriceJpy: number | null = null) {
+  return { rateClassId, packageId, priceJpy, advancePriceJpy };
 }
 
 test("buildFeeTable lays out classes and packages in sort order", async () => {
@@ -392,5 +392,128 @@ test("the fee schedule has an e-bike group", async () => {
     const heading = strings["rates.group.ebike"]?.[locale];
     assert.ok(heading?.trim(), `rates.group.ebike has no ${locale} text`);
     assert.notEqual(heading, strings["rates.group.bike"]?.[locale], `rates.group.ebike is the bikes' ${locale} text`);
+  }
+});
+
+// #131: a price row may carry an advance price, for booking by the day before. Each cell of buildFeeTable carries it beside
+// the regular price, as { priceJpy, advancePriceJpy } with null for a row that has none, so the page can show both where a
+// row has one. The labels of the two are the ticket's, in all four locales.
+
+type BothCells = { group: string; packages: { id: string }[]; rows: { rateClass: { id: string }; cells: unknown[] }[] };
+
+/** A cell as [regular, advance], with "missing" for a cell that has no advancePriceJpy field at all. */
+type Pair = [number | null, number | null | "missing"];
+
+type BothLayout = Record<string, { packages: string[]; rows: (string | Pair)[][] }>;
+
+/** What the page would lay out for `query`, with both prices of every cell. */
+async function bothPrices(query: string, catalog: Catalog): Promise<BothLayout> {
+  const { buildFeeTable } = await rates();
+  const groups = buildFeeTable(catalog, await parse(query, catalog)) as unknown as BothCells[];
+  return Object.fromEntries(
+    groups.map(({ group, packages, rows }) => [
+      group,
+      {
+        packages: packages.map(({ id }) => id),
+        rows: rows.map(({ rateClass, cells }) => [
+          rateClass.id,
+          ...cells.map((cell) => {
+            const { priceJpy, advancePriceJpy } = cell as { priceJpy?: number | null; advancePriceJpy?: number | null };
+            const pair: Pair = [priceJpy ?? null, advancePriceJpy === undefined ? "missing" : advancePriceJpy];
+            return pair;
+          }),
+        ]),
+      },
+    ]),
+  );
+}
+
+/** `catalog` with these advance prices, by "class/package", and none on every other row. */
+function withAdvance(catalog: Catalog, advance: Record<string, number>, extra: ReturnType<typeof price>[] = []): Catalog {
+  return {
+    ...catalog,
+    prices: [
+      ...catalog.prices.map(({ rateClassId, packageId, priceJpy }) =>
+        price(rateClassId, packageId, priceJpy, advance[`${rateClassId}/${packageId}`] ?? null),
+      ),
+      ...extra,
+    ],
+  };
+}
+
+test("the fee schedule shows both prices for a row with an advance price", async () => {
+  // The flyer's e-bike prices, and a bike row with one of its own: the shop sets it per row.
+  const flyer = withAdvance(withEbike(CATALOG), { "ebike-std/day-1": 4000, "ebike-std/day-3": 9000, "bike-125/day-3": 12_900 });
+  const bike = {
+    packages: ["hours-6", "day-1", "day-3"],
+    rows: [
+      ["scooter-50", [2500, null], [3500, null], [9000, null]],
+      ["bike-125", [3600, null], [5200, null], [13_800, 12_900]],
+      ["bike-400", [6100, null], [9100, null], [24_700, null]],
+    ],
+  };
+  const car = { packages: ["day-1", "day-3"], rows: [["car-k", [7300, null], [18_900, null]]] };
+  const ebike = { packages: ["hours-6", "day-1", "day-3"], rows: [["ebike-std", [2500, null], [4500, 4000], [10_000, 9000]]] };
+  assert.deepEqual(await bothPrices("", flyer), { bike, car, ebike });
+
+  // Filters narrow the cells and keep both prices in each.
+  const cases: [query: string, expected: Record<string, unknown>][] = [
+    ["group=ebike", { ebike }],
+    ["class=ebike-std&duration=day-1", { ebike: { packages: ["day-1"], rows: [["ebike-std", [4500, 4000]]] } }],
+    ["group=ebike&duration=hours-6", { ebike: { packages: ["hours-6"], rows: [["ebike-std", [2500, null]]] } }],
+    [
+      "duration=day-3",
+      {
+        bike: {
+          packages: ["day-3"],
+          rows: [
+            ["scooter-50", [9000, null]],
+            ["bike-125", [13_800, 12_900]],
+            ["bike-400", [24_700, null]],
+          ],
+        },
+        car: { packages: ["day-3"], rows: [["car-k", [18_900, null]]] },
+        ebike: { packages: ["day-3"], rows: [["ebike-std", [10_000, 9000]]] },
+      },
+    ],
+  ];
+  for (const [query, expected] of cases) assert.deepEqual(await bothPrices(query, flyer), expected, query);
+
+  // The advance prices are the catalog's, whatever they are, and a class without a price has neither.
+  const other = withAdvance(
+    withEbike(CATALOG),
+    { "ebike-std/hours-6": 2100, "ebike-std/day-1": 4321, "car-k/day-1": 6900 },
+    [price("ebike-cargo", "day-3", 12_000, 11_500)],
+  );
+  const grown = { ...other, rateClasses: [...other.rateClasses, { ...EBIKE_RATE_CLASS, id: "ebike-cargo", sort: 9 }] };
+  assert.deepEqual(await bothPrices("group=ebike", grown), {
+    ebike: {
+      packages: ["hours-6", "day-1", "day-3"],
+      rows: [
+        ["ebike-std", [2500, 2100], [4500, 4321], [10_000, null]],
+        ["ebike-cargo", [null, null], [null, null], [12_000, 11_500]],
+      ],
+    },
+  });
+  assert.deepEqual(await bothPrices("class=car-k", grown), {
+    car: { packages: ["day-1", "day-3"], rows: [["car-k", [7300, 6900], [18_900, null]]] },
+  });
+
+  // The two columns' labels, found by the ticket's English and filled in for every locale, never the same text.
+  // @ts-ignore
+  const loaded = (await import("../src/i18n/strings/rates.ts")) as Record<string, Record<string, Record<string, string>>>;
+  const entries = Object.values(loaded).flatMap((dictionary) => Object.values(dictionary));
+  const labelled = (english: string) => {
+    const found = entries.filter((entry) => entry.en?.trim().toLowerCase() === english.toLowerCase());
+    assert.equal(found.length, 1, `one rates string reads "${english}" in English, found ${found.length}`);
+    return found[0];
+  };
+  const ahead = labelled("Book by the day before");
+  const sameDay = labelled("Same day");
+  for (const locale of LOCALES) {
+    assert.ok(ahead[locale]?.trim(), `"Book by the day before" has no ${locale} text`);
+    assert.ok(sameDay[locale]?.trim(), `"Same day" has no ${locale} text`);
+    assert.notEqual(ahead[locale], sameDay[locale], `the two labels read the same in ${locale}`);
+    if (locale !== "en") assert.notEqual(ahead[locale], ahead.en, `"Book by the day before" is not translated to ${locale}`);
   }
 });

@@ -49,7 +49,13 @@ const TABLES: Record<string, string[]> = {
     "texts TEXT NOT NULL",
   ],
   packages: ["id TEXT PRIMARY KEY", "days INTEGER", "hours INTEGER", "sort INTEGER NOT NULL", "texts TEXT NOT NULL"],
-  prices: ["rate_class_id TEXT PRIMARY KEY", "package_id TEXT PRIMARY KEY", "price_jpy INTEGER NOT NULL"],
+  prices: [
+    "rate_class_id TEXT PRIMARY KEY",
+    "package_id TEXT PRIMARY KEY",
+    "price_jpy INTEGER NOT NULL",
+    // #131: the price for booking by the day before. NULL is none.
+    "advance_price_jpy INTEGER",
+  ],
   options: [
     "id TEXT PRIMARY KEY",
     "grp TEXT NOT NULL",
@@ -501,6 +507,108 @@ test("engine_cc may be null only for an e-bike", async (t) => {
   }
 });
 
+// #131: prices.advance_price_jpy is NULL for none, or whole yen above 0 and no higher than the row's own price_jpy, as the
+// sheet checks it. Each case is a row of its own package, so a refusal can only be about the two prices on it.
+test("prices refuse an advance price above the regular price", async (t) => {
+  const { db, dispose } = await createTestDb();
+  try {
+    const rate = await seedRateClass(db, { grp: "ebike" });
+    let cases = 0;
+    const freshRow = async (price_jpy: number, advance_price_jpy: SqlValue): Promise<SqlRow> => {
+      cases += 1;
+      const pkg = await seedPackage(db, { id: `advance-case-${cases}` });
+      return { rate_class_id: rate.id, package_id: pkg.id, price_jpy, advance_price_jpy };
+    };
+    const priceRows = async () => countRows(db, "prices");
+
+    // [price_jpy, advance_price_jpy]
+    const refused: [number, SqlValue][] = [
+      [8000, 8001],
+      [4000, 4500],
+      [7300, 9000],
+      [1, 2],
+      [8000, 0],
+      [4500, -1],
+      [4500, -4000],
+    ];
+    for (const [price, advance] of refused) {
+      await t.test(`price ${price}, advance ${advance} is refused`, async () => {
+        const before = await priceRows();
+        await assert.rejects(insertRow(db, "prices", await freshRow(price, advance)), /CHECK constraint failed/);
+        assert.equal(await priceRows(), before, "a row was left behind");
+      });
+    }
+
+    // Text and fractions are refused by the column's type, as for every money column.
+    for (const advance of ["abc", "free", 3999.5]) {
+      await t.test(`advance ${JSON.stringify(advance)} is refused`, async () => {
+        const before = await priceRows();
+        await assert.rejects(
+          insertRow(db, "prices", await freshRow(4500, advance)),
+          /cannot store (TEXT|REAL) value in INTEGER column prices\.advance_price_jpy/,
+        );
+        assert.equal(await priceRows(), before, "a row was left behind");
+      });
+    }
+
+    const accepted: [number, SqlValue][] = [
+      [4500, 4000],
+      [8000, 7999],
+      [8000, 8000],
+      [8000, 1],
+      [1, 1],
+      [10_000, null],
+      [15_000, 9000],
+    ];
+    for (const [price, advance] of accepted) {
+      await t.test(`price ${price}, advance ${advance} goes in`, async () => {
+        const stored = await insertRow<SqlRow>(db, "prices", await freshRow(price, advance));
+        assert.deepEqual([stored.price_jpy, stored.advance_price_jpy], [price, advance]);
+      });
+    }
+
+    await t.test("a row without the column named has no advance price", async () => {
+      const pkg = await seedPackage(db, { id: "advance-case-unnamed" });
+      const stored = await insertRow<SqlRow>(db, "prices", { rate_class_id: rate.id, package_id: pkg.id, price_jpy: 6000 });
+      assert.equal(stored.advance_price_jpy, null);
+    });
+
+    // An update is held to the same rule, whichever of the two prices it moves.
+    await t.test("an update cannot put the advance price above the regular one", async () => {
+      const row = await freshRow(4500, 4000);
+      await insertRow(db, "prices", row);
+      const key = [row.rate_class_id, row.package_id];
+      const read = () =>
+        db
+          .prepare("SELECT price_jpy, advance_price_jpy FROM prices WHERE rate_class_id = ?1 AND package_id = ?2")
+          .bind(...key)
+          .first();
+      for (const [sql, value] of [
+        ["UPDATE prices SET price_jpy = ?3 WHERE rate_class_id = ?1 AND package_id = ?2", 3999],
+        ["UPDATE prices SET advance_price_jpy = ?3 WHERE rate_class_id = ?1 AND package_id = ?2", 4501],
+        ["UPDATE prices SET advance_price_jpy = ?3 WHERE rate_class_id = ?1 AND package_id = ?2", 0],
+      ] as const) {
+        await assert.rejects(
+          db
+            .prepare(sql)
+            .bind(...key, value)
+            .run(),
+          /CHECK constraint failed/,
+          `${sql} with ${value}`,
+        );
+        assert.deepEqual(await read(), { price_jpy: 4500, advance_price_jpy: 4000 });
+      }
+      await db
+        .prepare("UPDATE prices SET price_jpy = 4000 WHERE rate_class_id = ?1 AND package_id = ?2")
+        .bind(...key)
+        .run();
+      assert.deepEqual(await read(), { price_jpy: 4000, advance_price_jpy: 4000 });
+    });
+  } finally {
+    await dispose();
+  }
+});
+
 interface IndexInfo {
   name: string;
   unique: number;
@@ -924,6 +1032,8 @@ const MONEY_COLUMNS: TypedColumn[] = [
   { table: "vehicle_types", column: "deposit_jpy", valid: 3000 },
   { table: "rate_classes", column: "extension_per_hour_jpy", valid: 1000 },
   { table: "prices", column: "price_jpy", valid: 8000 },
+  // Below the valid row's price_jpy of 8000, so only the type can refuse it.
+  { table: "prices", column: "advance_price_jpy", valid: 7000 },
   { table: "options", column: "base_jpy", valid: 500 },
   { table: "options", column: "extra_per_hour_jpy", valid: 200 },
   { table: "options", column: "extra_per_24h_jpy", valid: 900 },

@@ -16,7 +16,7 @@ const SHEET_TABS_ = {
     "publish_status",
   ],
   Packages: ["package_id", "days", "hours", "sort", "name_ja", "name_en", "name_zh", "name_ko", "publish_status"],
-  Prices: ["rate_class_id", "package_id", "price_jpy", "publish_status"],
+  Prices: ["rate_class_id", "package_id", "price_jpy", "advance_price_jpy", "publish_status"],
   Models: [
     "model_id", "type_id", "rate_class_id", "brand", "seats", "engine_cc", "license_class", "sort", "active",
     "name_ja", "name_en", "name_zh", "name_ko", "summary_ja", "summary_en", "summary_zh", "summary_ko",

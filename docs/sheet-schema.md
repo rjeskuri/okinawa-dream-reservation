@@ -162,8 +162,16 @@ new rows here. Prices include tax.
 | `rate_class_id` | Yes | An id from RateClasses |
 | `package_id` | Yes | An id from Packages |
 | `price_jpy` | Yes | Money, 1 or more |
+| `advance_price_jpy` | No | Blank for none, or money from 1 up to the row's own `price_jpy` |
 
-Example: `bike-125`, `day-1`, `¥5,200`.
+Example: `bike-125`, `day-1`, `¥5,200`, blank.
+
+`advance_price_jpy` is the price for booking ahead: a guest who books by 23:59 Japan time the day before the pickup date
+pays it, and a booking on the pickup date pays `price_jpy`. A blank cell means the row has one price for everyone. A
+value above `price_jpy` is an error, not a cap, because the two columns are most likely swapped: the row is skipped, as
+is a zero or text. The price is fixed when the guest's hold is made, so a publish after that does not change it.
+
+Example: `ebike`, `day-1`, `4500`, `4000`: ¥4,000 when booked by the day before, ¥4,500 on the day.
 
 ## Models
 

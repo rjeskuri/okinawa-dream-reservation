@@ -126,10 +126,23 @@ const view = catalog && schedule(catalog);
                         <th scope="row">
                           <a href={listing({ class: rateClass.id })}>{sheetName(rateClass.texts, locale)}</a>
                         </th>
-                        {cells.map(({ packageId, priceJpy }) => (
+                        {cells.map(({ packageId, priceJpy, advancePriceJpy }) => (
                           <td data-package={packageId} hidden={columnHidden(packageId)}>
                             {priceJpy !== null && (
-                              <a href={listing({ class: rateClass.id, package: packageId })}>{yen(priceJpy)}</a>
+                              <a href={listing({ class: rateClass.id, package: packageId })}>
+                                {advancePriceJpy === null ? (
+                                  yen(priceJpy)
+                                ) : (
+                                  <>
+                                    <span class="price" data-price="advance">
+                                      {t(locale, rates, "rates.price.advance")} {yen(advancePriceJpy)}
+                                    </span>
+                                    <span class="price" data-price="same-day">
+                                      {t(locale, rates, "rates.price.sameDay")} {yen(priceJpy)}
+                                    </span>
+                                  </>
+                                )}
+                              </a>
                             )}
                           </td>
                         ))}
@@ -253,6 +266,10 @@ const view = catalog && schedule(catalog);
   thead th,
   td {
     white-space: nowrap;
+  }
+  /* A row with an advance price shows it above the same-day price, each on its own line. */
+  .price {
+    display: block;
   }
   th:first-child {
     position: sticky;

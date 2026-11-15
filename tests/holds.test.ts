@@ -1400,3 +1400,196 @@ test("getBooking returns the stored booking or null", async () => {
 test("assignFreeVehicleSql is exported for the block and override tasks", () => {
   assert.ok(["string", "function"].includes(typeof assignFreeVehicleSql), typeof assignFreeVehicleSql);
 });
+
+// #131: a price row may carry an advance price, which a guest pays who books before the pickup's JST date. The hold decides
+// between the two and locks the result in bookings.price_jpy. The shop opens at 08:00 here, so a pickup can fall on the UTC
+// date of a hold made the JST day before, and the lead time is 0, so a hold can be made on the pickup date at all. Which
+// side of the rule each case falls on is written by hand.
+const ADVANCE_SHOP = { shop_open: "08:00", shop_close: "18:00", min_lead_hours: 0 };
+
+/** A JST wall clock with seconds or milliseconds where a case needs them, from Date.parse alone. */
+function wall(date: string, clock: string): number {
+  const instant = Date.parse(`${date}T${clock}+09:00`);
+  assert.ok(Number.isFinite(instant), `bad fixture time ${date} ${clock}`);
+  return instant;
+}
+
+type AdvanceRow = {
+  label: string;
+  modelId: string;
+  packageId: string;
+  priceJpy: number;
+  advancePriceJpy: number | null;
+  depositJpy: number;
+};
+
+// [days, price_jpy, advance_price_jpy] per type. The e-bike's are the flyer's; a bike row has one too, because the shop sets
+// it per row, not per type. Two rows have none.
+const ADVANCE_FEES: { type: string; grp: string; deposit: number; rows: [number, number, number | null][] }[] = [
+  {
+    type: "ebike",
+    grp: "ebike",
+    deposit: 1500,
+    rows: [
+      [1, 4500, 4000],
+      [2, 8000, 7000],
+      [3, 10_000, 9000],
+      [5, 15_000, null],
+    ],
+  },
+  {
+    type: "motorcycle",
+    grp: "bike",
+    deposit: 10_000,
+    rows: [
+      [1, 5200, null],
+      [3, 13_800, 12_900],
+      [4, 17_000, 16_400],
+    ],
+  },
+];
+
+/** Both types, a model of each with bikes enough for every overlapping hold, and every row of ADVANCE_FEES. */
+async function seedAdvanceShop(db: D1Database): Promise<AdvanceRow[]> {
+  const rows: AdvanceRow[] = [];
+  for (const { type, grp, deposit, rows: fees } of ADVANCE_FEES) {
+    await seedType(db, { id: type, deposit_jpy: deposit });
+    const rateClass = await seedRateClass(db, { grp });
+    const engine = type === "ebike" ? { engine_cc: null, license_class: "none" } : {};
+    const model = await seedModel(db, { type_id: type, rate_class_id: rateClass.id, ...engine });
+    await seedFleet(db, model.id, 40);
+    for (const [days, price_jpy, advance_price_jpy] of fees) {
+      const pkg = await seedPackage(db, { days });
+      await seedPrice(db, { rate_class_id: rateClass.id, package_id: pkg.id, price_jpy, advance_price_jpy });
+      rows.push({
+        label: `${type}, ${days} days`,
+        modelId: model.id,
+        packageId: pkg.id,
+        priceJpy: price_jpy,
+        advancePriceJpy: advance_price_jpy,
+        depositJpy: deposit,
+      });
+    }
+  }
+  return rows;
+}
+
+/** Holds `row` for `startAt` at `now`, and checks the price and deposit on the booking and on the stored row. */
+async function holdPrice(db: D1Database, row: AdvanceRow, startAt: number, now: number, label: string): Promise<Booking> {
+  const input = holdFor({ modelId: row.modelId, packageId: row.packageId, rateClassId: "" }, { startAt });
+  const booking = booked(await createHold(db, input, now), label);
+  assert.equal(booking.depositJpy, row.depositJpy, `${label}: the deposit follows the type, not the price`);
+  const stored = await db
+    .prepare("SELECT price_jpy, deposit_jpy FROM bookings WHERE id = ?1")
+    .bind(input.id)
+    .first<{ price_jpy: number; deposit_jpy: number }>();
+  assert.deepEqual(stored, { price_jpy: booking.priceJpy, deposit_jpy: row.depositJpy }, `${label}: the stored row`);
+  return booking;
+}
+
+/** [label, the hold's now, the pickup]: each now is on a JST date before the pickup's. */
+const BEFORE_THE_PICKUP_DATE: [string, number, number][] = [
+  ["nine days ahead", wall("2030-06-01", "12:00"), wall("2030-06-10", "09:00")],
+  ["at 00:00:00 JST the day before", wall("2030-06-09", "00:00:00"), wall("2030-06-10", "17:30")],
+  // 10:00 JST on the 9th is 01:00 UTC on the 9th, and 08:00 JST on the 10th is 23:00 UTC on the 9th: one UTC date.
+  ["the day before in JST, the same date in UTC", wall("2030-06-09", "10:00"), wall("2030-06-10", "08:00")],
+  ["at 23:59:59 JST the day before", wall("2030-06-09", "23:59:59"), wall("2030-06-10", "09:00")],
+  ["in the last millisecond of the day before", wall("2030-06-12", "23:59:59.999"), wall("2030-06-13", "08:30")],
+];
+
+/** [label, the hold's now, the pickup, the last second before that JST date]: each now is on the pickup's JST date. */
+const ON_THE_PICKUP_DATE: [string, number, number, number][] = [
+  ["at 00:00:00 JST", wall("2030-06-10", "00:00:00"), wall("2030-06-10", "09:00"), wall("2030-06-09", "23:59:59")],
+  [
+    "a millisecond past midnight",
+    wall("2030-06-10", "00:00:00.001"),
+    wall("2030-06-10", "17:30"),
+    wall("2030-06-09", "23:59:59"),
+  ],
+  // 08:30 JST on the 10th is 23:30 UTC on the 9th, and the 09:00 pickup is 00:00 UTC on the 10th: a UTC date says ahead.
+  [
+    "at 08:30 JST, the day before in UTC",
+    wall("2030-06-10", "08:30"),
+    wall("2030-06-10", "09:00"),
+    wall("2030-06-09", "23:59:59"),
+  ],
+  [
+    "at 08:59 JST, for an afternoon pickup",
+    wall("2030-06-10", "08:59"),
+    wall("2030-06-10", "12:30"),
+    wall("2030-06-09", "23:59:59"),
+  ],
+  ["at noon, for an evening pickup", wall("2030-06-13", "12:00"), wall("2030-06-13", "17:00"), wall("2030-06-12", "23:59:59")],
+];
+
+test("a hold locks the advance price", async () => {
+  await withShop(async (db) => {
+    const rows = await seedAdvanceShop(db);
+
+    // Every row, at every moment before the pickup's date: the advance price where the row has one, else the regular one.
+    const lastEvening = new Map<AdvanceRow, Booking>();
+    for (const [when, now, startAt] of BEFORE_THE_PICKUP_DATE) {
+      for (const row of rows) {
+        const label = `${row.label}, ${when}`;
+        const booking = await holdPrice(db, row, startAt, now, label);
+        assert.equal(booking.priceJpy, row.advancePriceJpy ?? row.priceJpy, label);
+        if (when === "at 23:59:59 JST the day before") lastEvening.set(row, booking);
+      }
+    }
+
+    // Locked: a publish after midnight changes every price, and a replay on the pickup date still gets the hold as made.
+    await db.prepare("UPDATE prices SET price_jpy = price_jpy + 700, advance_price_jpy = NULL").run();
+    for (const [row, held] of lastEvening) {
+      const replay = holdFor(
+        { modelId: row.modelId, packageId: row.packageId, rateClassId: "" },
+        { id: held.id, startAt: held.startAt, locale: held.locale ?? "en" },
+      );
+      assert.deepEqual(await createHold(db, replay, wall("2030-06-10", "00:05")), { ok: true, booking: held }, row.label);
+      assert.deepEqual(await getBooking(db, held.id), held, row.label);
+    }
+
+    // A publish lands after every check and just before the insert: the hold takes the advance price as it stands then.
+    const [oneDay, , , noAdvance] = rows;
+    const restore = (row: AdvanceRow, price: number, advance: number | null) =>
+      db
+        .prepare("UPDATE prices SET price_jpy = ?1, advance_price_jpy = ?2 WHERE package_id = ?3")
+        .bind(price, advance, row.packageId)
+        .run();
+    await restore(oneDay, 4500, 4000);
+    await restore(noAdvance, 15_000, null);
+    const races: [string, AdvanceRow, number | null, number][] = [
+      ["the advance price lowered", oneDay, 3800, 3800],
+      ["the advance price cleared", oneDay, null, 4500],
+      ["an advance price added", noAdvance, 14_200, 14_200],
+    ];
+    for (const [label, row, advance, expected] of races) {
+      const publish = raceBeforeInsert(db, () =>
+        db.prepare("UPDATE prices SET advance_price_jpy = ?1 WHERE package_id = ?2").bind(advance, row.packageId).run(),
+      );
+      const input = holdFor({ modelId: row.modelId, packageId: row.packageId, rateClassId: "" }, {
+        startAt: wall("2030-07-20", "09:00"),
+      });
+      const held = booked(await createHold(publish.db, input, wall("2030-07-01", "12:00")), label);
+      assert.ok(publish.raced(), `${label}: no statement inserted into bookings`);
+      assert.equal(held.priceJpy, expected, label);
+    }
+  }, ADVANCE_SHOP);
+});
+
+test("a same-day hold pays the regular price", async () => {
+  await withShop(async (db) => {
+    const rows = await seedAdvanceShop(db);
+    for (const [when, now, startAt, dayBefore] of ON_THE_PICKUP_DATE) {
+      for (const row of rows) {
+        const label = `${row.label}, ${when}`;
+        const booking = await holdPrice(db, row, startAt, now, label);
+        assert.equal(booking.priceJpy, row.priceJpy, label);
+
+        // The same pickup held a second before that JST midnight gets the advance price, where the row has one.
+        const aheadLabel = `${row.label}, the same pickup held the second before midnight`;
+        const ahead = await holdPrice(db, row, startAt, dayBefore, aheadLabel);
+        assert.equal(ahead.priceJpy, row.advancePriceJpy ?? row.priceJpy, aheadLabel);
+      }
+    }
+  }, ADVANCE_SHOP);
+});

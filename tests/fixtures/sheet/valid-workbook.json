@@ -30,7 +30,7 @@
     ["day-3", 3, "", 3, "3日", "3 days", "3天", "3일"]
   ],
   "Prices": [
-    ["rate_class_id", "package_id", "price_jpy", "publish_status"],
+    ["rate_class_id", "package_id", "price_jpy", "advance_price_jpy", "publish_status"],
     ["scooter-50", "hours-6", 2500],
     ["scooter-50", "day-1", 3500],
     ["scooter-50", "day-3", 9000],

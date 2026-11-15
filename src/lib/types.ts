@@ -82,6 +82,8 @@ export type Price = {
   rateClassId: string;
   packageId: string;
   priceJpy: number;
+  /** The price for booking by the day before (#131), at most priceJpy, or null for none: src/lib/pricing.ts applies it. */
+  advancePriceJpy: number | null;
 };
 
 /** A priced extra on the fee schedule. */

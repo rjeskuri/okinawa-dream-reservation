@@ -788,7 +788,7 @@ const FREE_OF_TYPE: Record<Exclude<VehicleTypeId, "ebike">, string[]> = {
 
 function homeSearchCatalog(): Catalog {
   const priced = (rateClassId: string, prices: Record<string, number>) =>
-    Object.entries(prices).map(([packageId, priceJpy]) => ({ rateClassId, packageId, priceJpy }));
+    Object.entries(prices).map(([packageId, priceJpy]) => ({ rateClassId, packageId, priceJpy, advancePriceJpy: null }));
   const models = [
     vehicleModel("m-z-vino", "scooter", "r-scoot", 1),
     vehicleModel("m-y-cub", "motorcycle", "r-bike", 2),

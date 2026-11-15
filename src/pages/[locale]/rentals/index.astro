@@ -48,7 +48,7 @@ async function list(catalog: PublishedCatalog) {
   const cards = listedModels(catalog.models, search, found).map((model) => ({
     model,
     href: `/${locale}/rentals/${model.id}${carried}`,
-    priced: cardPrice(catalog.packages, catalog.prices, model.rateClassId, search),
+    priced: cardPrice(catalog.packages, catalog.prices, model.rateClassId, search, now),
     photo: model.photos.map((name) => photoUrl(name, photos)).find((url) => url !== null) ?? null,
     rateClass: catalog.rateClasses.find(({ id }) => id === model.rateClassId),
     depositJpy: catalog.vehicleTypes.find(({ id }) => id === model.typeId)?.depositJpy,

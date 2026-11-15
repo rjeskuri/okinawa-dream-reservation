@@ -2,6 +2,7 @@
 // Pickup-window validation (shop hours, slots, closed dates, lead time) is the caller's, before this runs.
 import { BLOCKING_SQL, OVERLAP_SQL, rentalEnd } from "../db/blocking.ts";
 import { readShopConfig } from "../db/config.ts";
+import { bookedAhead } from "../pricing.ts";
 import type { VehicleTypeId } from "../types.ts";
 
 export type CcBand = "upto50" | "51to125" | "126to400" | "over400";
@@ -27,10 +28,13 @@ export const CC_BANDS: Record<CcBand, [min: number, max: number]> = {
 };
 
 // ?1 to ?4 are q(s, e, buf, now), then ?5 the package, ?6 the type and ?7, ?8 the band's ends. A null ?6 or ?7 turns its
-// filter off. The joins to prices and vehicles drop a model with no price or no free active bike, so vacancies >= 1.
+// filter off. ?9 is 1 for a search made ahead of the pickup's JST date, which prices it as a hold would (#131). The joins to
+// prices and vehicles drop a model with no price or no free active bike, so vacancies >= 1.
 const SEARCH_SQL = `
 WITH q(s, e, buf, now) AS (SELECT ?1, ?2, ?3, ?4)
-SELECT m.id AS modelId, COUNT(*) AS vacancies, p.price_jpy AS priceJpy, t.deposit_jpy AS depositJpy
+SELECT m.id AS modelId, COUNT(*) AS vacancies,
+  CASE WHEN ?9 = 1 AND p.advance_price_jpy IS NOT NULL THEN p.advance_price_jpy ELSE p.price_jpy END AS priceJpy,
+  t.deposit_jpy AS depositJpy
 FROM models m
 JOIN prices p ON p.rate_class_id = m.rate_class_id AND p.package_id = ?5
 JOIN vehicle_types t ON t.id = m.type_id
@@ -59,9 +63,10 @@ export async function searchAvailability(db: D1Database, q: AvailabilityQuery): 
   const endAt = rentalEnd(q.startAt, { days: pkg.days }, config);
   const bufMs = config.turnaroundMinutes * MINUTE_MS;
   const [minCc, maxCc] = q.ccBand === undefined ? [null, null] : CC_BANDS[q.ccBand];
+  const ahead = bookedAhead(q.now, q.startAt) ? 1 : 0;
   const { results } = await db
     .prepare(SEARCH_SQL)
-    .bind(q.startAt, endAt, bufMs, q.now, q.packageId, q.typeId ?? null, minCc, maxCc)
+    .bind(q.startAt, endAt, bufMs, q.now, q.packageId, q.typeId ?? null, minCc, maxCc, ahead)
     .all<AvailableModel>();
   return results;
 }

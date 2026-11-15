@@ -273,6 +273,18 @@ function parseOn(catalog: Catalog, query: Record<string, string>, now = NOW): Pa
   return parseSearch(new URLSearchParams(query), catalog, catalog.config, catalog.closedDates, now);
 }
 
+/**
+ * cardPrice with the moment of the request as its fifth argument (#131), the clock the listing gives parseSearch too.
+ * Called through this loose type, so the calls compile on the cardPrice of before the change and of after it alike.
+ */
+const cardPriceAt = cardPrice as unknown as (
+  packages: Catalog["packages"],
+  prices: Catalog["prices"],
+  rateClassId: string,
+  search: ParsedSearch,
+  now: number,
+) => { pkg: { id: string }; priceJpy: number } | undefined;
+
 test("an e-bike search ignores the engine band", async (t) => {
   const catalog = withEbike(expectedCatalog());
 
@@ -320,7 +332,7 @@ test("an e-bike search ignores the engine band", async (t) => {
           const { parsed, found, listed } = await search(query);
           assert.deepEqual(found, [{ modelId: EBIKE_MODEL, vacancies: 2, priceJpy, depositJpy: 0 }], label);
           assert.deepEqual(listed, [EBIKE_MODEL], label);
-          assert.equal(cardPrice(stored.packages, stored.prices, EBIKE_CLASS, parsed)?.priceJpy, priceJpy, label);
+          assert.equal(cardPriceAt(stored.packages, stored.prices, EBIKE_CLASS, parsed, NOW)?.priceJpy, priceJpy, label);
         }
       }
       // The band still narrows a scooter search: only today-50 is up to 50 cc.
@@ -356,4 +368,42 @@ test("an e-bike search ignores the engine band", async (t) => {
       await dispose();
     }
   });
+});
+
+// #131: a card priced for a chosen pickup date shows the price that applies at the moment of the request: the advance
+// price when that moment's JST date is before the pickup's and the row has one, else the regular price. The shop opens at
+// 08:00 and has no lead time here, so a same-day pickup and one on the UTC date of the day before can both be searched.
+test("a card shows the price that applies for the chosen pickup date", () => {
+  const advance: Record<string, number> = { "ebike-std/day-1": 4000, "ebike-std/day-3": 9000, "bike-125/day-3": 12_900 };
+  const base = withEbike(CATALOG);
+  const catalog: Catalog = {
+    ...base,
+    config: { ...base.config, shopOpen: "08:00", minLeadHours: 0 },
+    prices: base.prices.map((row) => ({ ...row, advancePriceJpy: advance[`${row.rateClassId}/${row.packageId}`] ?? null })),
+  };
+  const at = (wall: string) => Date.parse(`${wall}+09:00`);
+  const day = (pkg: string, time = "10:00") => ({ date: "2030-06-10", time, package: pkg });
+
+  // [label, the moment, the query, the card's rate class, the price it shows]
+  const cases: [string, number, Record<string, string>, string, number][] = [
+    ["23:59:59 JST the day before", at("2030-06-09T23:59:59"), day("day-1"), EBIKE_CLASS, 4000],
+    ["00:00:00 JST on the date", at("2030-06-10T00:00:00"), day("day-1"), EBIKE_CLASS, 4500],
+    // 08:30 JST on the 10th is 23:30 UTC on the 9th, and a 10:00 pickup is 01:00 UTC on the 10th.
+    ["08:30 JST on the date, the day before in UTC", at("2030-06-10T08:30:00"), day("day-1"), EBIKE_CLASS, 4500],
+    // 10:00 JST on the 9th is 01:00 UTC on the 9th, and an 08:00 pickup on the 10th is 23:00 UTC on the 9th.
+    ["the day before in JST, the same date in UTC", at("2030-06-09T10:00:00"), day("day-1", "08:00"), EBIKE_CLASS, 4000],
+    ["a week ahead, three days", at("2030-06-03T12:00:00"), day("day-3"), EBIKE_CLASS, 9000],
+    ["three days, on the date", at("2030-06-10T09:00:00"), day("day-3"), EBIKE_CLASS, 10_000],
+    ["an hours package without an advance price", at("2030-06-03T12:00:00"), day("hours-6"), EBIKE_CLASS, 2500],
+    ["a type and no package, the day before", at("2030-06-09T20:00:00"), { ...day(""), type: "ebike" }, EBIKE_CLASS, 4000],
+    ["a type and no package, on the date", at("2030-06-10T07:00:00"), { ...day(""), type: "ebike" }, EBIKE_CLASS, 4500],
+    ["a bike row with an advance price", at("2030-06-09T12:00:00"), day("day-3"), "bike-125", 12_900],
+    ["the same bike row, on the date", at("2030-06-10T06:00:00"), day("day-3"), "bike-125", 13_800],
+    ["a bike row without one", at("2030-06-09T12:00:00"), day("day-1"), "bike-125", 5200],
+  ];
+  for (const [label, now, query, rateClassId, expected] of cases) {
+    const parsed = parseOn(catalog, query, now);
+    assert.deepEqual(parsed.errors, [], label);
+    assert.equal(cardPriceAt(catalog.packages, catalog.prices, rateClassId, parsed, now)?.priceJpy, expected, label);
+  }
 });

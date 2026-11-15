@@ -119,7 +119,7 @@ function vehicleTypes(scooter: number, motorcycle: number, car: number): Vehicle
 }
 
 function priceList(rateClassId: string, prices: Record<string, number>): Price[] {
-  return Object.entries(prices).map(([packageId, priceJpy]) => ({ rateClassId, packageId, priceJpy }));
+  return Object.entries(prices).map(([packageId, priceJpy]) => ({ rateClassId, packageId, priceJpy, advancePriceJpy: null }));
 }
 
 const CONFIG: ShopConfig = {

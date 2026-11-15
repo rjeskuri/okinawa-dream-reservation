@@ -15,6 +15,7 @@ import { pickupInstant, pickupSlots, pickupWindowError } from "../../../lib/book
 import { photoUrl, readPhotoIndex } from "../../../lib/catalog/photos.ts";
 import { readCatalog } from "../../../lib/db/catalog-store.ts";
 import { isLocale } from "../../../lib/locale.ts";
+import { packagePrices } from "../../../lib/pricing.ts";
 import { addDaysToDate, epochToJst, jstToday } from "../../../lib/time.ts";
 
 const HOUR_MS = 3_600_000;
@@ -36,20 +37,17 @@ const photos = entry.photos.flatMap((photo) => photoUrl(photo, photoIndex) ?? []
 
 const money = (jpy: number) => t(locale, email, "email.amount").replace("{amount}", jpy.toLocaleString("en-US"));
 
-// readCatalog returns packages in sort order.
-const rows = catalog.packages.flatMap((pkg) => {
-  const price = catalog.prices.find(
-    ({ rateClassId, packageId }) => rateClassId === entry.rateClassId && packageId === pkg.id,
-  );
-  return price === undefined ? [] : [{ pkg, priceJpy: price.priceJpy }];
-});
-// Task #50 makes hours packages bookable. Until then a hold refuses one, so the table lists it and the form does not.
-const bookable = rows.map(({ pkg }) => pkg).filter((pkg) => pkg.days !== null);
-
 const now = Date.now();
 const { searchParams } = Astro.url;
 const date = searchParams.get("date") ?? "";
 const time = searchParams.get("time") ?? "";
+/** The query's date when it is a real one, which the prices are for: the advance price applies before that JST date. */
+const pickupDate = Number.isNaN(pickupInstant(date, "00:00")) ? undefined : date;
+
+// readCatalog returns packages in sort order.
+const rows = packagePrices(catalog.packages, catalog.prices, entry.rateClassId, pickupDate, now);
+// Task #50 makes hours packages bookable. Until then a hold refuses one, so the table lists it and the form does not.
+const bookable = rows.map(({ pkg }) => pkg).filter((pkg) => pkg.days !== null);
 const chosen = bookable.find(({ id }) => id === searchParams.get("package"));
 const startAt = pickupInstant(date, time);
 
@@ -144,7 +142,7 @@ const error = errorKey in model ? t(locale, model, errorKey) : null;
             min={epochToJst(now + catalog.config.minLeadHours * HOUR_MS).date}
             max={addDaysToDate(jstToday(now), catalog.config.maxDaysAhead)}
             closedDates={catalog.closedDates}
-            value={Number.isNaN(pickupInstant(date, "00:00")) ? undefined : date}
+            value={pickupDate}
             packageDays={(chosen ?? bookable[0]).days}
           />
           <label>

@@ -42,7 +42,8 @@ export type VehicleRow = {
 
 export type PackageRow = { id: string; days: number | null; hours: number | null; sort: number; texts: string };
 
-export type PriceRow = { rate_class_id: string; package_id: string; price_jpy: number };
+/** advance_price_jpy (#131) is nullable and left out unless named, so it takes the column's NULL. */
+export type PriceRow = { rate_class_id: string; package_id: string; price_jpy: number; advance_price_jpy?: number | null };
 
 export type TierRow = { min_days_before: number; refund_percent: number };
 
