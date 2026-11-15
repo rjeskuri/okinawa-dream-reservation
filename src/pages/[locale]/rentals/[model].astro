@@ -17,6 +17,7 @@ import { photoUrl, readPhotoIndex } from "../../../lib/catalog/photos.ts";
 import { readCatalog } from "../../../lib/db/catalog-store.ts";
 import { isLocale } from "../../../lib/locale.ts";
 import { packagePrices } from "../../../lib/pricing.ts";
+import { defaultPackage } from "../../../lib/search.ts";
 import { addDaysToDate, epochToJst, jstToday } from "../../../lib/time.ts";
 
 const HOUR_MS = 3_600_000;
@@ -49,6 +50,9 @@ const pickupDate = Number.isNaN(pickupInstant(date, "00:00")) ? undefined : date
 const rows = packagePrices(catalog.packages, catalog.prices, entry.rateClassId, pickupDate, now);
 const bookable = rows.map(({ pkg }) => pkg);
 const chosen = bookable.find(({ id }) => id === searchParams.get("package"));
+// The package the form starts on. Without a bookable one in the query it is the one the listing found the pickup on, so
+// the time it carries is one the form offers, or the first choice for a class with no priced day package (#50 review).
+const starting = chosen ?? defaultPackage(catalog.packages, catalog.prices, entry.rateClassId) ?? bookable[0];
 const startAt = pickupInstant(date, time);
 
 // searchAvailability leaves the window to its caller, and the calendar helpers behind it throw on a date like 9999-12-31.
@@ -143,12 +147,12 @@ const error = errorKey in model ? t(locale, model, errorKey) : null;
             max={addDaysToDate(jstToday(now), catalog.config.maxDaysAhead)}
             closedDates={catalog.closedDates}
             value={pickupDate}
-            packageDays={packageDays(chosen ?? bookable[0])}
+            packageDays={packageDays(starting)}
           />
           <label>
             {t(locale, pages, "home.search.time")}
             <select name="time">
-              {pickupSlots(catalog.config, chosen).map((slot) => (
+              {pickupSlots(catalog.config, starting).map((slot) => (
                 <option value={slot} selected={slot === time}>
                   {slot}
                 </option>
@@ -161,7 +165,7 @@ const error = errorKey in model ? t(locale, model, errorKey) : null;
               {bookable.map((pkg) => (
                 <option
                   value={pkg.id}
-                  selected={pkg === chosen}
+                  selected={pkg === starting}
                   data-days={packageDays(pkg)}
                   data-slots={pickupSlots(catalog.config, pkg).join(" ")}
                 >

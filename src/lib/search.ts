@@ -58,8 +58,11 @@ export function paramReader<Field extends string>(params: URLSearchParams, onInv
   };
 }
 
-/** A class's default package, the one its card is priced on with none chosen: its first day package with a price. */
-function defaultPackage(packages: Package[], prices: Price[], rateClassId: string): DayPackage | undefined {
+/**
+ * A class's default package, the one its card is priced on with none chosen: its first day package with a price. The model
+ * page's booking form starts on it too.
+ */
+export function defaultPackage(packages: Package[], prices: Price[], rateClassId: string): DayPackage | undefined {
   const priced = ({ id }: Package) => prices.some((entry) => entry.rateClassId === rateClassId && entry.packageId === id);
   return packages.filter((pkg): pkg is DayPackage => pkg.days !== null).find(priced);
 }
