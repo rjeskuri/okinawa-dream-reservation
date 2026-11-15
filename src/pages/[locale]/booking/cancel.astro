@@ -11,6 +11,7 @@ import { cancelBooking, quoteCancellation, verifyCancelToken } from "../../../li
 import { isLocale } from "../../../lib/locale.ts";
 import { REFUND_WORDING } from "../../../lib/mail/templates.ts";
 import { epochToJst } from "../../../lib/time.ts";
+import { drainSoon } from "../../../server/outbox.ts";
 import { squareClient } from "../../../server/square.ts";
 
 const { locale } = Astro.params;
@@ -26,13 +27,16 @@ const token = Astro.url.searchParams.get("t") ?? "";
 if (!(await verifyCancelToken(env.CANCEL_LINK_SECRET, bookingId, token))) return new Response(null, { status: 404 });
 
 const now = Date.now();
-const answer =
-  Astro.request.method === "POST"
-    ? await cancelBooking(
-        { db: env.DB, square: squareClient(env), now, staffEmail: env.STAFF_EMAIL, siteUrl: env.SITE_URL },
-        bookingId,
-      )
-    : await quoteCancellation(env.DB, bookingId, now);
+const posted = Astro.request.method === "POST";
+const answer = posted
+  ? await cancelBooking(
+      { db: env.DB, square: squareClient(env), now, staffEmail: env.STAFF_EMAIL, siteUrl: env.SITE_URL },
+      bookingId,
+    )
+  : await quoteCancellation(env.DB, bookingId, now);
+
+// The cancellation's emails and Bookings row, committed with it, go out after this page.
+if (posted && answer.ok) drainSoon(Astro.locals.cfContext, env);
 
 // A real link only ever names a confirmed web booking, so anything else reads as no booking at all.
 if (!answer.ok && answer.reason !== "ALREADY_CANCELLED" && answer.reason !== "STARTED") {

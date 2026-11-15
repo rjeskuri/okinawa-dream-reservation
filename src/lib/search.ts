@@ -28,6 +28,11 @@ export type ParsedSearch = {
 
 type DayPackage = Package & { days: number };
 
+/** Whether the engine (cc) filter applies to a type: a car is chosen by class and an e-bike has no engine. */
+export function hasEngineBand(typeId: VehicleTypeId): boolean {
+  return typeId !== "car" && typeId !== "ebike";
+}
+
 const TIME_FIELD_REASONS: readonly PickupWindowReason[] = ["OFF_SLOT", "OUTSIDE_HOURS"];
 
 function parses(parse: (value: string) => unknown, value: string): boolean {
@@ -87,8 +92,8 @@ function typeWindow(
 /**
  * The params of a listing request. The pickup window is checked only for a valid date and time with a valid day package, or
  * with a valid type and no package at all, and the date or time it refuses comes back undefined like any other invalid
- * param. An hours package has no return day until task #50, so it has no window to check. cc means nothing for a car (the
- * guest may have left a band behind when switching type), so it is dropped.
+ * param. An hours package has no return day until task #50, so it has no window to check. cc means nothing for a car or an
+ * e-bike (the guest may have left a band behind when switching type), so it is dropped.
  */
 export function parseSearch(
   params: URLSearchParams,
@@ -126,7 +131,7 @@ export function parseSearch(
     date = undefined;
   }
 
-  const band = typeId === "car" ? undefined : ccBand;
+  const band = typeId !== undefined && !hasEngineBand(typeId) ? undefined : ccBand;
   return { date, time, packageId: pkg?.id, typeId, ccBand: band, rateClassId, classPackages, errors };
 }
 

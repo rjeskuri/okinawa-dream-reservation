@@ -8,6 +8,10 @@ export ASTRO_TELEMETRY_DISABLED=1
 export WRANGLER_SEND_METRICS=false
 
 BUCKET=okinawa-dream-media
+# The one port the demo serves. Every link the Worker builds starts from SITE_URL, which wrangler.jsonc points at astro
+# dev on 4321, so wrangler dev gets both URLs for this port through --var, which wins over wrangler.jsonc and .dev.vars.
+PORT=8787
+ORIGIN="http://localhost:$PORT"
 
 [ -d node_modules ] || npm ci
 
@@ -29,4 +33,5 @@ sed -n "s/^ *('\([^']*\)', '[^']*', '[^']*', '\(photos\/[^']*\)', '\([^']*\)'.*/
   done
 
 # --test-scheduled opens /cdn-cgi/handler/scheduled, which the cron curl in docs/local-dev.md calls.
-exec npx wrangler dev --test-scheduled
+exec npx wrangler dev --test-scheduled --port "$PORT" \
+  --var "SITE_URL:$ORIGIN" "SQUARE_WEBHOOK_URL:$ORIGIN/api/webhooks/square"

@@ -1,7 +1,8 @@
 ---
 // /{locale}/rates: the fee schedule, from D1 on every request, so prices match the latest publish. The filters are a plain GET
 // form. Every cell is rendered and the server marks what the filter leaves out `hidden`, so src/scripts/rates.ts can narrow
-// the table without a request and bring back what an earlier filter hid.
+// the table without a request and bring back what an earlier filter hid. The group select offers the groups that have a
+// table, so a shop without e-bikes is not offered an empty E-bikes group.
 import { env } from "cloudflare:workers";
 import DraftNote from "../../components/DraftNote.astro";
 import { sheetName } from "../../i18n/locales.ts";
@@ -61,7 +62,7 @@ const view = catalog && schedule(catalog);
             {t(locale, rates, "rates.form.group")}
             <select name="group">
               <option value="">{t(locale, rentals, "rentals.form.any")}</option>
-              {RATE_GROUPS.map((group) => (
+              {view.tables.map(({ group }) => (
                 <option value={group} selected={group === view.chosen.group}>
                   {t(locale, rates, `rates.group.${group}`)}
                 </option>

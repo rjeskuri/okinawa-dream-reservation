@@ -8,7 +8,8 @@
 //     guest { familyName, givenName, email, phone }
 //   staff_cancellation: the same, plus refundJpy and refundStatus
 //   staff_alert: title, detail, optional ref
-//   reconcile_report: runAt, issues (ReconcileIssue[] of task #43)
+//   reconcile_report: runAt, issues (ReconcileIssue[] of task #43), and optional failedChecks: the checks that did not
+//     run, each "square" or "sheet" (the Bookings tab); absent or [] when both ran (#128)
 // startAt, endAt and runAt are epoch ms, money is integer JPY. Fixtures also pass the name fields a template does not
 // show, as an enqueuer holding the whole booking would, so showing the wrong language's name is a visible bug.
 //
@@ -530,6 +531,77 @@ test("reconcile report lists every issue", () => {
       assert.ok(!html.includes(value(field)), `${field} is raw in the html: ${hostile}`);
       assert.ok(text.includes(value(field)), `${field} is not plain in the text: ${hostile}`);
     }
+  }
+});
+
+/** An issue whose text names neither check, so a name in the report can only come from the template. */
+function neutralIssue(index: number) {
+  return {
+    type: `type_${index}_gap`,
+    bookingRef: `OD-NTR-${index}-Z`,
+    paymentId: `pid_${index}_n`,
+    expectedJpy: (index + 3) * 1_009,
+    actualJpy: (index + 2) * 997,
+    detail: `Issue ${index}: the two ledgers disagree.`,
+  };
+}
+
+/** The Square check is named when the report says Square; the Bookings sheet check when it says Bookings, シート or タブ. */
+const SQUARE_NAMED = /Square|スクエア/;
+const SHEET_NAMED = /Bookings|シート|タブ/;
+
+test("the reconcile report states a failed check", () => {
+  const runAt = Date.UTC(2026, 10, 1, 18, 0);
+  const cases: [failedChecks: string[], named: RegExp[]][] = [
+    [["square"], [SQUARE_NAMED]],
+    [["sheet"], [SHEET_NAMED]],
+    [["square", "sheet"], [SQUARE_NAMED, SHEET_NAMED]],
+  ];
+
+  for (const count of [0, 1, 3]) {
+    const issues = Array.from({ length: count }, (_, index) => neutralIssue(index));
+    const facts = issues.flatMap((listed) => [
+      listed.type,
+      listed.bookingRef,
+      listed.paymentId,
+      listed.detail,
+      yen(listed.expectedJpy),
+      yen(listed.actualJpy),
+    ]);
+    const plain = render("reconcile_report", "ja", { runAt, issues });
+    assertHides(plain, [SQUARE_NAMED, SHEET_NAMED], `${count} issues, both checks ran`);
+    assert.deepEqual(
+      render("reconcile_report", "ja", { runAt, issues, failedChecks: [] }),
+      plain,
+      `${count} issues: no failed check is the plain report`,
+    );
+    const plainLines = new Set(plain.text.split("\n"));
+
+    const statements = new Map<string, string>();
+    for (const [failedChecks, named] of cases) {
+      const data = { runAt, issues, failedChecks };
+      const context = `${count} issues, ${failedChecks.join(" and ")} failed`;
+      const rendered = render("reconcile_report", "ja", data);
+
+      // The failed check is named, in text and HTML, and every issue the other check found is still listed.
+      assertShows(rendered, ["2026-11-02 03:00 JST", ...named, ...facts], context);
+      assertHides(rendered, [/\bundefined\b/, /\bnull\b/, /\bNaN\b/, /\[object /], context);
+      assertJapanese(rendered, context);
+
+      // What the failure adds to the report is said in Japanese.
+      const statement = rendered.text
+        .split("\n")
+        .filter((line) => !plainLines.has(line))
+        .join("\n");
+      assert.ok(KANA.test(statement), `${context}: the failure is stated in Japanese, got:\n${statement}`);
+      statements.set(failedChecks.join("+"), statement);
+
+      // Staff read it in Japanese whatever the payload's locale.
+      for (const locale of LOCALES) {
+        assert.deepEqual(render("reconcile_report", locale, data), rendered, `${context} as ${locale}`);
+      }
+    }
+    assert.notEqual(statements.get("square"), statements.get("sheet"), `${count} issues: the report says which check failed`);
   }
 });
 

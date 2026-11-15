@@ -116,7 +116,7 @@ nowhere: not in the alert, and not in `publish_status`, which is not written. Ch
 
 | Column | Required | Accepts |
 | --- | --- | --- |
-| `type_id` | Yes | `scooter`, `motorcycle` or `car`. One row each. |
+| `type_id` | Yes | `scooter`, `motorcycle`, `car` or `ebike` (an electric-assist bicycle). One row each. |
 | `deposit_jpy` | Yes | Money, 0 or more |
 | `sort` | Yes | Whole number |
 | `name_ja`, `name_en`, `name_zh`, `name_ko` | At least one | Text |
@@ -128,12 +128,16 @@ Example: `motorcycle`, `5,000`, `2`, `バイク`, `Motorcycle`, `摩托车`, `�
 | Column | Required | Accepts |
 | --- | --- | --- |
 | `rate_class_id` | Yes | Slug, unique |
-| `group` | Yes | `bike` or `car` |
+| `group` | Yes | `bike`, `car` or `ebike`: the table of the fee schedule the class shows in |
 | `sort` | Yes | Whole number |
 | `extension_per_hour_jpy` | No | Money, 0 or more |
 | `name_ja`, `name_en`, `name_zh`, `name_ko` | At least one | Text |
 
-Example: `bike-125`, `bike`, `2`, `700`, `125cc`, `125cc bike`, `125cc摩托车`, `125cc 오토바이`.
+Example: `bike-125`, `bike`, `2`, `700`, `125cc`, `125cc bike`, `125cc摩托车`, `125cc 오토바이`. An e-bike class is in group
+`ebike`: `ebike`, `ebike`, `13`, blank, `電動アシスト自転車`, `E-bike`, `电动助力自行车`, `전기자전거`.
+
+Nothing checks that a model's type matches its class's group, so price an e-bike in an `ebike` class yourself, or it
+shows under Bikes or Cars on the fee schedule.
 
 ## Packages
 
@@ -170,8 +174,8 @@ Example: `bike-125`, `day-1`, `¥5,200`.
 | `rate_class_id` | Yes | An id from RateClasses |
 | `brand` | Yes | Text |
 | `seats` | No | Whole number, 1 or more |
-| `engine_cc` | Yes | Whole number, 1 or more |
-| `license_class` | No | Blank uses the default below, or an override: `moped`, `small`, `standard`, `large` or `car` |
+| `engine_cc` | Yes, except on an e-bike | Whole number, 1 or more. Blank on type `ebike`: a number there is an error. |
+| `license_class` | No | Blank uses the default below, or an override: `moped`, `small`, `standard`, `large`, `car` or `none` |
 | `sort` | Yes | Whole number |
 | `active` | Yes | TRUE/FALSE |
 | `name_ja`, `name_en`, `name_zh`, `name_ko` | At least one | Text |
@@ -188,10 +192,14 @@ The default license class comes from the type and the engine:
 | 126 to 400 cc | `standard` |
 | Over 400 cc | `large` |
 | Type `car`, any engine | `car` |
+| Type `ebike`, no engine | `none`: no license needed |
 
 An override on a scooter or motorcycle replaces the default. `moped` is allowed only up to 125 cc, and `car` is an error.
-On a car the class stays `car`: another of the five classes gets a warning and is ignored. Anything outside the five is
-an error on any type.
+On a car the class stays `car` and on an e-bike `none`: another of the six classes gets a warning and is ignored.
+`none` on any type but `ebike` is an error, a car included, and so is anything outside the six on any type.
+
+An e-bike leaves `engine_cc` blank. A number there, even a valid one, is an error and the model is skipped with its
+vehicles: staff most likely picked the wrong `type_id`.
 
 Example: `cub-110`, `motorcycle`, `bike-125`, `Honda`, `1`, `110`, `moped`, `3`, `TRUE`, then the texts, then
 `cub-1.jpg`.
@@ -214,14 +222,16 @@ Example: `わ1234`, `pcx-125`, `active`, `8000`, `30`, `Scratch on the left mirr
 | Column | Required | Accepts |
 | --- | --- | --- |
 | `option_id` | Yes | Slug, unique |
-| `group` | Yes | `bike` or `car` |
+| `group` | Yes | `bike`, `car` or `ebike` |
 | `base_jpy` | Yes | Money, 0 or more |
 | `extra_per_hour_jpy` | No | Money, 0 or more |
 | `extra_per_24h_jpy` | No | Money, 0 or more |
 | `sort` | Yes | Whole number |
 | `name_ja`, `name_en`, `name_zh`, `name_ko` | At least one | Text |
 
-Example: `child-seat`, `car`, `1,100`, `110`, `550`, `2`, `チャイルドシート`, `Child seat`, `儿童座椅`, `카시트`.
+Example: `child-seat`, `car`, `1,100`, `110`, `550`, `2`, `チャイルドシート`, `Child seat`, `儿童座椅`, `카시트`. And an
+e-bike's helmet: `ebike-helmet`, `ebike`, `500`, blank, blank, `3`, `自転車用ヘルメット`, `Bicycle helmet`, `自行车头盔`,
+`자전거 헬멧`.
 
 ## Cancellation
 

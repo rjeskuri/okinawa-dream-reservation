@@ -1,7 +1,7 @@
 // The demo catalog: seed/demo.sql over the real migrations in an in-memory D1, read back with readCatalog, then
 // scripts/demo.sh in a copy of the checkout with npm, npx, wrangler and astro faked, so no test builds, starts a server or
-// reaches Cloudflare. The shop's figures are not repeated here: only the shape the ticket states is, and photos are
-// checked against their own bytes.
+// reaches Cloudflare. The shop's figures are not repeated here, except the e-bike flyer's prices that #130 states: only the
+// shape the ticket states is, and photos are checked against their own bytes.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -128,11 +128,11 @@ function sniffImageType(bytes: Buffer): string | null {
 
 const KEY_EXTENSIONS: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
 
-test("the demo seed loads and covers all three vehicle types", async () => {
+test("the demo seed loads and covers all four vehicle types", async () => {
   await withDemoDb(async (db) => {
     const catalog = await demoCatalog(db);
 
-    assert.deepEqual(sorted(catalog.vehicleTypes.map(({ id }) => id)), ["car", "motorcycle", "scooter"]);
+    assert.deepEqual(sorted(catalog.vehicleTypes.map(({ id }) => id)), ["car", "ebike", "motorcycle", "scooter"]);
     const bookable = new Set(catalog.vehicles.filter(({ status }) => status === "active").map(({ modelId }) => modelId));
     for (const { id } of catalog.vehicleTypes) {
       const models = catalog.models.filter(({ typeId, active }) => typeId === id && active);
@@ -269,10 +269,100 @@ test("every vehicle and price references a seeded model and package", async () =
       assert.ok(typeIds.has(typeId), `${id}: no type ${typeId}`);
       const rateClass = classes.get(rateClassId);
       assert.ok(rateClass, `${id}: no class ${rateClassId}`);
-      assert.equal(rateClass.grp, typeId === "car" ? "car" : "bike", `${id} is priced in the wrong group`);
+      const group = typeId === "car" || typeId === "ebike" ? typeId : "bike";
+      assert.equal(rateClass.grp, group, `${id} is priced in the wrong group`);
       assert.equal(licenseClass === "car", typeId === "car", `${id} has license class ${licenseClass}`);
+      assert.equal(licenseClass === "none", typeId === "ebike", `${id} has license class ${licenseClass}`);
       if (active) assert.ok(withVehicle.has(id), `${id} is active with no active vehicle, so it cannot be booked`);
     }
+  });
+});
+
+// The deposit seed/demo.sql gives every type, marked PLACEHOLDER there.
+const DEMO_PLACEHOLDER_DEPOSIT_JPY = 1000;
+
+// Checkout charges the type's deposit through Square, which refuses a zero payment, so a type without one cannot be booked.
+test("every demo vehicle type has a deposit Square can charge", async () => {
+  await withDemoDb(async (db) => {
+    const catalog = await demoCatalog(db);
+
+    assert.ok(catalog.vehicleTypes.length > 0, "no vehicle types");
+    for (const { id, depositJpy } of catalog.vehicleTypes) {
+      assert.ok(Number.isInteger(depositJpy) && depositJpy > 0, `${id} has deposit ${depositJpy}, which Square cannot charge`);
+    }
+  });
+});
+
+// #130. The e-bike flyer's regular prices: by days, and by hours where the seed already has that hours package. The ticket
+// adds no hours package (task #50 makes them bookable), so the seed's hours stay the bikes' 4 and 24.
+const EBIKE_DAY_PRICES: Record<number, number> = { 1: 4500, 2: 8000, 3: 10000 };
+const EBIKE_HOUR_PRICES: Record<number, number> = { 2: 2500, 4: 3500, 24: 5000 };
+const SEEDED_HOURS = [4, 24];
+
+test("the demo catalog publishes the e-bike with its prices, helmet and photo", async () => {
+  await withDemoDb(async (db) => {
+    const catalog = await demoCatalog(db);
+
+    const type = catalog.vehicleTypes.find(({ id }) => id === "ebike");
+    assert.ok(type, "no ebike type");
+    // The same placeholder deposit as every other demo type, until the shop states one.
+    assert.equal(type.depositJpy, DEMO_PLACEHOLDER_DEPOSIT_JPY);
+
+    const classes = catalog.rateClasses.filter(({ grp }) => grp === "ebike");
+    assert.deepEqual(classes.map(({ id }) => id), ["ebike"], "one rate class ebike in group ebike");
+
+    const model = catalog.models.find(({ id }) => id === "ebike-assist");
+    assert.ok(model, "no model ebike-assist");
+    assert.deepEqual(
+      {
+        typeId: model.typeId,
+        engineCc: model.engineCc,
+        licenseClass: model.licenseClass,
+        brand: model.brand,
+        active: model.active,
+        rateClassId: model.rateClassId,
+        photo: model.photos[0],
+      },
+      {
+        typeId: "ebike",
+        engineCc: null,
+        licenseClass: "none",
+        brand: "TBC",
+        active: true,
+        rateClassId: "ebike",
+        photo: "ebike-assist.jpg",
+      },
+    );
+    const bikes = catalog.vehicles.filter(({ modelId, status }) => modelId === model.id && status === "active");
+    assert.equal(bikes.length, 2, "ebike-assist needs two active vehicles");
+
+    // Every price of the class is a flyer price for its length, and every day length of the flyer has one.
+    const packages = new Map(catalog.packages.map((pkg) => [pkg.id, pkg]));
+    const priced = catalog.prices.filter(({ rateClassId }) => rateClassId === "ebike");
+    for (const { packageId, priceJpy } of priced) {
+      const pkg = packages.get(packageId);
+      assert.ok(pkg, `price of unknown package ${packageId}`);
+      const expected = pkg.days !== null ? EBIKE_DAY_PRICES[pkg.days] : EBIKE_HOUR_PRICES[pkg.hours as number];
+      assert.equal(priceJpy, expected, `${packageId} (${pkg.days ?? 0} days, ${pkg.hours ?? 0} hours)`);
+    }
+    const pricedPackages = priced.map(({ packageId }) => packages.get(packageId));
+    for (const days of [1, 2, 3]) {
+      assert.ok(pricedPackages.some((pkg) => pkg?.days === days), `no ${days}-day e-bike price`);
+    }
+    const hours = sorted(catalog.packages.flatMap((pkg) => (pkg.hours === null ? [] : [String(pkg.hours)])));
+    assert.deepEqual(hours, sorted(SEEDED_HOURS.map(String)), "the seed's hours packages changed");
+    for (const hour of SEEDED_HOURS) {
+      assert.ok(pricedPackages.some((pkg) => pkg?.hours === hour), `no ${hour}-hour e-bike price`);
+    }
+
+    const options = catalog.options.filter(({ grp }) => grp === "ebike");
+    const helmets = options.filter(({ texts }) => /helmet/i.test(texts.en.name));
+    assert.equal(helmets.length, 1, `one e-bike helmet among ${options.map(({ id }) => id).join(", ") || "no options"}`);
+    assert.equal(helmets[0]?.baseJpy, 500);
+
+    const photo = (await photoRows(db)).find(({ name }) => name === "ebike-assist.jpg");
+    assert.ok(photo, "no photos row for ebike-assist.jpg");
+    assert.ok(existsSync(join(photosDir, "ebike-assist.jpg")), "ebike-assist.jpg is not in seed/photos");
   });
 });
 
@@ -537,4 +627,70 @@ test("scripts/demo.sh runs twice and leaves an existing .dev.vars alone", () => 
     assert.ok(second.calls.some((call) => isWrangler(call, "dev")), "the second run did not start the site");
     assert.equal(readFileSync(devVars, "utf8"), values);
   });
+});
+
+// What wrangler.jsonc and `npm run dev` hold today, for astro dev on its own port: this ticket leaves them as they are.
+const JSONC_SITE_URL = "http://localhost:4321";
+const JSONC_WEBHOOK_URL = "http://localhost:4321/api/webhooks/square";
+const WRANGLER_DEFAULT_PORT = 8787;
+
+/** The vars a call passes with `--var KEY:VALUE` (wrangler's form), several to one `--var` or one each, or `--var=KEY:VALUE`. */
+function cliVars(call: string[]): Map<string, string> {
+  const vars = new Map<string, string>();
+  const add = (pair: string) => {
+    const colon = pair.indexOf(":");
+    if (colon > 0) vars.set(pair.slice(0, colon), pair.slice(colon + 1));
+  };
+  for (const [index, arg] of call.entries()) {
+    if (arg.startsWith("--var=")) add(arg.slice("--var=".length));
+    if (arg !== "--var") continue;
+    for (const value of call.slice(index + 1)) {
+      if (value.startsWith("-")) break;
+      add(value);
+    }
+  }
+  return vars;
+}
+
+/** The port wrangler dev listens on: its `--port`, else the `dev.port` of the config, else wrangler's default. */
+function devPort(call: string[], root: string): number {
+  const port = flag(call, "--port");
+  if (port !== undefined) return Number(port);
+  const config = /"dev"\s*:\s*\{[^}]*"port"\s*:\s*(\d+)/.exec(readFileSync(join(root, "wrangler.jsonc"), "utf8"));
+  return config ? Number(config[1]) : WRANGLER_DEFAULT_PORT;
+}
+
+test("the demo serves SITE_URL on its own port", () => {
+  withCheckout((root, run) => {
+    const result = run();
+    assert.equal(result.status, 0, result.output);
+    const dev = result.calls.find((call) => isWrangler(call, "dev"));
+    assert.ok(dev, "no wrangler dev");
+    const text = dev.argv.join(" ");
+
+    const port = devPort(dev.argv, root);
+    assert.ok(Number.isInteger(port) && port > 0, `wrangler dev listens on no port: ${text}`);
+    const vars = cliVars(dev.argv);
+
+    // Every link the Worker builds starts from SITE_URL, so it must be the server this script starts.
+    const site = vars.get("SITE_URL");
+    assert.ok(site, `wrangler dev gets no --var SITE_URL: ${text}`);
+    const siteUrl = new URL(site);
+    assert.equal(siteUrl.protocol, "http:", site);
+    assert.ok(["localhost", "127.0.0.1"].includes(siteUrl.hostname), site);
+    assert.equal(Number(siteUrl.port), port, `SITE_URL ${site} is not the port wrangler dev serves (${port})`);
+    assert.equal(site, siteUrl.origin, `SITE_URL is an origin with no path, as in wrangler.jsonc: ${site}`);
+
+    // Square posts to the same server, at the path wrangler.jsonc gives the webhook.
+    const webhook = vars.get("SQUARE_WEBHOOK_URL");
+    assert.ok(webhook, `wrangler dev gets no --var SQUARE_WEBHOOK_URL: ${text}`);
+    assert.equal(webhook, `${siteUrl.origin}${new URL(JSONC_WEBHOOK_URL).pathname}`);
+  });
+
+  // The demo overrides them on its own command line; the config astro dev reads is unchanged.
+  const config = readFileSync(join(repoRoot, "wrangler.jsonc"), "utf8");
+  assert.equal(/"SITE_URL":\s*"([^"]+)"/.exec(config)?.[1], JSONC_SITE_URL);
+  assert.equal(/"SQUARE_WEBHOOK_URL":\s*"([^"]+)"/.exec(config)?.[1], JSONC_WEBHOOK_URL);
+  const { scripts } = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  assert.equal(scripts.dev, "astro dev");
 });

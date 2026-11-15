@@ -1,9 +1,9 @@
 // The fee schedule, through the built Worker, over catalogs that go through validateCatalog and replaceCatalog as a publish
 // does. Expected prices come from the hand-written fixture or from literals here. The tables are read the way a browser reads
 // them: <tr> rows, real <th> headers, and each cell matched to its headers by position. Anything under a `hidden` attribute
-// does not count as shown, so a page may render a row and hide it. Filters are the query params `group` (bike or car), `class`
+// does not count as shown, so a page may render a row and hide it. Filters are the query params `group` (bike, car or ebike), `class`
 // (a rate class id) and `duration` (a package id). These hooks are the page's contract with this file:
-//   data-fee-table="bike|car"          on each <table> of prices. A group with nothing to show has none
+//   data-fee-table="bike|car|ebike"    on each <table> of prices. A group with nothing to show has none
 //   data-rates-error                   the message about invalid params
 //   data-extension="<class id>"        the element with a class's name and its hourly extension price
 //   data-option="<option id>"          the <tr> of an option: its name, then its base, per-hour and per-24-hours prices
@@ -11,10 +11,12 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { common } from "../../src/i18n/strings/common.ts";
+import { rates as ratesStrings } from "../../src/i18n/strings/rates.ts";
 import { validateCatalog } from "../../src/lib/catalog/sheet-schema.ts";
 import { replaceCatalog } from "../../src/lib/db/catalog-store.ts";
 import { LOCALES, type Locale } from "../../src/lib/locale.ts";
 import type { Catalog } from "../../src/lib/types.ts";
+import { addEbike, EBIKE_CLASS, EBIKE_OPTION } from "../fixtures/sheet/ebike.ts";
 import { mainOf, tagsIn, visibleText, type Tag } from "../helpers/html.ts";
 import { appendCopy, expectedCatalog, setCell, validWorkbook, type Workbook } from "../helpers/sheet-workbook.ts";
 import { startWorker, type TestWorker } from "../helpers/worker.ts";
@@ -24,7 +26,7 @@ const base = "http://localhost/";
 /** The publish time validateCatalog is given, fixed so the fixture's closed dates stay inside its window as the years pass. */
 const SHEET_NOW = Date.parse("2026-11-02T12:00:00+09:00");
 
-type Layout = Partial<Record<"bike" | "car", { classes: string[]; packages: string[] }>>;
+type Layout = Partial<Record<"bike" | "car" | "ebike", { classes: string[]; packages: string[] }>>;
 
 const BIKES = ["scooter-50", "bike-125", "bike-400"];
 const BIKE_PACKAGES = ["hours-6", "day-1", "day-3"];
@@ -195,7 +197,7 @@ function assertLayout(main: string, sheet: Catalog, locale: Locale, expected: La
   const tables = feeTables(main, label);
   assert.deepEqual(tables.map(({ group }) => group).sort(), Object.keys(expected).sort(), `${label}: tables`);
   for (const table of tables) {
-    const { classes, packages } = expected[table.group as "bike" | "car"] as { classes: string[]; packages: string[] };
+    const { classes, packages } = expected[table.group as keyof Layout] as { classes: string[]; packages: string[] };
     const where = `${label}: ${table.group}`;
     const named = <T extends { id: string; texts: Record<Locale, { name: string }> }>(all: T[], id: string) => {
       const found = all.find((row) => row.id === id);
@@ -759,6 +761,38 @@ test("coverage and peak notes are marked as drafts in each locale", async () => 
       assert.equal(tags.length, 1, `${path}: ${note} notes`);
       assertInLocale(visibleText(elementAt(main, tags[0] as Tag)), locale, `${path}: the ${note} note`);
     }
+  }
+});
+
+// E-bikes (#130): a third table beside bikes and cars, from the rows of tests/fixtures/sheet/ebike.ts.
+test("the fee schedule shows an E-bikes group with its prices and options in each locale", async () => {
+  const sheet = sheetCatalog((workbook) => addEbike(workbook));
+  const published = (ids: { id: string }[], id: string) => ids.some((row) => row.id === id);
+  assert.ok(published(sheet.rateClasses, EBIKE_CLASS), "the sheet does not publish the e-bike class");
+  assert.ok(published(sheet.options, EBIKE_OPTION), "the sheet does not publish the e-bike option");
+  await publish(sheet);
+  const ebike ={ classes: [EBIKE_CLASS], packages: ["hours-6", "day-1", "day-3"] };
+
+  for (const locale of LOCALES) {
+    const path = `/${locale}/rates`;
+    const main = await schedule(path);
+    assertLayout(main, sheet, locale, { ...WHOLE, ebike }, path);
+    // Worked out by hand from the flyer rows, so the comparison with the sheet cannot hide a wrong fixture.
+    assert.deepEqual(grid(tableOf(main, "ebike", path)), [["2,500", "4,500", "10,000"]], path);
+    // The extension of ebike-std and the helmet option, as every other class and option.
+    assertExtras(main, sheet, locale, path);
+    assertOnlySheetAmounts(main, sheet, path);
+    assertNoMessage(main, path);
+
+    const heading = ratesStrings["rates.group.ebike"]?.[locale];
+    assert.ok(heading, `rates.group.ebike has no ${locale} text`);
+    assert.ok(visibleText(main).includes(heading.normalize("NFKC")), `${path}: no "${heading}" heading`);
+    assert.ok(offered(formWith(main, "group", path), "group").includes("ebike"), `${path}: no ebike group to choose`);
+
+    const only = `${path}?group=ebike`;
+    const narrowed = await schedule(only);
+    assertLayout(narrowed, sheet, locale, { ebike }, only);
+    assertNoMessage(narrowed, only);
   }
 });
 

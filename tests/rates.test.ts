@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { LOCALES } from "../src/lib/locale.ts";
 import type { Catalog, Package, RateClass } from "../src/lib/types.ts";
+import { EBIKE_RATE_CLASS, withEbike } from "./fixtures/sheet/ebike.ts";
 import { expectedCatalog } from "./helpers/sheet-workbook.ts";
 
 type Parsed = { group?: string | null; rateClassId?: string | null; packageId?: string | null; errors: { field: string }[] };
@@ -325,5 +326,71 @@ test("the rates strings hold text for all four locales", async () => {
     for (const [key, entry] of Object.entries(dictionary)) {
       for (const locale of LOCALES) assert.ok(entry[locale]?.trim(), `${key} has no ${locale} text`);
     }
+  }
+});
+
+// E-bikes (#130): a third group beside bikes and cars, from the rows of tests/fixtures/sheet/ebike.ts.
+const EBIKE_TABLE = { packages: ["hours-6", "day-1", "day-3"], rows: [["ebike-std", 2500, 4500, 10000]] };
+
+test("the fee schedule has an e-bike group", async () => {
+  const { RATE_GROUPS } = await rates();
+  assert.ok(RATE_GROUPS.includes("ebike"), `RATE_GROUPS is ${RATE_GROUPS.join(", ")}`);
+
+  const catalog = withEbike(CATALOG);
+  assert.deepEqual(await layout("", catalog), { ...WHOLE, ebike: EBIKE_TABLE });
+
+  // The group is a filter of its own, and class and duration narrow it as they do the others.
+  const parsed = await parse("group=ebike", catalog);
+  assert.deepEqual(parsed.errors, []);
+  assert.deepEqual(filterValues(parsed), { group: "ebike", class: null, duration: null });
+  assert.deepEqual((await parse("group=ebike")).errors, [], "the groups are not the catalog's");
+  const cases: [query: string, expected: Layout][] = [
+    ["group=ebike", { ebike: EBIKE_TABLE }],
+    ["group=bike", { bike: BIKE }],
+    ["class=ebike-std", { ebike: EBIKE_TABLE }],
+    ["class=ebike-std&duration=day-3", { ebike: { packages: ["day-3"], rows: [["ebike-std", 10000]] } }],
+    ["group=ebike&duration=hours-6", { ebike: { packages: ["hours-6"], rows: [["ebike-std", 2500]] } }],
+    [
+      "duration=day-1",
+      {
+        bike: bikeColumn(1),
+        car: { packages: ["day-1"], rows: [["car-k", 7300]] },
+        ebike: { packages: ["day-1"], rows: [["ebike-std", 4500]] },
+      },
+    ],
+  ];
+  for (const [query, expected] of cases) assert.deepEqual(await layout(query, catalog), expected, query);
+
+  // Its columns are the packages its own classes are priced for, and its classes keep their sort.
+  const grown = {
+    ...catalog,
+    rateClasses: [...catalog.rateClasses, { ...EBIKE_RATE_CLASS, id: "ebike-cargo", sort: 1 }],
+    packages: [...catalog.packages, dayPackage("ebike-2d", 2, 9)],
+    prices: [...catalog.prices, price("ebike-cargo", "ebike-2d", 12000), price("ebike-std", "ebike-2d", 8000)],
+  };
+  assert.deepEqual(await layout("", grown), {
+    ...WHOLE,
+    ebike: {
+      packages: ["hours-6", "day-1", "day-3", "ebike-2d"],
+      rows: [
+        ["ebike-cargo", null, null, null, 12000],
+        ["ebike-std", 2500, 4500, 10000, 8000],
+      ],
+    },
+  });
+
+  // A group with no price has no table.
+  const unpriced = { ...catalog, prices: catalog.prices.filter(({ rateClassId }) => rateClassId !== "ebike-std") };
+  assert.deepEqual(await layout("", unpriced), WHOLE);
+
+  // Its heading has text in every locale, and not the bikes' heading.
+  // @ts-ignore
+  const { rates: strings } = (await import("../src/i18n/strings/rates.ts")) as {
+    rates: Record<string, Record<string, string> | undefined>;
+  };
+  for (const locale of LOCALES) {
+    const heading = strings["rates.group.ebike"]?.[locale];
+    assert.ok(heading?.trim(), `rates.group.ebike has no ${locale} text`);
+    assert.notEqual(heading, strings["rates.group.bike"]?.[locale], `rates.group.ebike is the bikes' ${locale} text`);
   }
 });

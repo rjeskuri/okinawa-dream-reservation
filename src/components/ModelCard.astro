@@ -40,7 +40,9 @@ const yen = (jpy: number) => t(locale, rentals, "rentals.amount").replace("{amou
         <img src={photo} alt="" loading="lazy" />
       )
     }
-    <span class="label engine">{model.typeId === "car" ? rateClassName : `${model.engineCc}cc`}</span>
+    <span class="label engine">
+      {model.typeId === "car" || model.engineCc === null ? rateClassName : `${model.engineCc}cc`}
+    </span>
     <span class="label title">
       <small>{model.brand}</small>
       <strong>{sheetName(model.texts, locale)}</strong>

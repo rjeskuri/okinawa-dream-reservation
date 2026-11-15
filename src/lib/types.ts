@@ -7,14 +7,15 @@ export type BookingStatus = "ON_HOLD" | "PAYMENT_PENDING" | "CONFIRMED" | "CANCE
 
 export type BookingSource = "web" | "block";
 
-export type VehicleTypeId = "scooter" | "motorcycle" | "car";
+export type VehicleTypeId = "scooter" | "motorcycle" | "car" | "ebike";
 
-export type LicenseClass = "moped" | "small" | "standard" | "large" | "car";
+/** `none` is an e-bike's, which needs no license, and only an e-bike's. */
+export type LicenseClass = "moped" | "small" | "standard" | "large" | "car" | "none";
 
 export type VehicleStatus = "active" | "maintenance" | "retired";
 
-/** Which half of the fee schedule a rate class or an option belongs to. */
-export type RateGroup = "bike" | "car";
+/** Which part of the fee schedule a rate class or an option belongs to. */
+export type RateGroup = "bike" | "car" | "ebike";
 
 /** A decoded `texts` column: the same fields under every locale. */
 export type LocalizedTexts<T> = Record<Locale, T>;
@@ -49,7 +50,8 @@ export type RateClass = {
 export type Model = {
   id: string;
   typeId: VehicleTypeId;
-  engineCc: number;
+  /** Null only for an e-bike, which has no engine. */
+  engineCc: number | null;
   licenseClass: LicenseClass;
   sort: number;
   active: boolean;

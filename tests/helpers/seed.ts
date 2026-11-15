@@ -20,7 +20,8 @@ export type RateClassRow = {
 export type ModelRow = {
   id: string;
   type_id: string;
-  engine_cc: number;
+  /** NULL only for an e-bike. */
+  engine_cc: number | null;
   license_class: string;
   sort: number;
   active: number;
@@ -140,7 +141,7 @@ export async function insertRow<T>(
   return stored;
 }
 
-/** Only three type ids can exist, so seeding one again updates it. */
+/** Only four type ids can exist, so seeding one again updates it. */
 export async function seedType(db: D1Database, partial: Partial<VehicleTypeRow> = {}): Promise<VehicleTypeRow> {
   const row = { id: DEFAULT_TYPE_ID, deposit_jpy: 5000, sort: 0, texts: localized({ name: "Test type" }), ...partial };
   return insertRow<VehicleTypeRow>(db, "vehicle_types", row, "id");

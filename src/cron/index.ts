@@ -1,11 +1,13 @@
 // The cron entry. The registry maps each expression in wrangler.jsonc to its jobs (later tickets add them),
 // and every run, known or not, leaves one cron_runs row.
+import { dailyCheck } from "./daily.ts";
+import { frequentJob } from "./frequent.ts";
 
 export type CronJob = (env: Env, scheduledTime: number) => Promise<void>;
 
 export const registry: Record<string, CronJob[]> = {
-  "*/10 * * * *": [],
-  "0 18 * * *": [],
+  "*/10 * * * *": [frequentJob],
+  "0 18 * * *": [dailyCheck],
 };
 
 export type CronStatus = "ok" | "error" | "unknown";

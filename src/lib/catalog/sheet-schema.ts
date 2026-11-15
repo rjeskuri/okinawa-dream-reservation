@@ -79,10 +79,10 @@ export const CATALOG_TABS = [
   "ClosedDates",
 ] as const;
 
-const TYPE_IDS: readonly VehicleTypeId[] = ["scooter", "motorcycle", "car"];
-const GROUPS: readonly RateGroup[] = ["bike", "car"];
+const TYPE_IDS: readonly VehicleTypeId[] = ["scooter", "motorcycle", "car", "ebike"];
+const GROUPS: readonly RateGroup[] = ["bike", "car", "ebike"];
 const VEHICLE_STATUSES: readonly VehicleStatus[] = ["active", "maintenance", "retired"];
-const LICENSE_CLASSES: readonly LicenseClass[] = ["moped", "small", "standard", "large", "car"];
+const LICENSE_CLASSES: readonly LicenseClass[] = ["moped", "small", "standard", "large", "car", "none"];
 
 const SLUG = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const SLUG_MAX_LENGTH = 40;
@@ -441,19 +441,37 @@ function licenseClassOfCc(cc: number): LicenseClass {
   return cc <= 400 ? "standard" : "large";
 }
 
-function readLicenseClass(row: Row, typeId: string, engineCc: number): LicenseClass {
+/** The license class a type always has, whatever the row says: a car needs a car license and an e-bike none. */
+const FIXED_LICENSE_CLASSES = new Map<string, LicenseClass>([["car", "car"], ["ebike", "none"]]);
+
+/** An e-bike has no engine, so its engine_cc stays blank: a number there most likely means the wrong type_id. */
+function readEngineCc(row: Row, typeId: string): number | null {
+  if (typeId !== "ebike") return row.whole("engine_cc", 1);
+  if (!row.blank("engine_cc")) {
+    row.error(`engine_cc ${show(row.cell("engine_cc"))} must be blank: an e-bike has no engine, so check type_id`);
+  }
+  return null;
+}
+
+function readLicenseClass(row: Row, typeId: string, engineCc: number | null): LicenseClass {
   const override = row.blank("license_class") ? null : row.oneOf("license_class", LICENSE_CLASSES);
-  if (typeId === "car") {
-    if (row.ok && override !== null && override !== "car") {
-      row.warn(`license_class ${override} is ignored: a car is always car`);
+  // Even on a car: none says no license is needed, which is never ignorable.
+  if (override === "none" && typeId !== "ebike") {
+    row.error(`license_class none is only for type_id ebike, which needs no license`);
+  }
+  const fixed = FIXED_LICENSE_CLASSES.get(typeId);
+  if (fixed !== undefined) {
+    if (row.ok && override !== null && override !== fixed) {
+      row.warn(`license_class ${override} is ignored: ${typeId === "car" ? "a car" : "an e-bike"} is always ${fixed}`);
     }
-    return "car";
+    return fixed;
   }
   if (override === "car") row.error(`license_class car is only for type_id car`);
-  if (override === "moped" && engineCc > MOPED_OVERRIDE_MAX_CC) {
+  if (override === "moped" && engineCc !== null && engineCc > MOPED_OVERRIDE_MAX_CC) {
     row.error(`license_class moped is only for engines up to ${MOPED_OVERRIDE_MAX_CC} cc`);
   }
-  return override ?? licenseClassOfCc(engineCc);
+  // engine_cc is null only for an e-bike, which took its fixed class above.
+  return override ?? licenseClassOfCc(engineCc ?? NaN);
 }
 
 /** Drive file names, which #17 matches against the Drive listing, so text in this one column skips normalizing.
@@ -471,7 +489,7 @@ function readModels(rows: Row[], typeIds: Set<string>, rateClassIds: Set<string>
   return keep(rows, (row) => {
     const id = row.uniqueSlug("model_id", seen);
     const typeId = row.known("type_id", typeIds, "Types") as VehicleTypeId;
-    const engineCc = row.whole("engine_cc", 1);
+    const engineCc = readEngineCc(row, typeId);
     return {
       id,
       typeId,
