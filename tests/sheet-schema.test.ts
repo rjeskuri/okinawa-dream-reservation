@@ -2045,3 +2045,108 @@ test("SHEET_TABS names every tab's headers and BOOKINGS_COLUMNS the Bookings col
   assert.deepEqual([...BOOKINGS_COLUMNS], bookings);
   assert.deepEqual([...tabs.Bookings], bookings);
 });
+
+// #131: advance_price_jpy on the Prices tab, the price a guest pays who books by the day before. A blank cell is none. A
+// value is whole yen above 0 and no higher than the row's own price_jpy, read with the same yen spellings as price_jpy;
+// anything else is an error on the row, which is left out, because the two columns were probably swapped.
+
+/** A price row as #131 publishes it: the cast reaches the field on the types of today and of after the change alike. */
+type AdvancePrice = Catalog["prices"][number] & { advancePriceJpy: number | null };
+
+function priceRow(catalog: Catalog, key: string): AdvancePrice {
+  const [rateClassId, packageId] = key.split("/");
+  const found = catalog.prices.find((price) => price.rateClassId === rateClassId && price.packageId === packageId);
+  assert.ok(found, `no price ${key}`);
+  return found as AdvancePrice;
+}
+
+// [price row, advance_price_jpy as typed, what publishes, the row's price_jpy when the case changes it]
+const ACCEPTED_ADVANCE: [key: string, cell: unknown, advance: number, price?: number][] = [
+  ["bike-125/day-1", 4800, 4800],
+  ["car-k/day-3", "¥17,500", 17_500],
+  ["scooter-50/day-1", "３，０００円", 3000],
+  ["bike-400/day-1", "9100", 9100],
+  // The edges: equal to the regular price, and 1 yen.
+  ["scooter-50/hours-6", 2500, 2500],
+  ["bike-400/day-3", 1, 1],
+  // Checked against the row's own price_jpy, as it reads now: above the fixture's 13,800 and below the new 15,000.
+  ["bike-125/day-3", "14,000", 14_000, 15_000],
+];
+
+// [price row, advance_price_jpy as typed, the row's price_jpy when the case changes it]
+const REFUSED_ADVANCE: [key: string, cell: unknown, price?: number][] = [
+  ["bike-125/day-1", 5201],
+  ["car-k/day-1", 9000],
+  ["bike-400/hours-6", "¥6,500"],
+  // The columns swapped: the advance price where the regular one belongs.
+  ["scooter-50/day-3", 4500, 4000],
+  // Below the fixture's 13,800 and above the row's new price.
+  ["bike-125/day-3", 13_000, 12_000],
+  ["car-k/day-3", 0],
+  ["car-k/day-3", "¥0"],
+  ["bike-125/hours-6", "0円"],
+  ["bike-400/day-1", -100],
+  ["bike-400/day-1", "-500"],
+  ["scooter-50/day-1", "free"],
+  ["scooter-50/day-1", "なし"],
+  ["scooter-50/day-1", "¥"],
+  ["bike-125/day-1", "12a"],
+  ["bike-125/day-1", "4,5OO"],
+  ["bike-400/day-3", 1000.5],
+  ["bike-400/day-3", "1000.5"],
+  ["bike-400/day-3", true],
+];
+
+test("advance_price_jpy must be whole yen no higher than price_jpy", async (t) => {
+  await t.test("a blank cell is no advance price", () => {
+    const { catalog, fatal } = validateCatalog(validWorkbook(), CATALOG_NOW);
+    assert.deepEqual(fatal, []);
+    assert.ok(catalog);
+    assert.equal(catalog.prices.length, 11);
+    for (const price of catalog.prices) {
+      assert.equal(priceRow(catalog, `${price.rateClassId}/${price.packageId}`).advancePriceJpy, null);
+    }
+  });
+
+  for (const [key, cell, advance, price] of ACCEPTED_ADVANCE) {
+    await t.test(`${key}: ${JSON.stringify(cell)} publishes as ${advance}`, () => {
+      const workbook = validWorkbook();
+      if (price !== undefined) setCell(workbook, "Prices", key, "price_jpy", price);
+      setCell(workbook, "Prices", key, "advance_price_jpy", cell);
+      const expected = expectedCatalog();
+      if (price !== undefined) priceRow(expected, key).priceJpy = price;
+      priceRow(expected, key).advancePriceJpy = advance;
+      assertPublishes(workbook, expected);
+    });
+  }
+
+  await t.test("each row keeps its own advance price, and the rest stay blank", () => {
+    const workbook = validWorkbook();
+    const expected = expectedCatalog();
+    for (const [key, cell, advance, price] of ACCEPTED_ADVANCE) {
+      if (price !== undefined) setCell(workbook, "Prices", key, "price_jpy", price);
+      setCell(workbook, "Prices", key, "advance_price_jpy", cell);
+      if (price !== undefined) priceRow(expected, key).priceJpy = price;
+      priceRow(expected, key).advancePriceJpy = advance;
+    }
+    assertPublishes(workbook, expected);
+  });
+
+  for (const [key, cell, price] of REFUSED_ADVANCE) {
+    const changed = price === undefined ? "" : ` with price_jpy ${price}`;
+    await t.test(`${key}: ${JSON.stringify(cell)}${changed} is a row error`, () => {
+      const workbook = validWorkbook();
+      const row = sheetRow(workbook, "Prices", key);
+      if (price !== undefined) setCell(workbook, "Prices", key, "price_jpy", price);
+      setCell(workbook, "Prices", key, "advance_price_jpy", cell);
+      const { catalog, statuses, fatal } = validateCatalog(workbook, CATALOG_NOW);
+
+      assert.deepEqual(fatal, []);
+      assert.deepEqual(errors(statuses), [`Prices ${row}`]);
+      assertError(statuses, "Prices", row, ["advance_price_jpy"]);
+      // The row is left out and nothing else: a model of its class publishes on its other prices.
+      assert.deepEqual(canonical(catalog), canonical(withoutDropped(expectedCatalog(), { prices: [key] })));
+      assertEveryRowHasAStatus(workbook, statuses, CATALOG_TABS);
+    });
+  }
+});

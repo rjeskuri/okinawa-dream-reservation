@@ -1649,3 +1649,194 @@ test("invalid guests never reach Square", async () => {
     }
   });
 });
+
+// #131: a real createHold locks the price, the advance one when the hold is made before the pickup's JST date, and confirm,
+// both emails and the Bookings tab read it from the row. Between the hold and the payment a publish moves every price, so a
+// price looked up again at either moment shows. Amounts are written out by hand, digits too.
+type LockedCase = {
+  label: string;
+  held: string;
+  paid: string;
+  pickup: string;
+  /** The package's key in the rows below. */
+  pkg: "oneDay" | "threeDays" | "twoDays";
+  guest: Guest;
+  locale: Locale;
+  lockedJpy: number;
+  lockedDigits: string;
+  /** Both prices the catalog gives this package once the publish has landed: a lookup at either moment finds one. */
+  republishedDigits: [string, string];
+};
+
+/** [price_jpy, advance_price_jpy] */
+type Prices = [number, number | null];
+
+/** Each package's length and prices before the publish, and after it. Two-day rentals start with no advance price. */
+type LockedRow = { days: number; before: Prices; after: Prices };
+
+const LOCKED_ROWS: Record<LockedCase["pkg"], LockedRow> = {
+  oneDay: { days: 1, before: [4500, 4000], after: [5200, 4300] },
+  threeDays: { days: 3, before: [10_000, 9000], after: [10_700, 9300] },
+  twoDays: { days: 2, before: [7700, null], after: [8400, 6100] },
+};
+
+const LOCKED_CASES: LockedCase[] = [
+  {
+    label: "held at 23:58 JST the day before, paid at 00:05 on the pickup date",
+    held: "2030-06-09 23:58",
+    paid: "2030-06-10 00:05",
+    pickup: "2030-06-10 09:00",
+    pkg: "oneDay",
+    guest: HANAKO,
+    locale: "ja",
+    lockedJpy: 4000,
+    lockedDigits: "4,000",
+    republishedDigits: ["5,200", "4,300"],
+  },
+  {
+    label: "held in the last minute of the day before, paid just after midnight",
+    held: "2030-06-09 23:59",
+    paid: "2030-06-10 00:01",
+    pickup: "2030-06-10 10:30",
+    pkg: "threeDays",
+    guest: NA,
+    locale: "zh-cn",
+    lockedJpy: 9000,
+    lockedDigits: "9,000",
+    republishedDigits: ["10,700", "9,300"],
+  },
+  {
+    label: "a row without an advance price, held at 23:58 and paid at 00:05",
+    held: "2030-06-09 23:58",
+    paid: "2030-06-10 00:05",
+    pickup: "2030-06-10 11:00",
+    pkg: "twoDays",
+    guest: MINHO,
+    locale: "ko",
+    lockedJpy: 7700,
+    lockedDigits: "7,700",
+    republishedDigits: ["8,400", "6,100"],
+  },
+  {
+    label: "held on the pickup date, paid minutes later",
+    held: "2030-06-12 06:00",
+    paid: "2030-06-12 06:05",
+    pickup: "2030-06-12 13:00",
+    pkg: "oneDay",
+    guest: ADA,
+    locale: "en",
+    lockedJpy: 4500,
+    lockedDigits: "4,500",
+    republishedDigits: ["5,200", "4,300"],
+  },
+];
+
+test("confirm keeps the locked price after midnight", async () => {
+  const { createFakeSheets } = await import("./helpers/fake-sheets.ts");
+  const { BOOKINGS_COLUMNS } = await import("../src/lib/catalog/sheet-schema.ts");
+  const { syncBookingRows } = await import("../src/lib/sheets/bookings-sync.ts");
+
+  const depositJpy = 1500;
+  const settings = PLAIN_SHOP;
+  const { db, dispose } = await createTestDb();
+  try {
+    await seedType(db, { id: "ebike", deposit_jpy: depositJpy });
+    // A lead time of 0, so a hold on the pickup date can be made at all.
+    await seedConfig(db, { shop_open: settings.open, shop_close: settings.close, min_lead_hours: 0, hold_minutes: 15 });
+    await seedCatalogMeta(db);
+    await seedTiers(db, settings.tiers);
+    const rate = await seedRateClass(db, { grp: "ebike" });
+    const model = await seedModel(db, {
+      type_id: "ebike",
+      engine_cc: null,
+      license_class: "none",
+      rate_class_id: rate.id,
+      texts: textsOf(FIRST.modelNames, { summary: "A summary", description: "A description" }),
+    });
+    for (let i = 0; i < 4; i += 1) await seedVehicle(db, { model_id: model.id });
+    const lockedRows = Object.entries(LOCKED_ROWS) as [LockedCase["pkg"], LockedRow][];
+    const packageIds = {} as Record<LockedCase["pkg"], string>;
+    for (const [key, { days, before }] of lockedRows) {
+      const pack = await seedPackage(db, { days, texts: textsOf(FIRST.packageNames) });
+      const [price_jpy, advance_price_jpy] = before;
+      await seedPrice(db, { rate_class_id: rate.id, package_id: pack.id, price_jpy, advance_price_jpy });
+      packageIds[key] = pack.id;
+    }
+    const setPrices = async (side: "before" | "after") => {
+      for (const [key, row] of lockedRows) {
+        await db
+          .prepare("UPDATE prices SET price_jpy = ?1, advance_price_jpy = ?2 WHERE package_id = ?3")
+          .bind(row[side][0], row[side][1], packageIds[key])
+          .run();
+      }
+    };
+
+    for (const testCase of LOCKED_CASES) {
+      const { label, guest, locale, lockedJpy } = testCase;
+      await setPrices("before");
+      const input = {
+        id: randomUUID(),
+        modelId: model.id,
+        packageId: packageIds[testCase.pkg],
+        startAt: jst(testCase.pickup),
+        locale: "en" as const,
+      };
+      const held = await createHold(db, input, jst(testCase.held));
+      assert.ok(held.ok, `${label}: ${JSON.stringify(held)}`);
+      assert.equal(held.booking.priceJpy, lockedJpy, `${label}: the hold`);
+
+      // The publish lands after midnight, before the guest pays.
+      await setPrices("after");
+      const square = fakeSquare();
+      const paid = await confirmHold(depsAt(db, square, jst(testCase.paid)), held.booking.id, payBody(guest, locale));
+      assert.ok(paid.ok, `${label}: ${JSON.stringify(paid)}`);
+      const row = await stored(db, held.booking.id);
+      assert.equal(row.status, "CONFIRMED", label);
+      assert.equal(row.price_jpy, lockedJpy, `${label}: the confirmed row`);
+      assert.equal(paid.booking.priceJpy, lockedJpy, `${label}: the confirmed booking`);
+      // The deposit is the type's, whatever the price.
+      assert.equal(row.deposit_jpy, depositJpy, label);
+      assert.deepEqual(
+        square.payments.map(({ amountJpy }) => amountJpy),
+        [depositJpy],
+        `${label}: the charge`,
+      );
+
+      // The outbox as the cron delivers it, the Bookings tab written by the real sync.
+      const sheets = createFakeSheets({ Bookings: [[...BOOKINGS_COLUMNS]] });
+      const emails: EmailPayload[] = [];
+      await drainOutbox({
+        db,
+        now: jst(testCase.paid) + DAY_MS,
+        sendEmail: async (payload) => {
+          emails.push(payload);
+          return { ok: true };
+        },
+        syncBookings: (ids) => syncBookingRows({ db, sheets }, ids),
+      });
+      assert.deepEqual(await waitingKinds(db), [], `${label}: the outbox`);
+
+      const guestEmail = emailOf(emails, "guest_confirmation");
+      const staffEmail = emailOf(emails, "staff_new_booking");
+      assert.equal(guestEmail.data.priceJpy, lockedJpy, `${label}: guest_confirmation`);
+      assert.equal(staffEmail.data.priceJpy, lockedJpy, `${label}: staff_new_booking`);
+      const guestText = renderWhole(guestEmail, `${label}: guest`);
+      const staffText = renderWhole(staffEmail, `${label}: staff`);
+      assertShows(guestText, [MONEY[locale](testCase.lockedDigits), MONEY[locale]("1,500")], `${label}: guest`);
+      assertShows(staffText, [MONEY.ja(testCase.lockedDigits), MONEY.ja("1,500")], `${label}: staff`);
+      for (const digits of testCase.republishedDigits) {
+        assert.ok(!guestText.includes(MONEY[locale](digits)), `${label}: the guest sees ${digits}, a price looked up again`);
+        assert.ok(!staffText.includes(MONEY.ja(digits)), `${label}: staff see ${digits}, a price looked up again`);
+      }
+
+      const [header, ...lines] = sheets.grid("Bookings");
+      const at = (name: string) => header.indexOf(name);
+      const line = lines.find((cells) => cells[at("booking_id")] === held.booking.id);
+      assert.ok(line, `${label}: no Bookings row for ${held.booking.id} in ${JSON.stringify(lines)}`);
+      assert.equal(line[at("price_jpy")], lockedJpy, `${label}: the Bookings tab`);
+      assert.equal(line[at("deposit_jpy")], depositJpy, `${label}: the Bookings tab`);
+    }
+  } finally {
+    await dispose();
+  }
+});

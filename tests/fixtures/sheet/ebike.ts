@@ -153,10 +153,12 @@ export const EBIKE_OPTION_ROW: Option = {
   }),
 };
 
+/** No advance price (#131): addEbike leaves advance_price_jpy blank, so the flyer's advance prices are each test's own. */
 export const EBIKE_PRICE_ROWS: Price[] = Object.entries(EBIKE_PRICES).map(([packageId, priceJpy]) => ({
   rateClassId: EBIKE_CLASS,
   packageId,
   priceJpy,
+  advancePriceJpy: null,
 }));
 
 /** `catalog` with everything addEbike appends, as it must publish. */
