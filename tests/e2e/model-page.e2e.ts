@@ -647,7 +647,9 @@ test("the model page shows the model's details and links the license classes", a
 
       const type = catalog.vehicleTypes.find(({ id }) => id === target.typeId) as VehicleType;
       assert.ok(text.includes(type.texts[locale].name), `${path}: the type`);
-      assert.match(text, cc(target.engineCc), `${path}: the engine size`);
+      const engineCc = target.engineCc;
+      assert.ok(engineCc !== null, `${target.id} has an engine`);
+      assert.match(text, cc(engineCc), `${path}: the engine size`);
 
       const page = new URL(path, base);
       const links = tagsIn(main).flatMap(({ name: tag, attributes }) =>

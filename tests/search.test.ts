@@ -2,7 +2,13 @@
 // by hand on the fixture catalog: 24 hours of lead, 180 days ahead, slots of 30 minutes from 09:00 to 17:30.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ShopConfig } from "../src/lib/types.ts";
+import { searchAvailability } from "../src/lib/booking/availability.ts";
+import { createHold } from "../src/lib/booking/holds.ts";
+import { readCatalog, replaceCatalog } from "../src/lib/db/catalog-store.ts";
+import { cardPrice, carriedQuery, findModels, listedModels, parseSearch, type ParsedSearch } from "../src/lib/search.ts";
+import type { Catalog, ShopConfig } from "../src/lib/types.ts";
+import { EBIKE_CLASS, EBIKE_MODEL, EBIKE_PLATES, EBIKE_PRICES, withEbike } from "./fixtures/sheet/ebike.ts";
+import { createTestDb } from "./helpers/d1.ts";
 import { expectedCatalog } from "./helpers/sheet-workbook.ts";
 
 type Parsed = {
@@ -253,5 +259,101 @@ test("parseSearch accepts an hours package without a return day to check", async
     time: "10:00",
     packageId: "hours-6",
     rateClassId: "bike-125",
+  });
+});
+
+// E-bikes (#130). The fixture catalog with tests/fixtures/sheet/ebike.ts added: one model, two active bicycles, ¥4,500 a
+// day and ¥10,000 for three, no deposit. The D1 case publishes it with replaceCatalog and runs what the listing runs:
+// parseSearch, findModels over searchAvailability, listedModels and cardPrice. Then holds take the bicycles one by one.
+
+const BANDS = ["upto50", "51to125", "126to400", "over400"];
+const EBIKE_PICKUP = Date.parse("2030-06-10T10:00:00+09:00");
+
+function parseOn(catalog: Catalog, query: Record<string, string>, now = NOW): ParsedSearch {
+  return parseSearch(new URLSearchParams(query), catalog, catalog.config, catalog.closedDates, now);
+}
+
+test("an e-bike search ignores the engine band", async (t) => {
+  const catalog = withEbike(expectedCatalog());
+
+  await t.test("parseSearch drops a band for type=ebike, with or without a pickup", () => {
+    for (const band of BANDS) {
+      const queries = [
+        { type: "ebike", cc: band },
+        { ...VALID, type: "ebike", cc: band },
+        { date: VALID.date, time: VALID.time, package: "", type: "ebike", cc: band },
+      ];
+      for (const query of queries) {
+        const label = new URLSearchParams(query).toString();
+        const parsed = parseOn(catalog, query);
+        assert.deepEqual(parsed.errors, [], label);
+        assert.equal(parsed.typeId, "ebike", label);
+        assert.equal(parsed.ccBand ?? null, null, `${label}: the band is kept`);
+        assert.ok(!carriedQuery(parsed).includes("cc="), `${label}: a card carries the band`);
+      }
+      // A type with an engine keeps it.
+      assert.equal(parseOn(catalog, { type: "scooter", cc: band }).ccBand, band);
+    }
+  });
+
+  await t.test("the e-bike is listed with its price for any band, and a hold takes its bicycles", async () => {
+    const { db, dispose } = await createTestDb();
+    try {
+      await replaceCatalog(db, catalog, { now: NOW, source: "sheet" });
+      const stored = await readCatalog(db);
+      assert.ok(stored, "no catalog was stored");
+
+      const search = async (query: Record<string, string>) => {
+        const parsed = parseOn(stored, query);
+        assert.deepEqual(parsed.errors, [], JSON.stringify(query));
+        const found = await findModels(parsed, stored.models, NOW, (q) => searchAvailability(db, q));
+        assert.ok(found, `${JSON.stringify(query)} ran no search`);
+        return { parsed, found, listed: listedModels(stored.models, parsed, found).map(({ id }) => id) };
+      };
+
+      // A band that would apply leaves nothing for a model without an engine, so each of them must be dropped.
+      for (const band of [...BANDS, ""]) {
+        for (const pkg of ["day-1", "day-3", ""]) {
+          const query = { ...VALID, package: pkg, type: "ebike", cc: band };
+          const label = new URLSearchParams(query).toString();
+          const priceJpy = EBIKE_PRICES[pkg || "day-1"];
+          const { parsed, found, listed } = await search(query);
+          assert.deepEqual(found, [{ modelId: EBIKE_MODEL, vacancies: 2, priceJpy, depositJpy: 0 }], label);
+          assert.deepEqual(listed, [EBIKE_MODEL], label);
+          assert.equal(cardPrice(stored.packages, stored.prices, EBIKE_CLASS, parsed)?.priceJpy, priceJpy, label);
+        }
+      }
+      // The band still narrows a scooter search: only today-50 is up to 50 cc.
+      assert.deepEqual((await search({ ...VALID, type: "scooter", cc: "upto50" })).listed, ["today-50"]);
+
+      const hold = (n: number) =>
+        createHold(
+          db,
+          { id: `ebike-hold-${n}`, modelId: EBIKE_MODEL, packageId: "day-1", startAt: EBIKE_PICKUP, locale: "en" },
+          NOW,
+        );
+      const query = { ...VALID, type: "ebike", cc: "over400" };
+      const plates: string[] = [];
+      for (const [n, left] of [
+        [1, 1],
+        [2, 0],
+      ]) {
+        const result = await hold(n);
+        assert.ok(result.ok, `hold ${n}: ${JSON.stringify(result)}`);
+        const { booking } = result;
+        assert.deepEqual(
+          { modelId: booking.modelId, status: booking.status, priceJpy: booking.priceJpy, depositJpy: booking.depositJpy },
+          { modelId: EBIKE_MODEL, status: "ON_HOLD", priceJpy: 4500, depositJpy: 0 },
+          `hold ${n}`,
+        );
+        plates.push(booking.vehiclePlate);
+        const { found } = await search(query);
+        assert.deepEqual(found.map(({ vacancies }) => vacancies), left === 0 ? [] : [left], `after hold ${n}`);
+      }
+      assert.deepEqual(plates.sort(), [...EBIKE_PLATES].sort());
+      assert.deepEqual(await hold(3), { ok: false, reason: "SOLD_OUT" });
+    } finally {
+      await dispose();
+    }
   });
 });

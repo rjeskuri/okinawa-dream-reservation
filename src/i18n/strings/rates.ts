@@ -10,12 +10,13 @@ export const rates: Dictionary = {
     ko: "요금표는 아직 볼 수 없습니다. 잠시 후 다시 확인해 주세요.",
   },
 
-  "rates.form.group": { ja: "車両区分", en: "Bike or car", "zh-cn": "车辆类别", ko: "차량 구분" },
+  "rates.form.group": { ja: "車両区分", en: "Vehicle group", "zh-cn": "车辆类别", ko: "차량 구분" },
   "rates.form.duration": { ja: "期間", en: "Duration", "zh-cn": "租期", ko: "기간" },
   "rates.form.submit": { ja: "絞り込む", en: "Filter", "zh-cn": "筛选", ko: "필터 적용" },
   "rates.class": { ja: "クラス", en: "Class", "zh-cn": "车型级别", ko: "클래스" },
   "rates.group.bike": { ja: "バイク", en: "Bikes", "zh-cn": "摩托车", ko: "오토바이" },
   "rates.group.car": { ja: "レンタカー", en: "Cars", "zh-cn": "汽车", ko: "자동차" },
+  "rates.group.ebike": { ja: "電動アシスト自転車", en: "E-bikes", "zh-cn": "电动助力自行车", ko: "전기자전거" },
 
   "rates.error.invalid": {
     ja: "絞り込み条件の一部を読み取れませんでした。料金表全体を表示しています。",

@@ -3,7 +3,7 @@
 import { paramReader } from "./search.ts";
 import type { Catalog, Package, RateClass, RateGroup } from "./types.ts";
 
-export const RATE_GROUPS: readonly RateGroup[] = ["bike", "car"];
+export const RATE_GROUPS: readonly RateGroup[] = ["bike", "car", "ebike"];
 
 /** Each is the name of a query param. */
 export type RatesField = "group" | "class" | "duration";
