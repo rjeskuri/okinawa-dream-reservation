@@ -12,6 +12,7 @@ import { t } from "../../../i18n/t.ts";
 import Base from "../../../layouts/Base.astro";
 import { searchAvailability } from "../../../lib/booking/availability.ts";
 import { pickupInstant, pickupSlots, pickupWindowError } from "../../../lib/booking/pickup-window.ts";
+import { packageDays } from "../../../lib/calendar.ts";
 import { photoUrl, readPhotoIndex } from "../../../lib/catalog/photos.ts";
 import { readCatalog } from "../../../lib/db/catalog-store.ts";
 import { isLocale } from "../../../lib/locale.ts";
@@ -44,16 +45,15 @@ const time = searchParams.get("time") ?? "";
 /** The query's date when it is a real one, which the prices are for: the advance price applies before that JST date. */
 const pickupDate = Number.isNaN(pickupInstant(date, "00:00")) ? undefined : date;
 
-// readCatalog returns packages in sort order.
+// readCatalog returns packages in sort order. A hold refuses a package with no price, so only these are choices.
 const rows = packagePrices(catalog.packages, catalog.prices, entry.rateClassId, pickupDate, now);
-// Task #50 makes hours packages bookable. Until then a hold refuses one, so the table lists it and the form does not.
-const bookable = rows.map(({ pkg }) => pkg).filter((pkg) => pkg.days !== null);
+const bookable = rows.map(({ pkg }) => pkg);
 const chosen = bookable.find(({ id }) => id === searchParams.get("package"));
 const startAt = pickupInstant(date, time);
 
 // searchAvailability leaves the window to its caller, and the calendar helpers behind it throw on a date like 9999-12-31.
 const searchable =
-  chosen !== undefined && pickupWindowError(catalog.config, catalog.closedDates, startAt, chosen.days, now) === null;
+  chosen !== undefined && pickupWindowError(catalog.config, catalog.closedDates, startAt, chosen, now) === null;
 const available = searchable
   ? (await searchAvailability(env.DB, { startAt, packageId: chosen.id, now })).some((row) => row.modelId === entry.id)
   : null;
@@ -143,12 +143,12 @@ const error = errorKey in model ? t(locale, model, errorKey) : null;
             max={addDaysToDate(jstToday(now), catalog.config.maxDaysAhead)}
             closedDates={catalog.closedDates}
             value={pickupDate}
-            packageDays={(chosen ?? bookable[0]).days}
+            packageDays={packageDays(chosen ?? bookable[0])}
           />
           <label>
             {t(locale, pages, "home.search.time")}
             <select name="time">
-              {pickupSlots(catalog.config).map((slot) => (
+              {pickupSlots(catalog.config, chosen).map((slot) => (
                 <option value={slot} selected={slot === time}>
                   {slot}
                 </option>
@@ -159,7 +159,12 @@ const error = errorKey in model ? t(locale, model, errorKey) : null;
             {t(locale, pages, "home.search.package")}
             <select name="package">
               {bookable.map((pkg) => (
-                <option value={pkg.id} selected={pkg === chosen} data-days={pkg.days}>
+                <option
+                  value={pkg.id}
+                  selected={pkg === chosen}
+                  data-days={packageDays(pkg)}
+                  data-slots={pickupSlots(catalog.config, pkg).join(" ")}
+                >
                   {pkg.texts[locale].name}
                 </option>
               ))}
@@ -173,11 +178,17 @@ const error = errorKey in model ? t(locale, model, errorKey) : null;
 </Base>
 
 <script>
-  // The calendar shows the return date of the package chosen here.
+  // The calendar shows the return date of the package chosen here, and the time select the pickups it is back by closing
+  // from (#50), keeping the chosen time when that package allows it.
   const select = document.querySelector<HTMLElement>("form.booking select[name=package]");
   select?.addEventListener("change", () => {
-    const days = select.querySelector<HTMLOptionElement>("option:checked")?.dataset.days;
-    document.querySelector("form.booking date-picker")?.setAttribute("package-days", days ?? "");
+    const option = select.querySelector<HTMLOptionElement>("option:checked");
+    document.querySelector("form.booking date-picker")?.setAttribute("package-days", option?.dataset.days ?? "");
+    const time = document.querySelector<HTMLElement>("form.booking select[name=time]");
+    const slots = option?.dataset.slots?.split(" ").filter((slot) => slot !== "");
+    if (time === null || slots === undefined) return;
+    const kept = time.querySelector<HTMLOptionElement>("option:checked")?.value;
+    time.replaceChildren(...slots.map((slot) => new Option(slot, slot, false, slot === kept)));
   });
 </script>
 

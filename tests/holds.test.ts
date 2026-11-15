@@ -30,7 +30,15 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
-const WINDOW_REASONS: string[] = ["OUTSIDE_HOURS", "OFF_SLOT", "CLOSED_PICKUP", "CLOSED_RETURN", "TOO_SOON", "TOO_FAR"];
+const WINDOW_REASONS: string[] = [
+  "OUTSIDE_HOURS",
+  "OFF_SLOT",
+  "CLOSED_PICKUP",
+  "RETURN_OUTSIDE_HOURS",
+  "CLOSED_RETURN",
+  "TOO_SOON",
+  "TOO_FAR",
+];
 const HOLD_REASONS: string[] = ["SOLD_OUT", "UNKNOWN_MODEL", "UNKNOWN_PACKAGE", "NO_PRICE", "CONFLICT", ...WINDOW_REASONS];
 const SOLD_OUT = { ok: false, reason: "SOLD_OUT" };
 const CONFLICT = { ok: false, reason: "CONFLICT" };
@@ -71,6 +79,25 @@ async function seedShop(db: D1Database, days = 1, price_jpy = 8000): Promise<Sho
   const pkg = await seedPackage(db, { days });
   await seedPrice(db, { rate_class_id: model.rate_class_id, package_id: pkg.id, price_jpy });
   return { modelId: model.id, packageId: pkg.id, rateClassId: model.rate_class_id };
+}
+
+/** A package's length as seedPackage takes it: days, or hours alone. */
+type Length = { days: number } | { hours: number };
+
+/** A model with no vehicles yet, and a package of each length priced for its rate class, in that order. */
+async function seedShopOf(
+  db: D1Database,
+  lengths: Length[],
+  price_jpy = 8000,
+): Promise<Shop & { packageIds: string[] }> {
+  const model = await seedModel(db);
+  const packageIds: string[] = [];
+  for (const length of lengths) {
+    const pkg = await seedPackage(db, length);
+    await seedPrice(db, { rate_class_id: model.rate_class_id, package_id: pkg.id, price_jpy });
+    packageIds.push(pkg.id);
+  }
+  return { modelId: model.id, packageId: packageIds[0] as string, rateClassId: model.rate_class_id, packageIds };
 }
 
 async function seedFleet(db: D1Database, modelId: string, size: number): Promise<string[]> {
@@ -137,31 +164,54 @@ function raceBeforeInsert(db: D1Database, beforeInsert: () => Promise<unknown>):
   return { db: racing, raced: () => raced };
 }
 
-/** Three ways for every hold of a call to overlap every other. A package ends at closing time on its last day. */
-const OVERLAPS: { label: string; days: number; startAt: (call: number) => number }[] = [
-  { label: "one pickup time", days: 1, startAt: () => PICKUP },
-  { label: "every slot of one day", days: 1, startAt: (call) => PICKUP + (call % 18) * 30 * MINUTE_MS },
-  { label: "three-day rentals from three days", days: 3, startAt: (call) => PICKUP + (call % 3) * DAY_MS },
+/**
+ * Ways for every hold of a call to overlap every other, with the 60-minute turnaround. A day package ends at closing time
+ * on its last day, and an hours package `hours` after its pickup. Call n takes lengths[n % lengths.length].
+ */
+const OVERLAPS: { label: string; lengths: Length[]; startAt: (call: number) => number }[] = [
+  { label: "one pickup time", lengths: [{ days: 1 }], startAt: () => PICKUP },
+  { label: "every slot of one day", lengths: [{ days: 1 }], startAt: (call) => PICKUP + (call % 18) * 30 * MINUTE_MS },
+  { label: "three-day rentals from three days", lengths: [{ days: 3 }], startAt: (call) => PICKUP + (call % 3) * DAY_MS },
+  { label: "4-hour rentals from one pickup", lengths: [{ hours: 4 }], startAt: () => PICKUP },
+  // 09:00 to 12:00: each start is under four hours from every other.
+  { label: "4-hour rentals from seven slots", lengths: [{ hours: 4 }], startAt: (call) => PICKUP + (call % 7) * 30 * MINUTE_MS },
+  { label: "2-hour rentals from four slots", lengths: [{ hours: 2 }], startAt: (call) => PICKUP + (call % 4) * 30 * MINUTE_MS },
+  {
+    label: "24-hour rentals from every slot of one day",
+    lengths: [{ hours: 24 }],
+    startAt: (call) => PICKUP + (call % 18) * 30 * MINUTE_MS,
+  },
+  { label: "day and hours packages from one pickup", lengths: [{ days: 1 }, { hours: 4 }, { hours: 24 }, { days: 3 }], startAt: () => PICKUP },
+  // A 24-hour rental from 09:00 is back at 09:00 the next day, an hour inside the buffer of a 09:30 pickup then.
+  {
+    label: "24 hours, then 4 hours inside its buffer the next morning",
+    lengths: [{ hours: 24 }, { hours: 4 }],
+    startAt: (call) => (call % 2 === 0 ? PICKUP : PICKUP + DAY_MS + 30 * MINUTE_MS),
+  },
 ];
 
 test("concurrent holds never oversell a model", async () => {
   await withShop(async (db) => {
     for (const fleetSize of [1, 3, 5]) {
-      for (const { label, days, startAt } of OVERLAPS) {
+      for (const { label, lengths, startAt } of OVERLAPS) {
         const caseLabel = `${fleetSize} bikes, ${label}`;
-        const shop = await seedShop(db, days);
+        const shop = await seedShopOf(db, lengths);
         const fleet = await seedFleet(db, shop.modelId, fleetSize);
         // A free bike of another model, which no hold of this model may take.
-        await seedFleet(db, (await seedShop(db, days)).modelId, 1);
+        await seedFleet(db, (await seedShopOf(db, lengths)).modelId, 1);
 
-        const calls = Array.from({ length: 20 }, (_, call) => holdFor(shop, { startAt: startAt(call) }));
+        const calls = Array.from({ length: 20 }, (_, call) =>
+          holdFor(shop, { startAt: startAt(call), packageId: shop.packageIds[call % shop.packageIds.length] }),
+        );
         const results = await Promise.all(calls.map((input) => createHold(db, input, NOW)));
 
         const plates: string[] = [];
-        for (const result of results) {
-          if (result.ok) plates.push(result.booking.vehiclePlate);
-          else assert.deepEqual(result, SOLD_OUT, caseLabel);
-        }
+        results.forEach((result, call) => {
+          if (!result.ok) return assert.deepEqual(result, SOLD_OUT, caseLabel);
+          plates.push(result.booking.vehiclePlate);
+          const length = lengths[call % lengths.length] as Length;
+          assert.equal(result.booking.endAt, returnOf(length, startAt(call)), `${caseLabel}: call ${call}'s return`);
+        });
         assert.deepEqual(plates.sort(), [...fleet].sort(), caseLabel);
         assert.equal(await countBookings(db, shop.modelId), fleetSize, caseLabel);
       }
@@ -169,9 +219,64 @@ test("concurrent holds never oversell a model", async () => {
   });
 });
 
+/** When a rental of `length` from `startAt` returns at the default 18:00 close, worked out here with Date alone. */
+function returnOf(length: Length, startAt: number): number {
+  if ("hours" in length) return startAt + length.hours * HOUR_MS;
+  const pickupDate = new Date(startAt + 9 * HOUR_MS).toISOString().slice(0, 10);
+  return jst(dayAfter(pickupDate, length.days - 1), "18:00");
+}
+
+// #50: an hours package frees its bike `hours` after the pickup, so one bike can carry a morning and an afternoon rental,
+// and the turnaround still keeps them apart. With 4 hours and 60 minutes of turnaround, 09:00 is back at 13:00 and the
+// bike is free again from 14:00.
+test("concurrent hourly holds share a bike across the day and never overlap", async () => {
+  await withShop(async (db) => {
+    const morning = jst(PICKUP_DAY, "09:00");
+    for (const fleetSize of [1, 2, 3]) {
+      for (const [afternoonAt, sharesTheBike] of [
+        ["14:00", true],
+        ["13:30", false],
+      ] as const) {
+        const label = `${fleetSize} bikes, 09:00 and ${afternoonAt}`;
+        const afternoon = jst(PICKUP_DAY, afternoonAt);
+        const shop = await seedShopOf(db, [{ hours: 4 }]);
+        const fleet = await seedFleet(db, shop.modelId, fleetSize);
+
+        const calls = Array.from({ length: 20 }, (_, call) => holdFor(shop, { startAt: call % 2 === 0 ? morning : afternoon }));
+        const results = await Promise.all(calls.map((input) => createHold(db, input, NOW)));
+
+        const taken = new Map<number, string[]>([
+          [morning, []],
+          [afternoon, []],
+        ]);
+        for (const result of results) {
+          if (!result.ok) {
+            assert.deepEqual(result, SOLD_OUT, label);
+            continue;
+          }
+          const { startAt, endAt, vehiclePlate } = result.booking;
+          assert.equal(endAt, startAt + 4 * HOUR_MS, `${label}: the return`);
+          taken.get(startAt)?.push(vehiclePlate);
+        }
+        const [mornings, afternoons] = [taken.get(morning) ?? [], taken.get(afternoon) ?? []];
+        if (sharesTheBike) {
+          // Every bike twice: once in the morning and once in the afternoon.
+          assert.deepEqual([...mornings].sort(), [...fleet].sort(), `${label}: the mornings`);
+          assert.deepEqual([...afternoons].sort(), [...fleet].sort(), `${label}: the afternoons`);
+        } else {
+          // Each bike once, in whichever of the two got there first.
+          assert.deepEqual([...mornings, ...afternoons].sort(), [...fleet].sort(), label);
+        }
+        assert.deepEqual(await conflictingPairs(db, NOW, HOUR_MS), [], label);
+      }
+    }
+  });
+});
+
 type Bike = { plate: string; base: number; odometer: number | null };
 type Span = { startAt: number; endAt: number };
-type Rental = Span & { id: string; plate: string; status: BookingStatus; expiresAt: number; days: number };
+/** `usage` is the rental's usage days once it is CONFIRMED: 1 for one of 24 hours or less, else the JST dates it touches. */
+type Rental = Span & { id: string; plate: string; status: BookingStatus; expiresAt: number; usage: number };
 
 const RANDOM_FLEETS: Bike[][] = [
   [
@@ -218,11 +323,13 @@ test("no overlapping blocking bookings after a random sequence", async () => {
       const bufMs = 60 * MINUTE_MS;
 
       const rateClass = await seedRateClass(db);
-      const packages: { id: string; days: number }[] = [];
-      for (const days of [1, 2, 3]) {
-        const pkg = await seedPackage(db, { days });
+      // Day and hours packages mixed, so the ledger checks each end rule against the other's rentals.
+      const lengths: Length[] = [{ days: 1 }, { days: 2 }, { days: 3 }, { hours: 2 }, { hours: 4 }, { hours: 24 }];
+      const packages: { id: string; length: Length }[] = [];
+      for (const length of lengths) {
+        const pkg = await seedPackage(db, length);
         await seedPrice(db, { rate_class_id: rateClass.id, package_id: pkg.id });
-        packages.push({ id: pkg.id, days });
+        packages.push({ id: pkg.id, length });
       }
       const fleets: { modelId: string; bikes: Bike[] }[] = [];
       for (const bikes of RANDOM_FLEETS) {
@@ -241,7 +348,7 @@ test("no overlapping blocking bookings after a random sequence", async () => {
         (rental.status === "ON_HOLD" && rental.expiresAt > at);
       const clashes = (a: Span, b: Span): boolean => b.startAt < a.endAt + bufMs && a.startAt < b.endAt + bufMs;
       const usage = (bike: Bike): number =>
-        ledger.reduce((sum, r) => sum + (r.plate === bike.plate && r.status === "CONFIRMED" ? r.days : 0), bike.base);
+        ledger.reduce((sum, r) => sum + (r.plate === bike.plate && r.status === "CONFIRMED" ? r.usage : 0), bike.base);
       const leastUsed = (bikes: Bike[]): Bike =>
         [...bikes].sort(
           (a, b) =>
@@ -252,34 +359,50 @@ test("no overlapping blocking bookings after a random sequence", async () => {
 
       let now = NOW;
       let taken = 0;
+      let takenHourly = 0;
       let soldOut = 0;
       let reclaimed = 0;
+      let refusedLate = 0;
       for (let step = 0; step < 150; step += 1) {
         const label = `seed ${seed}, step ${step}`;
         now += random() < 0.15 ? 20 * MINUTE_MS : pick(4) * MINUTE_MS;
 
         const { modelId, bikes } = fleets[pick(fleets.length)];
-        const pkg = packages[pick(packages.length)];
+        const { id: packageId, length } = packages[pick(packages.length)];
         const date = dayAfter(PICKUP_DAY, pick(6));
-        const startAt = jst(date, "09:00") + pick(18) * 30 * MINUTE_MS;
-        const span: Span = { startAt, endAt: jst(dayAfter(date, pkg.days - 1), "18:00") };
+        const sinceOpen = pick(18) * 30;
+        const startAt = jst(date, "09:00") + sinceOpen * MINUTE_MS;
+        // A day package returns at 18:00 on its last day, an hours package `hours` later, and that must be by 18:00.
+        const hours = "hours" in length ? length.hours : null;
+        const endAt = hours === null ? jst(dayAfter(date, (length as { days: number }).days - 1), "18:00") : startAt + hours * HOUR_MS;
+        const returnClock = (9 * 60 + sinceOpen + (hours ?? 0) * 60) % (24 * 60);
+        const returnsLate = hours !== null && (returnClock > 18 * 60 || returnClock < 9 * 60);
+        const span: Span = { startAt, endAt };
         const onBike = (bike: Bike) => ledger.filter((rental) => rental.plate === bike.plate && clashes(rental, span));
         const free = bikes.filter((bike) => !onBike(bike).some((rental) => blocks(rental, now)));
 
         const id = `random-${seed}-${step}`;
-        const result = await createHold(db, { id, modelId, packageId: pkg.id, startAt, locale: "ja" }, now);
+        const result = await createHold(db, { id, modelId, packageId, startAt, locale: "ja" }, now);
 
-        if (free.length === 0) {
+        if (returnsLate) {
+          assert.deepEqual(result, { ok: false, reason: "RETURN_OUTSIDE_HOURS" }, label);
+          refusedLate += 1;
+        } else if (free.length === 0) {
           assert.deepEqual(result, SOLD_OUT, label);
           soldOut += 1;
         } else {
           const bike = leastUsed(free);
-          assert.equal(booked(result, label).vehiclePlate, bike.plate, label);
+          const booking = booked(result, label);
+          assert.equal(booking.vehiclePlate, bike.plate, label);
+          assert.equal(booking.endAt, endAt, `${label}: the return`);
           // The bike is free, so a hold that clashes with this rental has lapsed.
           if (onBike(bike).some((rental) => rental.status === "ON_HOLD")) reclaimed += 1;
           taken += 1;
+          if (hours !== null) takenHourly += 1;
           const expiresAt = now + 15 * MINUTE_MS;
-          ledger.push({ ...span, id, plate: bike.plate, status: "ON_HOLD", expiresAt, days: pkg.days });
+          // 24 hours or less is one usage day (owner, 2026-11-15); a longer day package counts the dates it touches.
+          const usageDays = endAt - startAt <= DAY_MS ? 1 : (length as { days: number }).days;
+          ledger.push({ ...span, id, plate: bike.plate, status: "ON_HOLD", expiresAt, usage: usageDays });
         }
 
         // Sometimes a guest pays or walks away while a hold is live.
@@ -294,7 +417,8 @@ test("no overlapping blocking bookings after a random sequence", async () => {
       }
 
       // The sequence reached every outcome, or the check above proved little.
-      assert.ok(taken > 0 && soldOut > 0 && reclaimed > 0, `seed ${seed}: ${taken}, ${soldOut}, ${reclaimed}`);
+      const outcomes = `seed ${seed}: ${taken}, ${takenHourly}, ${soldOut}, ${reclaimed}, ${refusedLate}`;
+      assert.ok(taken > 0 && takenHourly > 0 && soldOut > 0 && reclaimed > 0 && refusedLate > 0, outcomes);
 
       // The self-join can fail: two rentals on a spare bike, 30 minutes apart inside the 60-minute buffer.
       const spare = await seedVehicle(db, { model_id: fleets[0].modelId });
@@ -413,7 +537,8 @@ test("only active, free bikes of the model can be taken", async () => {
 /**
  * One seeded rental that stays clear of PICKUP_DAY, which days and status it has being the point. `days` is how many
  * JST dates it touches, from `start` on `date` to `end` on the last of them, by default opening to closing. Without a
- * `package_id` it has a catalog package of its own, `days` long unless `pkg` says otherwise.
+ * `package_id` it has a catalog package of its own, `days` long unless `pkg` says otherwise. It counts as `days` usage
+ * days when it lasts more than 24 hours, and as one when it lasts 24 hours or less (#50).
  */
 type Usage = {
   date: string;
@@ -511,11 +636,91 @@ const USAGE_CASES: {
     ],
     expected: "A",
   },
+  // #50 (owner, 2026-11-15): a booking of 24 hours or less is one usage day, whatever dates it touches, so each of these
+  // 12-hour blocks over midnight JST is one day and not two.
   {
-    label: "over midnight JST is two dates in one UTC date",
+    label: "a 12-hour block over midnight JST is one day",
     a: [
       { date: "2030-08-01", days: 2, start: "20:00", end: "08:00", ...BLOCK },
       { date: "2030-08-04", days: 2, start: "20:00", end: "08:00", ...BLOCK },
+    ],
+    expected: "A",
+  },
+  // A longer one still counts JST dates: 36 hours from 20:00 touch three of them and two UTC dates, and with a one-day
+  // rental beside it only the JST count passes bike B.
+  {
+    label: "36 hours over two midnights JST are three days",
+    a: [
+      { date: "2030-08-01", days: 3, start: "20:00", end: "08:00", ...BLOCK },
+      { date: "2030-08-05", days: 1 },
+    ],
+    expected: "B",
+  },
+
+  // Hours packages (#50). Three of anything that counts one day each ties bike B, and four passes it.
+  {
+    label: "three 24-hour rentals over two dates each are three days",
+    a: [
+      { date: "2030-08-01", days: 2, end: "09:00", pkg: { hours: 24 } },
+      { date: "2030-08-04", days: 2, end: "09:00", pkg: { hours: 24 } },
+      { date: "2030-08-07", days: 2, start: "17:30", end: "17:30", pkg: { hours: 24 } },
+    ],
+    expected: "A",
+  },
+  {
+    label: "four 24-hour rentals are four days",
+    a: [
+      { date: "2030-08-01", days: 2, end: "09:00", pkg: { hours: 24 } },
+      { date: "2030-08-04", days: 2, end: "09:00", pkg: { hours: 24 } },
+      { date: "2030-08-07", days: 2, start: "12:00", end: "12:00", pkg: { hours: 24 } },
+      { date: "2030-08-10", days: 2, start: "17:30", end: "17:30", pkg: { hours: 24 } },
+    ],
+    expected: "B",
+  },
+  {
+    label: "three 4-hour rentals are three days",
+    a: [
+      { date: "2030-08-01", days: 1, end: "13:00", pkg: { hours: 4 } },
+      { date: "2030-08-03", days: 1, start: "14:00", end: "18:00", pkg: { hours: 4 } },
+      { date: "2030-08-05", days: 1, start: "10:30", end: "14:30", pkg: { hours: 4 } },
+    ],
+    expected: "A",
+  },
+  {
+    label: "four 2-hour rentals are four days",
+    a: [
+      { date: "2030-08-01", days: 1, end: "11:00", pkg: { hours: 2 } },
+      { date: "2030-08-03", days: 1, start: "16:00", end: "18:00", pkg: { hours: 2 } },
+      { date: "2030-08-05", days: 1, start: "12:00", end: "14:00", pkg: { hours: 2 } },
+      { date: "2030-08-07", days: 1, end: "11:00", pkg: { hours: 2 } },
+    ],
+    expected: "B",
+  },
+  // A minute over 24 hours is two dates and two days, so three of them pass bike B where three of 24 hours tie it.
+  {
+    label: "three blocks of 24 hours and a minute are six days",
+    a: [
+      { date: "2030-08-01", days: 2, end: "09:01", ...BLOCK },
+      { date: "2030-08-04", days: 2, end: "09:01", ...BLOCK },
+      { date: "2030-08-07", days: 2, end: "09:01", ...BLOCK },
+    ],
+    expected: "B",
+  },
+  {
+    label: "three blocks of 24 hours are three days",
+    a: [
+      { date: "2030-08-01", days: 2, end: "09:00", ...BLOCK },
+      { date: "2030-08-04", days: 2, end: "09:00", ...BLOCK },
+      { date: "2030-08-07", days: 2, end: "09:00", ...BLOCK },
+    ],
+    expected: "A",
+  },
+  // A 2-day package still counts the two dates it touches, so two of them pass bike B.
+  {
+    label: "two 2-day rentals are four days",
+    a: [
+      { date: "2030-08-01", days: 2 },
+      { date: "2030-08-05", days: 2, start: "17:30" },
     ],
     expected: "B",
   },
@@ -704,13 +909,109 @@ test("the turnaround buffer separates rentals", async () => {
   });
 });
 
-/** Each input that a stored field depends on, varied together. `end` is closing time on the package's last day. */
+/**
+ * A staff block on the only bike and an hours hold beside it, which runs from its pickup to `hours` later. The block is
+ * on PICKUP_DAY plus `day`.
+ */
+const HOURLY_BLOCK_CASES: { turnaround: number; hours: number; pickup: string; day?: number; block: [string, string]; free: boolean }[] = [
+  // A block after the return: 09:00 for 4 hours is back at 13:00, where a one-day hold would run on to 18:00.
+  { turnaround: 60, hours: 4, pickup: "09:00", block: ["13:59", "18:00"], free: false },
+  { turnaround: 60, hours: 4, pickup: "09:00", block: ["14:00", "18:00"], free: true },
+  { turnaround: 30, hours: 4, pickup: "09:00", block: ["13:29", "18:00"], free: false },
+  { turnaround: 30, hours: 4, pickup: "09:00", block: ["13:30", "18:00"], free: true },
+  { turnaround: 0, hours: 4, pickup: "09:00", block: ["12:59", "18:00"], free: false },
+  { turnaround: 0, hours: 4, pickup: "09:00", block: ["13:00", "18:00"], free: true },
+  { turnaround: 60, hours: 2, pickup: "09:30", block: ["12:29", "14:00"], free: false },
+  { turnaround: 60, hours: 2, pickup: "09:30", block: ["12:30", "14:00"], free: true },
+  { turnaround: 90, hours: 8, pickup: "09:00", block: ["18:29", "20:00"], free: false },
+  { turnaround: 90, hours: 8, pickup: "09:00", block: ["18:30", "20:00"], free: true },
+  // A block before the pickup.
+  { turnaround: 60, hours: 4, pickup: "10:30", block: ["07:00", "10:00"], free: false },
+  { turnaround: 60, hours: 4, pickup: "11:00", block: ["07:00", "10:00"], free: true },
+  { turnaround: 0, hours: 2, pickup: "10:00", block: ["07:00", "10:00"], free: true },
+  // 24 hours from 09:00 is back at 09:00 the next day, so it covers that evening and the next morning's first hour.
+  { turnaround: 60, hours: 24, pickup: "09:00", block: ["19:00", "20:00"], free: false },
+  { turnaround: 60, hours: 24, pickup: "09:00", day: 1, block: ["09:59", "12:00"], free: false },
+  { turnaround: 60, hours: 24, pickup: "09:00", day: 1, block: ["10:00", "12:00"], free: true },
+  { turnaround: 30, hours: 24, pickup: "17:30", day: 1, block: ["17:59", "19:00"], free: false },
+  { turnaround: 30, hours: 24, pickup: "17:30", day: 1, block: ["18:00", "19:00"], free: true },
+];
+
+/** Two holds on the only bike, the second after or before the first. `day` puts the second on PICKUP_DAY plus that. */
+const HOURLY_PAIRS: { turnaround: number; first: [Length, string]; second: [Length, string, number?]; free: boolean }[] = [
+  // A 4-hour morning from 09:00 is back at 13:00.
+  { turnaround: 60, first: [{ hours: 4 }, "09:00"], second: [{ hours: 4 }, "13:30"], free: false },
+  { turnaround: 60, first: [{ hours: 4 }, "09:00"], second: [{ hours: 4 }, "14:00"], free: true },
+  { turnaround: 30, first: [{ hours: 4 }, "09:00"], second: [{ hours: 4 }, "13:00"], free: false },
+  { turnaround: 30, first: [{ hours: 4 }, "09:00"], second: [{ hours: 4 }, "13:30"], free: true },
+  { turnaround: 60, first: [{ hours: 4 }, "09:00"], second: [{ days: 1 }, "13:30"], free: false },
+  { turnaround: 60, first: [{ hours: 4 }, "09:00"], second: [{ days: 1 }, "14:00"], free: true },
+  // The afternoon held first, then a morning that has to be back an hour before it.
+  { turnaround: 60, first: [{ hours: 4 }, "14:00"], second: [{ hours: 4 }, "09:00"], free: true },
+  { turnaround: 60, first: [{ hours: 4 }, "14:00"], second: [{ hours: 4 }, "09:30"], free: false },
+  { turnaround: 60, first: [{ hours: 4 }, "14:00"], second: [{ hours: 2 }, "11:00"], free: true },
+  { turnaround: 60, first: [{ hours: 4 }, "14:00"], second: [{ hours: 2 }, "11:30"], free: false },
+  { turnaround: 0, first: [{ days: 1 }, "14:00"], second: [{ hours: 4 }, "10:00"], free: true },
+  { turnaround: 0, first: [{ days: 1 }, "14:00"], second: [{ hours: 4 }, "10:30"], free: false },
+  // 24 hours from 09:00 holds the bike until 09:00 the next day.
+  { turnaround: 60, first: [{ hours: 24 }, "09:00"], second: [{ hours: 4 }, "09:30", 1], free: false },
+  { turnaround: 60, first: [{ hours: 24 }, "09:00"], second: [{ hours: 4 }, "10:00", 1], free: true },
+  { turnaround: 60, first: [{ hours: 24 }, "09:00"], second: [{ days: 1 }, "10:00", 1], free: true },
+  { turnaround: 60, first: [{ hours: 24 }, "17:30"], second: [{ hours: 4 }, "09:00", 1], free: false },
+  { turnaround: 60, first: [{ days: 1 }, "09:00"], second: [{ hours: 24 }, "09:00", 1], free: true },
+];
+
+test("the turnaround buffer separates an hourly rental from the next", async () => {
+  await withShop(async (db) => {
+    for (const [index, { turnaround, hours, pickup, day = 0, block, free }] of HOURLY_BLOCK_CASES.entries()) {
+      const label = `${hours} hours from ${pickup}, block ${block.join(" to ")} on day ${day}, ${turnaround} minutes`;
+      await seedConfig(db, { turnaround_minutes: turnaround });
+      const shop = await seedShopOf(db, [{ hours }]);
+      const [plate] = await seedFleet(db, shop.modelId, 1);
+      const blockDay = dayAfter(PICKUP_DAY, day);
+      await seedBooking(db, {
+        vehicle_plate: plate,
+        source: "block",
+        external_ref: `hourly-block-${index}`,
+        external_channel: "klook",
+        start_at: jst(blockDay, block[0]),
+        end_at: jst(blockDay, block[1]),
+        price_jpy: null,
+        deposit_jpy: null,
+      });
+
+      const result = await createHold(db, holdFor(shop, { startAt: jst(PICKUP_DAY, pickup) }), NOW);
+      if (free) assert.equal(booked(result, label).vehiclePlate, plate, label);
+      else assert.deepEqual(result, SOLD_OUT, label);
+    }
+
+    for (const { turnaround, first, second, free } of HOURLY_PAIRS) {
+      const [secondLength, secondPickup, secondDay = 0] = second;
+      const label = `${JSON.stringify(first)}, then ${JSON.stringify(second)}, ${turnaround} minutes`;
+      await seedConfig(db, { turnaround_minutes: turnaround });
+      const shop = await seedShopOf(db, [first[0], secondLength]);
+      const [plate] = await seedFleet(db, shop.modelId, 1);
+      const held = holdFor(shop, { packageId: shop.packageIds[0], startAt: jst(PICKUP_DAY, first[1]) });
+      assert.equal(booked(await createHold(db, held, NOW), `${label}: the first`).vehiclePlate, plate, label);
+
+      const startAt = jst(dayAfter(PICKUP_DAY, secondDay), secondPickup);
+      const result = await createHold(db, holdFor(shop, { packageId: shop.packageIds[1], startAt }), NOW);
+      if (free) assert.equal(booked(result, label).vehiclePlate, plate, label);
+      else assert.deepEqual(result, SOLD_OUT, label);
+    }
+  });
+});
+
+/**
+ * Each input that a stored field depends on, varied together. `end` is closing time on a day package's last day, and
+ * `hours` after the pickup for an hours package.
+ */
 const STORED_CASES: {
   hold_minutes: number;
   shop_open?: string;
   shop_close: string;
   now: number;
-  days: number;
+  length: Length;
   start: [string, string];
   end: [string, string];
   locale: Locale;
@@ -719,7 +1020,7 @@ const STORED_CASES: {
     hold_minutes: 10,
     shop_close: "18:00",
     now: jst("2030-06-01", "12:00"),
-    days: 1,
+    length: { days: 1 },
     start: ["2030-06-10", "09:00"],
     end: ["2030-06-10", "18:00"],
     locale: "en",
@@ -728,7 +1029,7 @@ const STORED_CASES: {
     hold_minutes: 15,
     shop_close: "18:00",
     now: jst("2030-06-02", "03:07") + 7_250,
-    days: 3,
+    length: { days: 3 },
     start: ["2030-06-10", "13:30"],
     end: ["2030-06-12", "18:00"],
     locale: "ja",
@@ -737,7 +1038,7 @@ const STORED_CASES: {
     hold_minutes: 45,
     shop_close: "18:00",
     now: jst("2030-06-20", "23:59"),
-    days: 7,
+    length: { days: 7 },
     start: ["2030-06-28", "17:30"],
     end: ["2030-07-04", "18:00"],
     locale: "zh-cn",
@@ -746,7 +1047,7 @@ const STORED_CASES: {
     hold_minutes: 5,
     shop_close: "17:00",
     now: jst("2030-07-01", "08:00"),
-    days: 2,
+    length: { days: 2 },
     start: ["2030-07-30", "16:30"],
     end: ["2030-07-31", "17:00"],
     locale: "ko",
@@ -757,22 +1058,61 @@ const STORED_CASES: {
     shop_open: "7:00",
     shop_close: "9:30",
     now: jst("2030-06-03", "10:00"),
-    days: 2,
+    length: { days: 2 },
     start: ["2030-06-10", "08:30"],
     end: ["2030-06-11", "09:30"],
     locale: "en",
+  },
+  // Hours packages (#50): an hours package with a price is bookable, and it ends `hours` after its pickup.
+  {
+    hold_minutes: 15,
+    shop_close: "18:00",
+    now: jst("2030-06-01", "12:00"),
+    length: { hours: 4 },
+    start: ["2030-06-10", "13:30"],
+    end: ["2030-06-10", "17:30"],
+    locale: "ja",
+  },
+  {
+    hold_minutes: 10,
+    shop_close: "17:00",
+    now: jst("2030-06-02", "09:00"),
+    length: { hours: 8 },
+    start: ["2030-06-10", "09:00"],
+    end: ["2030-06-10", "17:00"],
+    locale: "en",
+  },
+  {
+    hold_minutes: 30,
+    shop_close: "18:00",
+    now: jst("2030-06-15", "18:00"),
+    length: { hours: 24 },
+    start: ["2030-06-30", "16:30"],
+    end: ["2030-07-01", "16:30"],
+    locale: "ko",
+  },
+  // 07:30 JST is 22:30 UTC the day before, and two hours later is exactly the 9:30 close.
+  {
+    hold_minutes: 20,
+    shop_open: "7:00",
+    shop_close: "9:30",
+    now: jst("2030-07-01", "10:00"),
+    length: { hours: 2 },
+    start: ["2030-07-31", "07:30"],
+    end: ["2030-07-31", "09:30"],
+    locale: "zh-cn",
   },
 ];
 
 test("a hold stores the reservation fields", async () => {
   await withShop(async (db) => {
-    for (const { hold_minutes, shop_open = "09:00", shop_close, now, days, start, end, locale } of STORED_CASES) {
+    for (const { hold_minutes, shop_open = "09:00", shop_close, now, length, start, end, locale } of STORED_CASES) {
       await seedConfig(db, { hold_minutes, shop_open, shop_close });
-      const shop = await seedShop(db, days, 11_000);
+      const shop = await seedShopOf(db, [length], 11_000);
       const [plate] = await seedFleet(db, shop.modelId, 1);
       const input = holdFor(shop, { startAt: jst(...start), locale });
 
-      const booking = booked(await createHold(db, input, now), `${days} days`);
+      const booking = booked(await createHold(db, input, now), JSON.stringify(length));
       const expected: Booking = {
         id: input.id,
         ref: booking.ref,
@@ -1155,18 +1495,29 @@ test("invalid inputs return reasons", async () => {
     // The default horizon of 180 days from NOW ends on 2030-11-28. A rental may return past it, so 2030-12-03 is read.
     const sevenDays = await seedPackage(db, { days: 7 });
     await seedPrice(db, { rate_class_id: shop.rateClassId, package_id: sevenDays.id });
-    // Hours packages have no end rule until task #50, and having a price does not change that.
-    const hours = await seedPackage(db, { hours: 4 });
-    await seedPrice(db, { rate_class_id: shop.rateClassId, package_id: hours.id });
+    // Hours packages (#50): back by closing time, and a 24-hour return is on the next day's date.
+    const fourHours = await seedPackage(db, { hours: 4 });
+    await seedPrice(db, { rate_class_id: shop.rateClassId, package_id: fourHours.id });
+    const dayAndNight = await seedPackage(db, { hours: 24 });
+    await seedPrice(db, { rate_class_id: shop.rateClassId, package_id: dayAndNight.id });
     // Priced for another rate class only.
     const elsewhere = await seedPackage(db, { days: 2 });
     await seedPrice(db, { rate_class_id: (await seedRateClass(db)).id, package_id: elsewhere.id });
+    const hoursElsewhere = await seedPackage(db, { hours: 2 });
+    await seedPrice(db, { rate_class_id: (await seedRateClass(db)).id, package_id: hoursElsewhere.id });
 
     const table: [string, Partial<HoldInput>, string][] = [
       ["unknown model", { modelId: "no-such-model" }, "UNKNOWN_MODEL"],
       ["unknown package", { packageId: "no-such-package" }, "UNKNOWN_PACKAGE"],
-      ["hours package", { packageId: hours.id }, "UNKNOWN_PACKAGE"],
       ["no price for this rate class", { packageId: elsewhere.id }, "NO_PRICE"],
+      ["no hours price for this rate class", { packageId: hoursElsewhere.id }, "NO_PRICE"],
+      ["4 hours returning a slot past closing", { packageId: fourHours.id, startAt: jst(PICKUP_DAY, "14:30") }, "RETURN_OUTSIDE_HOURS"],
+      ["4 hours from the last slot", { packageId: fourHours.id, startAt: jst(PICKUP_DAY, "17:30") }, "RETURN_OUTSIDE_HOURS"],
+      ["4 hours from closing time", { packageId: fourHours.id, startAt: jst(PICKUP_DAY, "18:00") }, "OUTSIDE_HOURS"],
+      ["4 hours off the grid", { packageId: fourHours.id, startAt: jst(PICKUP_DAY, "14:15") }, "OFF_SLOT"],
+      ["4 hours late on a closed day", { packageId: fourHours.id, startAt: jst("2030-06-20", "14:30") }, "CLOSED_PICKUP"],
+      ["24 hours into a closed day", { packageId: dayAndNight.id, startAt: jst("2030-06-26", "17:30") }, "CLOSED_RETURN"],
+      ["24 hours inside the lead time", { packageId: dayAndNight.id, startAt: jst("2030-06-02", "09:00") }, "TOO_SOON"],
       ["before opening", { startAt: jst(PICKUP_DAY, "08:30") }, "OUTSIDE_HOURS"],
       ["at closing", { startAt: jst(PICKUP_DAY, "18:00") }, "OUTSIDE_HOURS"],
       ["between slots", { startAt: jst(PICKUP_DAY, "09:15") }, "OFF_SLOT"],
@@ -1194,6 +1545,13 @@ test("invalid inputs return reasons", async () => {
     booked(await createHold(db, holdFor(shop, overClosedDay), NOW), "a closed date mid-rental");
     const openReturn = { packageId: sevenDays.id, startAt: jst("2030-11-26", "09:00") };
     booked(await createHold(db, holdFor(shop, openReturn), NOW), "an open return past the horizon");
+    // 4 hours back at closing, and on the day before a closed date, which only a 24-hour rental returns on.
+    const atClosing = { packageId: fourHours.id, startAt: jst(PICKUP_DAY, "14:00") };
+    booked(await createHold(db, holdFor(shop, atClosing), NOW), "4 hours returning at closing");
+    const beforeClosed = { packageId: fourHours.id, startAt: jst("2030-06-26", "13:30") };
+    booked(await createHold(db, holdFor(shop, beforeClosed), NOW), "4 hours the day before a closed date");
+    const afterClosed = { packageId: dayAndNight.id, startAt: jst("2030-06-21", "17:30") };
+    booked(await createHold(db, holdFor(shop, afterClosed), NOW), "24 hours from the day after a closed date");
   });
 });
 
@@ -1226,6 +1584,11 @@ test("hostile inputs get a typed reason, never an exception", async () => {
     // The longest package the schema allows: its return is past year 9999 for any pickup late in that year.
     const longest = await seedPackage(db, { days: 60 });
     await seedPrice(db, { rate_class_id: shop.rateClassId, package_id: longest.id });
+    // And hours packages, whose return clock is read too: the shortest that refuses a late slot, and the longest.
+    const fourHours = await seedPackage(db, { hours: 4 });
+    await seedPrice(db, { rate_class_id: shop.rateClassId, package_id: fourHours.id });
+    const longestHours = await seedPackage(db, { hours: 72 });
+    await seedPrice(db, { rate_class_id: shop.rateClassId, package_id: longestHours.id });
     const attempt = (partial: Record<string, unknown>) => createHold(db, holdFor(shop, partial as Partial<HoldInput>), NOW);
 
     const notIds: unknown[] = [undefined, null, 42, NaN, true, {}, [], ""];
@@ -1265,7 +1628,7 @@ test("hostile inputs get a typed reason, never an exception", async () => {
       "2030-06-10T09:00:00+09:00",
       String(PICKUP),
     ];
-    for (const packageId of [shop.packageId, longest.id]) {
+    for (const packageId of [shop.packageId, longest.id, fourHours.id, longestHours.id]) {
       for (const startAt of notInstants) {
         const result = await attempt({ startAt, packageId });
         const label = `startAt ${String(startAt)}, package ${packageId}: ${JSON.stringify(result)}`;

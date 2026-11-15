@@ -61,10 +61,12 @@ individual departure time (or day)".
 - Turnaround and return-by-closing are ours alone. In core OCTO the availability check and the [reservation
   body](https://github.com/octotravel/typespec/blob/main/lib/schemas/BookingReservationBody.tsp) carry no turnaround,
   duration or return date, so a guest cannot choose a duration there; duration is descriptive content only.
-- A slot outside the pickup window (`pickupWindowError`: lead time, horizon, closed dates, return on a closed date) is
-  reported SOLD_OUT or CLOSED. A reserve can still meet a window error: the OTA calendar goes stale (see Double
-  booking), and a publish can add a closed date. The table under Headers and errors maps each reason.
-- Hours packages have no end rule until #50, so only day packages are exposed at first.
+- A slot outside the pickup window (`pickupWindowError`: lead time, horizon, closed dates, return on a closed date, an
+  hours package back after closing) is reported SOLD_OUT or CLOSED. A reserve can still meet a window error: the OTA
+  calendar goes stale (see Double booking), and a publish can add a closed date. The table under Headers and errors maps
+  each reason.
+- Hours packages end `hours` after the pickup (#50) and are options like day packages. Only the listed packages are
+  exposed: no rental over 24 hours beyond them, and no extension prices (owner, 2026-11-15).
 
 **Product type.** START_TIME, not OPENING_HOURS: the typespec says START_TIME is ["for products with fixed departure
 times"](https://github.com/octotravel/typespec), and our pickups are on a slot grid from `shop_open`
@@ -176,7 +178,7 @@ reserve maps each `HoldReason` from `createHold` as below (a proposal, to confir
 | --- | --- | --- |
 | SOLD_OUT, NO_PRICE | UNPROCESSABLE_ENTITY | Activity inventory not available |
 | TOO_SOON, TOO_FAR | UNPROCESSABLE_ENTITY | Availability is outside the booking window |
-| CLOSED_PICKUP, CLOSED_RETURN, OUTSIDE_HOURS | UNPROCESSABLE_ENTITY | Availability is closed |
+| CLOSED_PICKUP, CLOSED_RETURN, OUTSIDE_HOURS, RETURN_OUTSIDE_HOURS | UNPROCESSABLE_ENTITY | Availability is closed |
 | OFF_SLOT | INVALID_AVAILABILITY_ID | Unknown availability (we issue ids on the slot grid only) |
 | UNKNOWN_MODEL | INVALID_PRODUCT_ID | Unknown product |
 | UNKNOWN_PACKAGE | INVALID_OPTION_ID | Unknown option |

@@ -34,7 +34,9 @@ export function hasEngineBand(typeId: VehicleTypeId): boolean {
   return typeId !== "car" && typeId !== "ebike";
 }
 
-const TIME_FIELD_REASONS: readonly PickupWindowReason[] = ["OFF_SLOT", "OUTSIDE_HOURS"];
+const TIME_FIELD_REASONS: readonly PickupWindowReason[] = ["OFF_SLOT", "OUTSIDE_HOURS", "RETURN_OUTSIDE_HOURS"];
+
+const ONE_DAY = { days: 1, hours: null } as const;
 
 function parses(parse: (value: string) => unknown, value: string): boolean {
   try {
@@ -77,7 +79,7 @@ function typeWindow(
 ): { refusal: PickupWindowReason | null; classPackages?: Map<string, string> } {
   // A one-day rental returns on the pickup day, so this is every check but the return. It comes first because the calendar
   // helpers throw on a start the clock checks refuse.
-  const refusal = pickupWindowError(config, closedDates, startAt, 1, now);
+  const refusal = pickupWindowError(config, closedDates, startAt, ONE_DAY, now);
   if (refusal !== null) return { refusal };
 
   const classIds = new Set(models.filter((m) => m.active && m.typeId === typeId).map(({ rateClassId }) => rateClassId));
@@ -85,16 +87,16 @@ function typeWindow(
     const pkg = defaultPackage(packages, prices, rateClassId);
     return pkg === undefined ? [] : [{ rateClassId, pkg }];
   });
-  const open = defaults.filter(({ pkg }) => pickupWindowError(config, closedDates, startAt, pkg.days, now) === null);
+  const open = defaults.filter(({ pkg }) => pickupWindowError(config, closedDates, startAt, pkg, now) === null);
   if (defaults.length > 0 && open.length === 0) return { refusal: "CLOSED_RETURN" };
   return { refusal: null, classPackages: new Map(open.map(({ rateClassId, pkg }) => [rateClassId, pkg.id])) };
 }
 
 /**
- * The params of a listing request. The pickup window is checked only for a valid date and time with a valid day package, or
+ * The params of a listing request. The pickup window is checked only for a valid date and time with a valid package, or
  * with a valid type and no package at all, and the date or time it refuses comes back undefined like any other invalid
- * param. An hours package has no return day until task #50, so it has no window to check. cc means nothing for a car or an
- * e-bike (the guest may have left a band behind when switching type), so it is dropped.
+ * param. cc means nothing for a car or an e-bike (the guest may have left a band behind when switching type), so it is
+ * dropped.
  */
 export function parseSearch(
   params: URLSearchParams,
@@ -118,8 +120,8 @@ export function parseSearch(
   let classPackages: Map<string, string> | undefined;
   if (date !== undefined && time !== undefined) {
     const startAt = jstToEpoch(date, time);
-    if (pkg !== undefined && pkg.days !== null) {
-      refusal = pickupWindowError(config, closedDates, startAt, pkg.days, now);
+    if (pkg !== undefined) {
+      refusal = pickupWindowError(config, closedDates, startAt, pkg, now);
     } else if (pkg === undefined && typeId !== undefined && !errors.some(({ field }) => field === "package")) {
       ({ refusal, classPackages } = typeWindow(catalog, typeId, config, closedDates, startAt, now));
     }

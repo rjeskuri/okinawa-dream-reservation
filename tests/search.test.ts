@@ -6,7 +6,7 @@ import { searchAvailability } from "../src/lib/booking/availability.ts";
 import { createHold } from "../src/lib/booking/holds.ts";
 import { readCatalog, replaceCatalog } from "../src/lib/db/catalog-store.ts";
 import { cardPrice, carriedQuery, findModels, listedModels, parseSearch, type ParsedSearch } from "../src/lib/search.ts";
-import type { Catalog, ShopConfig } from "../src/lib/types.ts";
+import type { Catalog, Package, ShopConfig } from "../src/lib/types.ts";
 import { EBIKE_CLASS, EBIKE_MODEL, EBIKE_PLATES, EBIKE_PRICES, withEbike } from "./fixtures/sheet/ebike.ts";
 import { createTestDb } from "./helpers/d1.ts";
 import { expectedCatalog } from "./helpers/sheet-workbook.ts";
@@ -246,8 +246,10 @@ test("parseSearch checks the pickup against the clock it is given", async () => 
   assert.deepEqual(tooFar.errors.map(({ reason }) => reason), ["TOO_FAR"]);
 });
 
-// An hours package has no return day until task #50, but the fee schedule links to its prices.
-test("parseSearch accepts an hours package without a return day to check", async () => {
+// #50: the fee schedule links to an hours package's prices, and a search with one is checked like a day package's. hours-6
+// returns six hours after its pickup, and that must be by closing time, so from 09:00 to 18:00 its last pickup is 12:00. A
+// return past closing is the time's fault, as a pickup outside the hours is.
+test("parseSearch checks an hours package's window like a day package's", async () => {
   assert.deepEqual((await parse("package=hours-6")).errors, []);
   assert.equal((await parse("package=hours-6")).packageId, "hours-6");
 
@@ -260,6 +262,60 @@ test("parseSearch accepts an hours package without a return day to check", async
     packageId: "hours-6",
     rateClassId: "bike-125",
   });
+
+  const cases: {
+    label: string;
+    time: string;
+    closed?: string[];
+    config?: Partial<ShopConfig>;
+    expected: { field: string; reason: string } | null;
+  }[] = [
+    { label: "returning at closing", time: "12:00", expected: null },
+    { label: "returning a slot past closing", time: "12:30", expected: { field: "time", reason: "RETURN_OUTSIDE_HOURS" } },
+    { label: "from the last slot", time: "17:30", expected: { field: "time", reason: "RETURN_OUTSIDE_HOURS" } },
+    {
+      label: "past an earlier close",
+      time: "11:30",
+      config: { shopClose: "17:00" },
+      expected: { field: "time", reason: "RETURN_OUTSIDE_HOURS" },
+    },
+    { label: "to that close exactly", time: "11:00", config: { shopClose: "17:00" }, expected: null },
+    { label: "to a later close", time: "13:30", config: { shopClose: "19:30" }, expected: null },
+    { label: "off the grid", time: "12:15", expected: { field: "time", reason: "OFF_SLOT" } },
+    { label: "at closing time", time: "18:00", expected: { field: "time", reason: "OUTSIDE_HOURS" } },
+    {
+      label: "a closed pickup day comes first",
+      time: "12:30",
+      closed: ["2030-06-10"],
+      expected: { field: "date", reason: "CLOSED_PICKUP" },
+    },
+    { label: "a closed next day is no return day of six hours", time: "10:00", closed: ["2030-06-11"], expected: null },
+  ];
+  for (const { label, time, closed, config, expected } of cases) {
+    const parsed = await parse({ date: "2030-06-10", time, package: "hours-6", class: "bike-125" }, { closed, config });
+    assert.deepEqual(
+      parsed.errors.map(({ field, reason }) => ({ field, reason })),
+      expected === null ? [] : [expected],
+      label,
+    );
+    // The refused param comes back undefined, as any invalid one does, and the rest stay.
+    const kept = { ...values(search), time: expected?.field === "time" ? null : time };
+    if (expected?.field === "date") kept.date = null;
+    assert.deepEqual(values(parsed), kept, `${label}: values`);
+  }
+
+  // A 24-hour package returns at the pickup's clock the next day: every slot fits, and that day's closing refuses it.
+  const hours24: Package = { id: "hours-24", days: null, hours: 24, sort: 4, texts: CATALOG.packages[0].texts };
+  const withDayAndNight: Catalog = { ...CATALOG, packages: [...CATALOG.packages, hours24] };
+  const late = { date: "2030-06-10", time: "17:30", package: "hours-24" };
+  const parseWith = (closed: string[]) =>
+    parseSearch(new URLSearchParams(late), withDayAndNight, withDayAndNight.config, closed, NOW);
+  assert.deepEqual(parseWith([]).errors, []);
+  assert.deepEqual(parseWith(["2030-06-12"]).errors, []);
+  assert.deepEqual(
+    parseWith(["2030-06-11"]).errors.map(({ field, reason }) => ({ field, reason })),
+    [{ field: "date", reason: "CLOSED_RETURN" }],
+  );
 });
 
 // E-bikes (#130). The fixture catalog with tests/fixtures/sheet/ebike.ts added: one model, two active bicycles, ¥4,500 a

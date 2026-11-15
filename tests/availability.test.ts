@@ -3,11 +3,13 @@
 // conflicts are task #11's and only check those hand-worked tables, never the code under test.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHold } from "../src/lib/booking/holds.ts";
 import { conflicts, rentalEnd } from "../src/lib/db/blocking.ts";
 import type { ShopConfig, VehicleTypeId } from "../src/lib/types.ts";
 import { createTestDb } from "./helpers/d1.ts";
 import {
   seedBooking,
+  seedCatalogMeta,
   seedConfig,
   seedModel,
   seedPackage,
@@ -68,10 +70,13 @@ function found(rows: Available[]): Found[] {
   return sorted(rows.map((row) => [row.modelId, row.vacancies]));
 }
 
-/** A published shop: config, the three types with their deposits, and one days package priced in one rate class. */
+/**
+ * A published shop: config, the three types with their deposits, and one package priced in one rate class: a number of
+ * days, or `{ hours }`.
+ */
 async function seedShop(
   db: D1Database,
-  days: number,
+  length: number | { hours: number },
   config: Record<string, string | number> = {},
   priceJpy = 8000,
 ): Promise<Shop> {
@@ -79,7 +84,7 @@ async function seedShop(
   await seedType(db, { id: "scooter", deposit_jpy: 3000 });
   await seedType(db, { id: "motorcycle", deposit_jpy: 5000 });
   await seedType(db, { id: "car", deposit_jpy: 20000 });
-  const pkg = await seedPackage(db, { days });
+  const pkg = await seedPackage(db, typeof length === "number" ? { days: length } : length);
   const rate = await seedRateClass(db);
   await seedPrice(db, { rate_class_id: rate.id, package_id: pkg.id, price_jpy: priceJpy });
   return { packageId: pkg.id, rateClassId: rate.id };
@@ -217,7 +222,8 @@ test("returns only models with a free bike for the whole rental plus buffer", as
   // The hand-worked tables first, against task #11's rule, so a mistake in one is not blamed on the search.
   for (const { label, days, shopClose, turnaround, pickup, returnAt, bookings } of RENTALS) {
     const rental = { startAt: jst(pickup), endAt: jst(returnAt) };
-    assert.equal(rentalEnd(rental.startAt, { days }, { ...SHOP_CONFIG, shopClose }), rental.endAt, `the table: ${label}`);
+    const end = rentalEnd(rental.startAt, { days, hours: null }, { ...SHOP_CONFIG, shopClose });
+    assert.equal(end, rental.endAt, `the table: ${label}`);
     for (const [start, end, free] of bookings) {
       const booking = { startAt: jst(start), endAt: jst(end) };
       assert.equal(conflicts(rental, booking, turnaround * MINUTE_MS), !free, `the table: ${label}, ${start} to ${end}`);
@@ -506,17 +512,249 @@ test("an unknown package returns nothing", async () => {
   });
 });
 
-test("an hours package returns nothing until it has an end rule", async () => {
+// #50. Worked by hand as RENTALS is, with the return `hours` after the pickup. Each table has a free row that a return at
+// closing time, or on the last day of a day package, would block, and a blocked row that one would leave free.
+const HOURS_RENTALS: {
+  label: string;
+  hours: number;
+  shopClose: string;
+  turnaround: number;
+  pickup: string;
+  returnAt: string;
+  bookings: [string, string, boolean][];
+}[] = [
+  {
+    label: "4 hours from opening, 60 minutes of buffer",
+    hours: 4,
+    shopClose: "18:00",
+    turnaround: 60,
+    pickup: "08-10 09:00",
+    returnAt: "08-10 13:00",
+    bookings: [
+      ["08-09 09:00", "08-09 18:00", true],
+      ["08-10 07:00", "08-10 08:00", true],
+      ["08-10 07:00", "08-10 08:01", false],
+      ["08-10 11:00", "08-10 12:00", false],
+      ["08-10 13:59", "08-10 18:00", false],
+      ["08-10 14:00", "08-10 18:00", true],
+      ["08-10 16:00", "08-11 18:00", true],
+    ],
+  },
+  {
+    label: "4 hours in the afternoon, 30 minutes of buffer",
+    hours: 4,
+    shopClose: "18:00",
+    turnaround: 30,
+    pickup: "08-10 13:30",
+    returnAt: "08-10 17:30",
+    bookings: [
+      ["08-10 09:00", "08-10 13:00", true],
+      ["08-10 09:00", "08-10 13:01", false],
+      ["08-10 17:59", "08-10 20:00", false],
+      ["08-10 18:00", "08-10 20:00", true],
+      ["08-11 09:00", "08-11 18:00", true],
+    ],
+  },
+  {
+    // 8 hours from 10:00 is 18:00, and the 19:30 close plays no part.
+    label: "8 hours, 30 minutes of buffer, closing at 19:30",
+    hours: 8,
+    shopClose: "19:30",
+    turnaround: 30,
+    pickup: "08-10 10:00",
+    returnAt: "08-10 18:00",
+    bookings: [
+      ["08-10 08:00", "08-10 09:30", true],
+      ["08-10 08:00", "08-10 09:31", false],
+      ["08-10 18:29", "08-10 19:30", false],
+      ["08-10 18:30", "08-10 19:30", true],
+    ],
+  },
+  {
+    // 08:30 JST on 08-10 is still 08-09 in UTC.
+    label: "2 hours from an early pickup, no buffer",
+    hours: 2,
+    shopClose: "18:00",
+    turnaround: 0,
+    pickup: "08-10 08:30",
+    returnAt: "08-10 10:30",
+    bookings: [
+      ["08-10 07:00", "08-10 08:30", true],
+      ["08-10 07:00", "08-10 08:31", false],
+      ["08-10 10:29", "08-10 12:00", false],
+      ["08-10 10:30", "08-10 12:00", true],
+    ],
+  },
+  {
+    // A one-day package from 17:30 would be back at 18:00 and leave the next morning free.
+    label: "24 hours from the last slot, 60 minutes of buffer",
+    hours: 24,
+    shopClose: "18:00",
+    turnaround: 60,
+    pickup: "08-10 17:30",
+    returnAt: "08-11 17:30",
+    bookings: [
+      ["08-10 09:00", "08-10 16:30", true],
+      ["08-10 09:00", "08-10 16:31", false],
+      ["08-11 09:00", "08-11 12:00", false],
+      ["08-11 18:29", "08-11 20:00", false],
+      ["08-11 18:30", "08-11 20:00", true],
+      ["08-12 09:00", "08-12 18:00", true],
+    ],
+  },
+  {
+    label: "24 hours across a month end, 120 minutes of buffer",
+    hours: 24,
+    shopClose: "18:00",
+    turnaround: 120,
+    pickup: "08-31 12:00",
+    returnAt: "09-01 12:00",
+    bookings: [
+      ["08-31 08:00", "08-31 10:00", true],
+      ["08-31 08:00", "08-31 10:01", false],
+      ["09-01 13:59", "09-01 18:00", false],
+      ["09-01 14:00", "09-01 18:00", true],
+    ],
+  },
+];
+
+test("an hours package returns the models free from its pickup to pickup plus hours, plus the buffer", async () => {
+  // The tables first, against plain arithmetic and the overlap rule, so a mistake in one is not blamed on the search.
+  for (const { label, hours, turnaround, pickup, returnAt, bookings } of HOURS_RENTALS) {
+    const rental = { startAt: jst(pickup), endAt: jst(returnAt) };
+    assert.equal(rental.endAt - rental.startAt, hours * HOUR_MS, `the table: ${label}`);
+    for (const [start, end, free] of bookings) {
+      const booking = { startAt: jst(start), endAt: jst(end) };
+      assert.equal(conflicts(rental, booking, turnaround * MINUTE_MS), !free, `the table: ${label}, ${start} to ${end}`);
+    }
+  }
+
+  for (const { label, hours, shopClose, turnaround, pickup, bookings } of HOURS_RENTALS) {
+    await withDb(async (db) => {
+      const shop = await seedShop(db, { hours }, { shop_close: shopClose, turnaround_minutes: turnaround });
+
+      // One model per row, each with one bike, and one nobody booked.
+      const untouched = await seedFleet(db, shop, 1);
+      const expected: Found[] = [[untouched.id, 1]];
+      for (const [start, end, free] of bookings) {
+        const { id, plates } = await seedFleet(db, shop, 1);
+        await book(db, plates[0], [start, end]);
+        if (free) expected.push([id, 1]);
+      }
+
+      const rows = await search(db, { startAt: jst(pickup), packageId: shop.packageId, now: NOW });
+      assert.deepEqual(found(rows), sorted(expected), label);
+    });
+  }
+
+  // The price is the hours package's and the deposit the type's, and a class with no price for it is left out.
   await withDb(async (db) => {
-    const shop = await seedShop(db, 1);
-    const { id } = await seedFleet(db, shop, 2);
+    const shop = await seedShop(db, { hours: 4 }, {}, 3600);
+    const oneDay = (await seedPackage(db, { days: 1 })).id;
+    await seedPrice(db, { rate_class_id: shop.rateClassId, package_id: oneDay, price_jpy: 5200 });
+    const dayOnly = (await seedRateClass(db)).id;
+    await seedPrice(db, { rate_class_id: dayOnly, package_id: oneDay, price_jpy: 4100 });
+    await seedFleet(db, shop, 2, { id: "hourly", type_id: "scooter" });
+    await seedFleet(db, { rateClassId: dayOnly }, 1, { id: "daily" });
 
     const query = { startAt: PICKUP, now: NOW };
-    assert.deepEqual(found(await search(db, { ...query, packageId: shop.packageId })), [[id, 2]]);
-    for (const hours of [1, 4, 72]) {
-      const { id: packageId } = await seedPackage(db, { hours });
-      await seedPrice(db, { rate_class_id: shop.rateClassId, package_id: packageId });
-      assert.deepEqual(await search(db, { ...query, packageId }), [], `${hours} hours`);
+    assert.deepEqual(await search(db, { ...query, packageId: shop.packageId }), [
+      { modelId: "hourly", vacancies: 2, priceJpy: 3600, depositJpy: 3000 },
+    ]);
+    assert.deepEqual(await search(db, { ...query, packageId: oneDay }), [
+      { modelId: "daily", vacancies: 1, priceJpy: 4100, depositJpy: 5000 },
+      { modelId: "hourly", vacancies: 2, priceJpy: 5200, depositJpy: 3000 },
+    ]);
+  });
+});
+
+function minutesOf(clock: string): number {
+  const [hours, minutes] = clock.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function clockOf(minutes: number): string {
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+// #50, the ticket's own case: a guest holds a bike for a short morning rental, and the bike is free again once that return
+// plus the turnaround has passed, for an hours package or a day package. A pickup inside that time is still refused.
+test("an hourly rental frees the bike for a later same-day pickup", async () => {
+  // [hours, morning pickup, turnaround in minutes]
+  const cases: [number, string, number][] = [
+    [4, "09:00", 60],
+    [4, "10:30", 30],
+    [4, "09:00", 0],
+    [2, "09:30", 60],
+    [2, "11:00", 90],
+  ];
+  for (const [hours, morning, turnaround] of cases) {
+    const label = `${hours} hours from ${morning}, ${turnaround} minutes of buffer`;
+    await withDb(async (db) => {
+      const shop = await seedShop(db, { hours }, { turnaround_minutes: turnaround });
+      await seedCatalogMeta(db);
+      const oneDay = (await seedPackage(db, { days: 1 })).id;
+      await seedPrice(db, { rate_class_id: shop.rateClassId, package_id: oneDay });
+      const { id, plates } = await seedFleet(db, shop, 1);
+
+      const input = { id: `morning-${hours}-${morning}`, modelId: id, packageId: shop.packageId, startAt: jst(`08-10 ${morning}`) };
+      const held = await createHold(db, { ...input, locale: "en" }, NOW);
+      assert.ok(held.ok, `${label}: ${JSON.stringify(held)}`);
+      assert.equal(held.booking.vehiclePlate, plates[0], label);
+
+      // Every slot of the day. The morning is back `hours` after its pickup, so a pickup is free from that return plus
+      // the buffer on, or when its own rental is back that long before the morning starts. A day package runs to 18:00,
+      // past the morning, so only the first applies to it.
+      const start = minutesOf(morning);
+      const freeFrom = start + hours * 60 + turnaround;
+      let freeLater = 0;
+      for (let slot = 9 * 60; slot <= 17 * 60 + 30; slot += 30) {
+        const startAt = jst(`08-10 ${clockOf(slot)}`);
+        const hourlyFree = slot >= freeFrom || slot + hours * 60 + turnaround <= start;
+        const dailyFree = slot >= freeFrom;
+        if (hourlyFree && slot > start) freeLater += 1;
+        const hourly = await search(db, { startAt, packageId: shop.packageId, now: NOW });
+        assert.deepEqual(found(hourly), hourlyFree ? [[id, 1]] : [], `${label}: ${hours} hours from ${clockOf(slot)}`);
+        const daily = await search(db, { startAt, packageId: oneDay, now: NOW });
+        assert.deepEqual(found(daily), dailyFree ? [[id, 1]] : [], `${label}: a day from ${clockOf(slot)}`);
+      }
+      assert.ok(freeLater > 0, `${label}: no later slot was free`);
+    });
+  }
+
+  // Three bikes: the hold takes the least used, P-1, from 09:00 to 13:00, and P-2 is booked from 14:00. The morning and
+  // the afternoon each leave two bikes, a pickup inside both buffers leaves one, and a whole day from 14:00 leaves two.
+  await withDb(async (db) => {
+    const shop = await seedShop(db, { hours: 4 });
+    await seedCatalogMeta(db);
+    const oneDay = (await seedPackage(db, { days: 1 })).id;
+    await seedPrice(db, { rate_class_id: shop.rateClassId, package_id: oneDay });
+    const { id } = await seedModel(db, { rate_class_id: shop.rateClassId });
+    for (const [plate, base_usage_days] of [
+      ["P-1", 0],
+      ["P-2", 4],
+      ["P-3", 9],
+    ] as const) {
+      await seedVehicle(db, { plate, model_id: id, base_usage_days });
+    }
+    const hold = { id: "three-bikes", modelId: id, packageId: shop.packageId, startAt: jst("08-10 09:00"), locale: "en" } as const;
+    const held = await createHold(db, hold, NOW);
+    assert.ok(held.ok && held.booking.vehiclePlate === "P-1", JSON.stringify(held));
+    await book(db, "P-2", ["08-10 14:00", "08-10 18:00"]);
+
+    const vacancies: [string, string, number][] = [
+      [shop.packageId, "09:00", 2],
+      [shop.packageId, "10:00", 1],
+      [shop.packageId, "13:30", 1],
+      [shop.packageId, "14:00", 2],
+      [oneDay, "09:00", 1],
+      [oneDay, "13:30", 1],
+      [oneDay, "14:00", 2],
+    ];
+    for (const [packageId, time, free] of vacancies) {
+      const rows = await search(db, { startAt: jst(`08-10 ${time}`), packageId, now: NOW });
+      const label = `${packageId === oneDay ? "a day" : "4 hours"} from ${time}`;
+      assert.deepEqual(found(rows), [[id, free]], label);
     }
   });
 });

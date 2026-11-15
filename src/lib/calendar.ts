@@ -1,6 +1,7 @@
 // The pickup calendar's month grid and return date. Everything is a YYYY-MM-DD calendar date moved through time.ts, so
 // the host's zone never enters, and DatePicker.astro runs this same code in the browser.
 import { addDaysToDate, daysBetweenDates, epochToJst, jstToEpoch } from "./time.ts";
+import type { PackageLength } from "./types.ts";
 
 export type DisabledReason = "past" | "too_far" | "closed";
 
@@ -59,4 +60,14 @@ export function monthGrid(year: number, month: number, opts: MonthGridOptions): 
 export function returnDate(pickup: string, days: number): string {
   if (days < 1) throw new RangeError(`a package lasts at least 1 day: ${days}`);
   return addDaysToDate(pickup, days - 1);
+}
+
+/**
+ * The `days` that returnDate takes for a package, which a page gives the date picker: a days package's days, and for an
+ * hours package the pickup's date plus one for each whole 24 hours (#50). That is exact for a return on the pickup's own
+ * clock cycle, as 2, 4 and 24 hours always are from a pickup in shop hours. A length that is back after midnight but
+ * before a whole 24 hours, like 21 hours from noon, shows its return a day early.
+ */
+export function packageDays(pkg: PackageLength): number {
+  return pkg.days ?? Math.floor(pkg.hours / 24) + 1;
 }

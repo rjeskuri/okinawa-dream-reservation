@@ -295,6 +295,16 @@ function configClosingAt(shopClose: string, shopOpen = "09:00"): ShopConfig {
   };
 }
 
+/** A days package as its row carries it: hours is null. */
+function daysPackage(days: number): { days: number; hours: null } {
+  return { days, hours: null };
+}
+
+/** An hours package as its row carries it: days is null. */
+function hoursPackage(hours: number): { days: null; hours: number } {
+  return { days: null, hours };
+}
+
 /** Neither CI nor verify sets TZ, and a laptop in Japan runs in JST: every zone but JST exposes a host-local rentalEnd. */
 const HOST_ZONES: [string, number][] = [
   ["UTC", 0],
@@ -350,9 +360,10 @@ function proveRentalEnd(zone: string): void {
     const startAt = Date.parse(`${pickup}:00+09:00`);
     const returnAt = Date.parse(`${expected}:00+09:00`);
     const label = `${pickup}, ${days} days, closing ${shopClose}, on a ${zone} host`;
-    assert.equal(rentalEnd(startAt, { days }, configClosingAt(shopClose)), returnAt, label);
+    assert.equal(rentalEnd(startAt, daysPackage(days), configClosingAt(shopClose)), returnAt, label);
     // Only the closing time matters: not the opening time, nor the seconds of the pickup.
-    assert.equal(rentalEnd(startAt + 37_500, { days }, configClosingAt(shopClose, "07:15")), returnAt, `${label}, seconds`);
+    const seconds = rentalEnd(startAt + 37_500, daysPackage(days), configClosingAt(shopClose, "07:15"));
+    assert.equal(seconds, returnAt, `${label}, seconds`);
   }
 
   // Every day of a year and a bit, from Date.UTC's own calendar.
@@ -376,22 +387,151 @@ function proveRentalEnd(zone: string): void {
           const startAt = Date.UTC(year, month, date, hour, minute) - NINE_HOURS_MS;
           const expected = Date.UTC(year, month, date + days - 1, closeHour, closeMinute) - NINE_HOURS_MS;
           const label = `${year}-${month + 1}-${date} ${hour}:${minute} JST, ${days} days, closing ${shopClose}, on ${zone}`;
-          assert.equal(rentalEnd(startAt, { days }, configClosingAt(shopClose)), expected, label);
+          assert.equal(rentalEnd(startAt, daysPackage(days), configClosingAt(shopClose)), expected, label);
         }
       }
     }
   }
 
-  // A package row carries both columns, and an hours package has no end rule yet.
-  const config = configClosingAt("18:00");
-  const startAt = jst("2026-08-10", "09:00");
+  // A package row carries both columns.
   const row: { days: number; hours: null } = { days: 3, hours: null };
-  assert.equal(rentalEnd(startAt, row, config), jst("2026-08-12", "18:00"), zone);
-  for (const hoursPackage of [{ days: null, hours: 4 }, { days: null, hours: 24 }, { hours: 8 }]) {
-    assert.throws(
-      () => rentalEnd(startAt, hoursPackage as unknown as { days: number }, config),
-      RangeError,
-      `${JSON.stringify(hoursPackage)} on ${zone}`,
-    );
+  assert.equal(rentalEnd(jst("2026-08-10", "09:00"), row, configClosingAt("18:00")), jst("2026-08-12", "18:00"), zone);
+}
+
+// #50. An hours package ends `hours` after its pickup, whatever the shop's hours: the shop's 4 and 24 hours, the e-bikes'
+// 2, and an 8 the ticket names. The window rules, not rentalEnd, keep a return inside shop hours.
+test("rentalEnd handles hour-based packages", () => {
+  const hostZone = process.env.TZ;
+  try {
+    for (const [zone, januaryOffset] of HOST_ZONES) {
+      process.env.TZ = zone;
+      assert.equal(new Date(Date.UTC(2026, 0, 15)).getTimezoneOffset(), januaryOffset, `TZ=${zone} did not apply`);
+      proveHoursEnd(zone);
+    }
+  } finally {
+    if (hostZone === undefined) delete process.env.TZ;
+    else process.env.TZ = hostZone;
+  }
+});
+
+function proveHoursEnd(zone: string): void {
+  // [pickup, hours, return], all JST.
+  const table: [string, number, string][] = [
+    // Several pickups of one day.
+    ["2026-08-10T09:00", 4, "2026-08-10T13:00"],
+    ["2026-08-10T13:30", 4, "2026-08-10T17:30"],
+    ["2026-08-10T14:00", 4, "2026-08-10T18:00"],
+    ["2026-08-10T09:00", 8, "2026-08-10T17:00"],
+    ["2026-08-10T10:00", 8, "2026-08-10T18:00"],
+    ["2026-08-10T11:30", 2, "2026-08-10T13:30"],
+    ["2026-08-10T16:00", 2, "2026-08-10T18:00"],
+    // 24 hours is the pickup's own clock the next day, never closing time.
+    ["2026-08-10T09:00", 24, "2026-08-11T09:00"],
+    ["2026-08-10T12:30", 24, "2026-08-11T12:30"],
+    ["2026-08-10T17:30", 24, "2026-08-11T17:30"],
+    // Early pickups, whose UTC date is the day before, and a return on either side of 09:00 JST, midnight UTC.
+    ["2026-08-10T08:30", 4, "2026-08-10T12:30"],
+    ["2026-08-10T07:00", 2, "2026-08-10T09:00"],
+    ["2026-08-10T00:30", 8, "2026-08-10T08:30"],
+    ["2026-08-10T08:00", 24, "2026-08-11T08:00"],
+    ["2026-08-10T06:00", 4, "2026-08-10T10:00"],
+    // Past JST midnight.
+    ["2026-08-10T22:00", 4, "2026-08-11T02:00"],
+    ["2026-08-10T19:30", 8, "2026-08-11T03:30"],
+    // Across a month end, a year end, and February with and without a leap day.
+    ["2026-08-31T15:00", 24, "2026-09-01T15:00"],
+    ["2026-09-30T20:00", 8, "2026-10-01T04:00"],
+    ["2026-12-31T16:30", 24, "2027-01-01T16:30"],
+    ["2026-12-31T21:00", 4, "2027-01-01T01:00"],
+    ["2027-02-28T10:00", 24, "2027-03-01T10:00"],
+    ["2028-02-28T10:00", 24, "2028-02-29T10:00"],
+    ["2028-02-29T17:00", 8, "2028-03-01T01:00"],
+    // The schema's shortest and longest, and a length between.
+    ["2026-08-10T09:00", 1, "2026-08-10T10:00"],
+    ["2026-08-10T09:00", 72, "2026-08-13T09:00"],
+    ["2026-08-30T17:30", 48, "2026-09-01T17:30"],
+  ];
+  // The shop's hours play no part, so each config gives the same return.
+  const configs = [configClosingAt("18:00"), configClosingAt("17:00", "07:15"), configClosingAt("19:30", "10:00")];
+  for (const [pickup, hours, expected] of table) {
+    const startAt = Date.parse(`${pickup}:00+09:00`);
+    const returnAt = Date.parse(`${expected}:00+09:00`);
+    for (const config of configs) {
+      const label = `${pickup}, ${hours} hours, ${config.shopOpen} to ${config.shopClose}, on a ${zone} host`;
+      assert.equal(rentalEnd(startAt, hoursPackage(hours), config), returnAt, label);
+      // Exactly `hours` later, so the seconds of the pickup carry over.
+      assert.equal(rentalEnd(startAt + 37_500, hoursPackage(hours), config), returnAt + 37_500, `${label}, seconds`);
+    }
+  }
+
+  // Every day of a year and a bit, from Date.UTC's own calendar, at pickups on either side of midnight UTC.
+  const pickups = [
+    [0, 5],
+    [8, 59],
+    [9, 0],
+    [12, 34],
+    [16, 59],
+    [23, 30],
+  ];
+  for (let offset = 0; offset < 400; offset += 1) {
+    const day = new Date(Date.UTC(2026, 0, 1 + offset));
+    const [year, month, date] = [day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate()];
+    for (const hours of [1, 2, 3, 4, 6, 8, 12, 24, 48, 72]) {
+      for (const [hour, minute] of pickups) {
+        const startAt = Date.UTC(year, month, date, hour, minute) - NINE_HOURS_MS;
+        const expected = Date.UTC(year, month, date, hour + hours, minute) - NINE_HOURS_MS;
+        const label = `${year}-${month + 1}-${date} ${hour}:${minute} JST, ${hours} hours, on ${zone}`;
+        assert.equal(rentalEnd(startAt, hoursPackage(hours), configClosingAt("18:00")), expected, label);
+      }
+    }
+  }
+
+  // Day packages are unchanged beside them: one day returns at closing on the pickup's date, which 24 hours does not.
+  // [pickup, shop close, 1 day, 3 days, 24 hours]
+  const sideBySide: [string, string, string, string, string][] = [
+    ["2026-08-10T09:00", "18:00", "2026-08-10T18:00", "2026-08-12T18:00", "2026-08-11T09:00"],
+    ["2026-08-10T17:30", "18:00", "2026-08-10T18:00", "2026-08-12T18:00", "2026-08-11T17:30"],
+    ["2026-08-10T08:30", "17:00", "2026-08-10T17:00", "2026-08-12T17:00", "2026-08-11T08:30"],
+    ["2026-08-31T12:00", "19:30", "2026-08-31T19:30", "2026-09-02T19:30", "2026-09-01T12:00"],
+  ];
+  for (const [pickup, shopClose, oneDay, threeDays, oneTurn] of sideBySide) {
+    const startAt = Date.parse(`${pickup}:00+09:00`);
+    const config = configClosingAt(shopClose);
+    const label = `${pickup}, closing ${shopClose}, on ${zone}`;
+    assert.equal(rentalEnd(startAt, daysPackage(1), config), Date.parse(`${oneDay}:00+09:00`), `${label}, 1 day`);
+    assert.equal(rentalEnd(startAt, daysPackage(3), config), Date.parse(`${threeDays}:00+09:00`), `${label}, 3 days`);
+    assert.equal(rentalEnd(startAt, hoursPackage(24), config), Date.parse(`${oneTurn}:00+09:00`), `${label}, 24 hours`);
   }
 }
+
+test("rentalEnd throws RangeError unless a package has exactly one positive whole length", () => {
+  const config = configClosingAt("18:00");
+  const startAt = jst("2026-08-10", "09:00");
+  // The good shapes, so each case below is refused for its shape alone.
+  assert.equal(rentalEnd(startAt, daysPackage(3), config), jst("2026-08-12", "18:00"));
+  assert.equal(rentalEnd(startAt, hoursPackage(4), config), jst("2026-08-10", "13:00"));
+
+  const bad: unknown[] = [
+    // Both lengths, or neither.
+    { days: 3, hours: 24 },
+    { days: 1, hours: 4 },
+    { days: null, hours: null },
+    // A length that is no positive whole number.
+    { days: 0, hours: null },
+    { days: -1, hours: null },
+    { days: 1.5, hours: null },
+    { days: NaN, hours: null },
+    { days: Infinity, hours: null },
+    { days: "3", hours: null },
+    { days: null, hours: 0 },
+    { days: null, hours: -4 },
+    { days: null, hours: 2.5 },
+    { days: null, hours: NaN },
+    { days: null, hours: Infinity },
+    { days: null, hours: "4" },
+  ];
+  for (const pkg of bad) {
+    const label = JSON.stringify(pkg, (_, value) => (typeof value === "number" ? String(value) : value));
+    assert.throws(() => rentalEnd(startAt, pkg as Parameters<typeof rentalEnd>[1], config), RangeError, label);
+  }
+});

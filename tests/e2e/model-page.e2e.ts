@@ -250,10 +250,15 @@ function depositOf(catalog: Catalog, target: Model): number {
   return type.depositJpy;
 }
 
-function daysOf(catalog: Catalog, packageId: string): number {
-  const days = catalog.packages.find(({ id }) => id === packageId)?.days;
-  if (typeof days !== "number") throw new Error(`no day package ${packageId}`);
-  return days;
+/**
+ * When a rental of the package from `date` and `time` returns, without the code under test: closing time on the last day
+ * of a day package, or `hours` after the pickup for an hours package (#50).
+ */
+function returnOf(catalog: Catalog, packageId: string, date: string, time: string): number {
+  const pkg = catalog.packages.find(({ id }) => id === packageId);
+  if (pkg === undefined) throw new Error(`no package ${packageId}`);
+  if (pkg.hours !== null) return jstInstant(date, time) + pkg.hours * HOUR_MS;
+  return jstInstant(addDaysToDate(date, pkg.days - 1), catalog.config.shopClose);
 }
 
 // Reading pages.
@@ -684,7 +689,7 @@ test("the model page shows the model's details and links the license classes", a
   }
 });
 
-test("the booking form offers the published slots and priced day packages", async () => {
+test("the booking form offers the published slots and every priced package", async () => {
   const configs = [
     { shopOpen: "09:00", shopClose: "18:00", slotMinutes: 30, minLeadHours: 30, maxDaysAhead: 120 },
     { shopOpen: "08:30", shopClose: "17:00", slotMinutes: 45, minLeadHours: 54, maxDaysAhead: 45 },
@@ -724,8 +729,8 @@ test("the booking form offers the published slots and priced day packages", asyn
           );
 
           assert.deepEqual(offered(form.html, "time"), slotsOf(catalog.config), `${label}: time values`);
-          // A hold refuses an hours package until task #50 and a package with no price, so neither is a choice.
-          const bookable = pricedPackages(catalog, target).filter(({ pkg }) => pkg.days !== null);
+          // A hold refuses a package with no price, so it is no choice. Hours packages are bookable (#50), so they are.
+          const bookable = pricedPackages(catalog, target);
           assert.deepEqual(
             offered(form.html, "package"),
             bookable.map(({ pkg }) => pkg.id),
@@ -743,7 +748,7 @@ test("the booking form offers the published slots and priced day packages", asyn
       // The carried search is what the form starts from, whichever of the choices it names.
       const slots = slotsOf(catalog.config);
       for (const [index, target] of [VINO, PCX, NOTE].entries()) {
-        const bookable = pricedPackages(catalog, target).filter(({ pkg }) => pkg.days !== null);
+        const bookable = pricedPackages(catalog, target);
         const search = {
           date: date(11 + index),
           time: slots[index + 2] as string,
@@ -792,6 +797,9 @@ test("a valid booking form creates a hold and redirects to checkout", async () =
     { locale: "en", target: VINO, package: "p-a-3d", date: inDays(45), time: "13:30" },
     { locale: "zh-cn", target: NOTE, package: "p-m-7d", date: inDays(90), time: "17:30" },
     { locale: "ko", target: PCX, package: "p-m-7d", date: inDays(3), time: "11:00" },
+    // The six-hour package (#50): back six hours after the pickup, here at closing time and two hours before it.
+    { locale: "en", target: VINO, package: "p-b-6h", date: inDays(46), time: "12:00" },
+    { locale: "ja", target: PCX, package: "p-b-6h", date: inDays(33), time: "10:00" },
   ] as const;
   const laterCases = [
     { locale: "ko", target: VINO, package: "p-2d", date: inDays(21), time: "16:00" },
@@ -837,7 +845,7 @@ test("a valid booking form creates a hold and redirects to checkout", async () =
         model_id: c.target.id,
         package_id: c.package,
         start_at: jstInstant(c.date, c.time),
-        end_at: jstInstant(addDaysToDate(c.date, daysOf(catalog, c.package) - 1), catalog.config.shopClose),
+        end_at: returnOf(catalog, c.package, c.date, c.time),
         price_jpy: priceOf(catalog, c.target, c.package),
         deposit_jpy: depositOf(catalog, c.target),
         locale: c.locale,
@@ -953,6 +961,11 @@ test("concurrent posts never oversell over HTTP", async () => {
   // Two active bikes and one in maintenance.
   await race("en", PCX, { date: inDays(25), time: "10:00", package: "p-z-1d" }, ["pcx-1", "pcx-2"]);
 
+  // Six hours from 09:00 is back at 15:00 (#50), so with the 60-minute turnaround the same two bikes go again from 16:00.
+  const sameDay = inDays(27);
+  await race("zh-cn", PCX, { date: sameDay, time: "09:00", package: "p-b-6h" }, ["pcx-1", "pcx-2"]);
+  await race("ko", PCX, { date: sameDay, time: "16:00", package: "p-z-1d" }, ["pcx-1", "pcx-2"]);
+
   // Four active bikes, of which a booking and a live hold take two, and an expired hold takes none.
   const date = inDays(40);
   const time = "14:30";
@@ -988,7 +1001,9 @@ function refusals(): { code: string; search: Required<Search>; carried: (keyof S
     { code: "CLOSED_PICKUP", search: { date: inDays(20), time: "10:00", package: "p-z-1d" }, carried: all },
     { code: "CLOSED_RETURN", search: { date: inDays(18), time: "10:00", package: "p-a-3d" }, carried: all },
     { code: "UNKNOWN_PACKAGE", search: { date: day, time: "10:00", package: "p-nope" }, carried: ["date", "time"] },
-    { code: "UNKNOWN_PACKAGE", search: { date: day, time: "10:00", package: "p-b-6h" }, carried: ["date", "time"] },
+    // Six hours from 12:30 is back at 18:30, past closing (#50).
+    { code: "RETURN_OUTSIDE_HOURS", search: { date: day, time: "12:30", package: "p-b-6h" }, carried: all },
+    { code: "RETURN_OUTSIDE_HOURS", search: { date: inDays(13), time: "17:30", package: "p-b-6h" }, carried: all },
     { code: "NO_PRICE", search: { date: day, time: "10:00", package: "p-car-only" }, carried: ["date", "time"] },
   ];
 }
@@ -1045,6 +1060,8 @@ test("sold-out and invalid posts come back with an error", async () => {
   for (const locale of LOCALES) {
     const shown = ["SOLD_OUT", "TOO_SOON", "CLOSED_PICKUP"].map((code) => messages.get(`${code} ${locale}`));
     assert.equal(new Set(shown).size, 3, `${locale}: one text for different errors: ${shown.join(" / ")}`);
+    const hours = ["OUTSIDE_HOURS", "RETURN_OUTSIDE_HOURS", "CLOSED_RETURN"].map((code) => messages.get(`${code} ${locale}`));
+    assert.equal(new Set(hours).size, 3, `${locale}: one text for different errors: ${hours.join(" / ")}`);
   }
 
   // Fields that are no date or time at all never reach createHold as such, and still come back in the locale.
@@ -1184,6 +1201,8 @@ test("a tampered query leaves the model page standing", async () => {
     `?date=${day}&time=10:15&package=p-z-1d`,
     `?date=${day}&time=10:00&package=p-nope`,
     `?date=${day}&time=10:00&package=p-b-6h`,
+    `?date=${day}&time=17:30&package=p-b-6h`,
+    `?date=9999-12-31&time=17:30&package=p-b-6h`,
     `?date=${inDays(20)}&time=10:00&package=p-z-1d`,
     `?date=${day}&time=10:00`,
     `?date=${day}&package=p-z-1d`,
