@@ -17,6 +17,41 @@
 //
 //   global.css uses those through var(--...) and gives links, buttons and form controls (a, button, input,
 //   select, textarea) a `:focus-visible` outline drawn with var(--color-focus-ring).
+//
+// Task #30 (the shop's design: dark header, rainbow logo) adds to the contract:
+//
+//   tokens.css also declares, same rules as above:
+//     --color-border                 form-control boundary              (on background, 3:1, UI component)
+//     --color-header-background      the dark site header's fill
+//     --color-header-text            header text                        (on header background, 4.5:1)
+//     --color-header-link            header nav and language links      (on header background, 4.5:1)
+//     --color-header-link-hover      header links on hover              (on header background, 4.5:1)
+//     --color-header-focus-ring      focus outline inside the header    (on header background, 3:1)
+//
+//   The header is drawn with them, in global.css or Base.astro's <style> blocks, by rules whose selector names
+//   the header (the `header` element or a class containing "header"):
+//     a header rule sets `background`/`background-color` to var(--color-header-background) and `color` to
+//       var(--color-header-text);
+//     a header-link rule (last compound an `a`) sets `color` to var(--color-header-link), and one with `a:hover`
+//       sets it to var(--color-header-link-hover) (the global `a:hover` would otherwise win on the dark fill);
+//     a header-link `:focus-visible` rule draws its outline with var(--color-header-focus-ring), unless that token
+//       resolves to the same colour as --color-focus-ring (then the global focus rule already passes on both fills).
+//
+//   No colour is hard-coded outside tokens.css: besides hex, no rgb()/hsl()/hwb()/lab()/lch()/oklab()/oklch()/
+//   color() literal and no CSS named colour (white, black, red, ...) in a colour-bearing declaration (color,
+//   background*, border*, outline*, *shadow, fill, stroke, text-decoration*, filter, custom properties) of any
+//   src/**/*.css other than tokens.css, any .astro <style> block or style="..." attribute, nor in an .astro
+//   fill/stroke/stop-color attribute. `transparent`, `currentColor`, `inherit`, `none` are allowed.
+//
+//   Disabled controls look disabled: for each of button, input, select, textarea, the global.css rules whose
+//   selector ends in `<el>:disabled` (or `:disabled`, `*:disabled`, `:is(...)/:where(...)` naming el) together
+//   declare `cursor: not-allowed` and either `opacity` between 0 (exclusive) and 0.75, or a color/background/
+//   background-color/border-color drawn with a declared `--color-disabled-*` token.
+//
+//   Logo and favicon live in Astro's public dir, `public/` (astro.config sets no publicDir):
+//     Base.astro's <head> has a `<link rel="icon" href="/...">` naming a real image file in public/, and its
+//     <header> renders an `<img src="/...">` naming a real image file in public/, with alt text that is the
+//     shop name (a literal containing "Okinawa Dream", any case, or the `site.name` string via t()).
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { relative } from "node:path";
@@ -315,6 +350,36 @@ test("token color pairs meet WCAG AA contrast", () => {
       min: 3,
       what: "focus ring (UI component)",
     },
+    {
+      fg: "--color-border",
+      bg: "--color-background",
+      min: 3,
+      what: "form-control border (UI component)",
+    },
+    {
+      fg: "--color-header-text",
+      bg: "--color-header-background",
+      min: 4.5,
+      what: "header text",
+    },
+    {
+      fg: "--color-header-link",
+      bg: "--color-header-background",
+      min: 4.5,
+      what: "header link",
+    },
+    {
+      fg: "--color-header-link-hover",
+      bg: "--color-header-background",
+      min: 4.5,
+      what: "header link on hover",
+    },
+    {
+      fg: "--color-header-focus-ring",
+      bg: "--color-header-background",
+      min: 3,
+      what: "header focus ring (UI component)",
+    },
   ];
   const failures: string[] = [];
   for (const { fg, bg, min, what } of pairs) {
@@ -367,6 +432,12 @@ test("tokens.css declares the color, type-scale and spacing tokens the theme is 
     "--color-button-background-hover",
     "--color-button-text",
     "--color-focus-ring",
+    "--color-border",
+    "--color-header-background",
+    "--color-header-text",
+    "--color-header-link",
+    "--color-header-link-hover",
+    "--color-header-focus-ring",
   ]) {
     resolveColor(tokens, name); // throws with a clear message when missing or not a plain colour
   }
@@ -518,5 +589,351 @@ test("placeholder text uses a checked text token at full opacity", () => {
   assert.ok(
     matching.length > 0,
     "global.css needs a ::placeholder rule with color: var(--color-text-muted) (or var(--color-text)) and opacity: 1",
+  );
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Task #30: the shop's design (header tokens, no hard-coded colours of any form, disabled controls, logo)
+
+/** The last compound selector of one selector (after the final combinator). */
+function lastCompound(part: string): string {
+  return part.split(/\s*[>+~]\s*|\s+(?![^(]*\))/).pop()!;
+}
+
+/** CSS named colours (CSS Color 4) minus `transparent` and `currentcolor`, which are allowed. */
+const NAMED_COLORS = (
+  "aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue blueviolet brown " +
+  "burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue darkcyan " +
+  "darkgoldenrod darkgray darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange darkorchid darkred " +
+  "darksalmon darkseagreen darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink " +
+  "deepskyblue dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite gold " +
+  "goldenrod gray green greenyellow grey honeydew hotpink indianred indigo ivory khaki lavender lavenderblush " +
+  "lawngreen lemonchiffon lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen lightgrey " +
+  "lightpink lightsalmon lightseagreen lightskyblue lightslategray lightslategrey lightsteelblue lightyellow " +
+  "lime limegreen linen magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen " +
+  "mediumslateblue mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream mistyrose moccasin " +
+  "navajowhite navy oldlace olive olivedrab orange orangered orchid palegoldenrod palegreen paleturquoise " +
+  "palevioletred papayawhip peachpuff peru pink plum powderblue purple rebeccapurple red rosybrown royalblue " +
+  "saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue slateblue slategray slategrey snow " +
+  "springgreen steelblue tan teal thistle tomato turquoise violet wheat white whitesmoke yellow yellowgreen"
+).split(" ");
+const NAMED_RE = new RegExp(`(?<![\\w-])(?:${NAMED_COLORS.join("|")})(?![\\w-])`, "gi");
+const COLOR_FN_RE = /(?<![\w-])(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\(/gi;
+const COLOR_PROP_RE = /^--|color|background|border|outline|shadow|^fill|^stroke|decoration|column-rule|filter/i;
+
+/** Colour literals (functions and named colours) in one CSS value. Strings and url() are skipped. */
+function colorLiteralsInValue(value: string): string[] {
+  const v = value.replace(/"[^"]*"|'[^']*'/g, '""').replace(/url\([^)]*\)/gi, "url()");
+  return [...v.matchAll(COLOR_FN_RE), ...v.matchAll(NAMED_RE)].map((m) => m[0]);
+}
+
+/** `prop: value` pairs of a declaration list (a rule body or a style attribute). */
+function declarationsOf(body: string): [string, string][] {
+  return body
+    .split(";")
+    .map((d) => d.match(/^\s*(--[\w-]+|[a-zA-Z-]+)\s*:\s*([\s\S]*?)\s*$/))
+    .filter((m): m is RegExpMatchArray => m !== null)
+    .map((m) => [m[1]!.toLowerCase(), m[2]!.replace(/\s*!important$/i, "")]);
+}
+
+/** Hard-coded non-hex colours in colour-bearing declarations of a CSS text. */
+function cssColorLiterals(css: string): string[] {
+  const out: string[] = [];
+  for (const m of stripComments(css).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    for (const [prop, value] of declarationsOf(m[2]!)) {
+      if (!COLOR_PROP_RE.test(prop)) continue;
+      for (const lit of colorLiteralsInValue(value)) out.push(`${prop}: ${lit}`);
+    }
+  }
+  return out;
+}
+
+/** Hard-coded non-hex colours in an .astro file: its <style> blocks, style attributes, SVG paint attributes. */
+function astroColorLiterals(astro: string): string[] {
+  const out = cssColorLiterals(styleBlocks(astro));
+  const markup = stripComments(
+    astro
+      .replace(/^\s*---[\s\S]*?\n---/, "")
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/g, "")
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/g, ""),
+  );
+  const inline = [
+    ...[...markup.matchAll(/\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/g)].map((m) => m[1] ?? m[2]!),
+    ...[...markup.matchAll(/\sstyle\s*=\s*\{\s*`([^`]*)`\s*\}/g)].map((m) => m[1]!),
+  ];
+  for (const body of inline) {
+    for (const [prop, value] of declarationsOf(body)) {
+      if (!COLOR_PROP_RE.test(prop)) continue;
+      for (const lit of colorLiteralsInValue(value)) out.push(`style ${prop}: ${lit}`);
+    }
+  }
+  for (const m of markup.matchAll(/\s(fill|stroke|stop-color|flood-color|lighting-color)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+    for (const lit of colorLiteralsInValue(m[2] ?? m[3]!)) out.push(`${m[1]}="${lit}"`);
+  }
+  return out;
+}
+
+test("the colour-literal scanner finds rgb/hsl/named colours in CSS and ignores text, strings and allowed keywords", () => {
+  assert.deepEqual(cssColorLiterals("a { color: white; }"), ["color: white"]);
+  assert.deepEqual(
+    cssColorLiterals(
+      ".x { background: rgba(13, 14, 18, .12); box-shadow: 0 1px 2px rgb(0 0 0 / 45%); border-color: HSL(10 50% 50%); }",
+    ),
+    ["background: rgba(", "box-shadow: rgb(", "border-color: HSL("],
+  );
+  assert.deepEqual(
+    cssColorLiterals("@media (min-width: 40em) { .y { border: 1px solid Black; --x: tomato; outline-color: oklch(0.5 0.1 200) } }"),
+    ["border: Black", "--x: tomato", "outline-color: oklch("],
+  );
+  assert.deepEqual(cssColorLiterals(".z { color: var(--color-text, red); }"), ["color: red"]);
+  // Allowed keywords, token references, non-colour properties, strings and urls stay quiet.
+  assert.deepEqual(
+    cssColorLiterals(
+      'a { color: currentColor; background: transparent; border-color: inherit; fill: none; ' +
+        'background-image: url(/img/red.png); content: "white"; transition: color .2s, background-color .2s; ' +
+        'font-family: "Hiragino Sans", system-ui; color: var(--color-white); background-color: var(--color-red-500); ' +
+        "border: 1px solid var(--color-border); grid-template-areas: \"tan gold\"; }",
+    ),
+    [],
+  );
+  // Words in page text and the frontmatter are not CSS.
+  assert.deepEqual(
+    astroColorLiterals(
+      '---\nconst c = "red";\n---\n<p>White sand, blue sea, red tiles.</p><p class="black">x</p>' +
+        '<svg><path fill="currentColor" stroke="none"/></svg><style>p { color: var(--color-text); }</style>',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    astroColorLiterals(
+      '<div style="color: white; margin: 0">x</div><svg><path fill="black"/></svg>' +
+        "<style>.a { background: rgba(0,0,0,.5) }</style>",
+    ),
+    ["background: rgba(", "style color: white", 'fill="black"'],
+  );
+});
+
+test("no hard-coded colors (rgb, hsl, named) outside tokens.css", () => {
+  const files = [
+    ...walk(srcDir).filter((f) => f.endsWith(".astro") || f.endsWith(".css")),
+  ];
+  const names = files.map((f) => relative(srcDir, f));
+  for (const must of ["layouts/Base.astro", "styles/global.css", "components/ModelCard.astro"]) {
+    assert.ok(names.includes(must), `scan missed ${must}: ${names.join(", ")}`);
+  }
+  const offenders: string[] = [];
+  for (const file of files) {
+    if (file === tokensPath) continue;
+    const text = readFileSync(file, "utf8");
+    const found = file.endsWith(".css") ? cssColorLiterals(text) : astroColorLiterals(text);
+    for (const lit of found) offenders.push(`${relative(srcDir, file)}: ${lit}`);
+  }
+  assert.deepEqual(offenders, []);
+});
+
+test("the dark header is drawn with the header tokens", () => {
+  const tokens = rootDeclarations(read(tokensPath));
+  const all = [read(globalPath), styleBlocks(read(basePath))].flatMap(rules);
+  const headerRules = all.flatMap(({ selector, decls }) =>
+    selectorParts(selector)
+      .filter((p) => /header/i.test(p))
+      .map((part) => ({ part, decls })),
+  );
+  const uses = (value: string | undefined, token: string) =>
+    value !== undefined && new RegExp(`var\\(\\s*${token}\\s*[,)]`).test(value);
+  const isLink = (part: string) => /^a(?![\w-])/.test(lastCompound(part));
+
+  assert.ok(
+    headerRules.some(
+      ({ part, decls }) =>
+        /header/i.test(lastCompound(part)) &&
+        (uses(decls.get("background"), "--color-header-background") ||
+          uses(decls.get("background-color"), "--color-header-background")),
+    ),
+    "a rule on the header must set its background to var(--color-header-background)",
+  );
+  assert.ok(
+    headerRules.some(({ decls }) => uses(decls.get("color"), "--color-header-text")),
+    "a header rule must set color: var(--color-header-text)",
+  );
+  assert.ok(
+    headerRules.some(
+      ({ part, decls }) =>
+        isLink(part) &&
+        !/:hover|:focus/.test(lastCompound(part)) &&
+        uses(decls.get("color"), "--color-header-link"),
+    ),
+    "a header link rule (e.g. `header a`) must set color: var(--color-header-link)",
+  );
+  assert.ok(
+    headerRules.some(
+      ({ part, decls }) =>
+        isLink(part) && lastCompound(part).includes(":hover") && uses(decls.get("color"), "--color-header-link-hover"),
+    ),
+    "a header link hover rule (e.g. `header a:hover`) must set color: var(--color-header-link-hover)",
+  );
+
+  const sameRing =
+    resolveColor(tokens, "--color-header-focus-ring").join() === resolveColor(tokens, "--color-focus-ring").join();
+  if (!sameRing) {
+    assert.ok(
+      headerRules.some(
+        ({ part, decls }) =>
+          focusVisibleCovers(part, "a") &&
+          (uses(decls.get("outline"), "--color-header-focus-ring") ||
+            uses(decls.get("outline-color"), "--color-header-focus-ring")),
+      ),
+      "header links need a :focus-visible outline drawn with var(--color-header-focus-ring)",
+    );
+  }
+});
+
+/** Does this one selector end in `:disabled` on `el` (bare, `*`, the type itself, or an :is()/:where() naming it)? */
+function disabledCovers(part: string, el: string): boolean {
+  const compound = lastCompound(part);
+  if (!compound.endsWith(":disabled")) return false;
+  const head = compound.slice(0, -":disabled".length);
+  if (head === "" || head === "*" || head === el) return true;
+  return /^:(?:is|where)\(.*\)$/.test(head) && new RegExp(`[(,\\s]${el}(?![\\w-])`).test(head);
+}
+
+test("the disabled-selector helper reads selectors the way the contract says", () => {
+  assert.ok(disabledCovers("button:disabled", "button"));
+  assert.ok(disabledCovers(":disabled", "select"));
+  assert.ok(disabledCovers(":where(button, input, select, textarea):disabled", "textarea"));
+  assert.ok(disabledCovers("form :is(input,select):disabled", "input"));
+  assert.ok(!disabledCovers("button:not(:disabled)", "button"));
+  assert.ok(!disabledCovers("button:hover:not(:disabled)", "button"));
+  assert.ok(!disabledCovers("input:disabled", "button"));
+  assert.ok(!disabledCovers("input[type=text]:disabled", "input"));
+  assert.ok(!disabledCovers("button:disabled:hover", "button"));
+  assert.ok(!disabledCovers(":is(input,select):disabled", "button"));
+});
+
+test("disabled buttons and form controls look disabled", () => {
+  const tokens = rootDeclarations(read(tokensPath));
+  const all = rules(read(globalPath));
+  const problems: string[] = [];
+  for (const el of ["button", "input", "select", "textarea"]) {
+    const merged = new Map<string, string>();
+    for (const { selector, decls } of all) {
+      if (!selectorParts(selector).some((p) => disabledCovers(p, el))) continue;
+      for (const [k, v] of decls) merged.set(k, v);
+    }
+    if (merged.get("cursor") !== "not-allowed") problems.push(`<${el}>:disabled needs cursor: not-allowed`);
+    const op = merged.get("opacity")?.match(/^(\d*\.?\d+)(%?)$/);
+    const opacity = op ? Number(op[1]) / (op[2] ? 100 : 1) : 1;
+    const dimmed = opacity > 0 && opacity <= 0.75;
+    const tinted = ["color", "background", "background-color", "border-color"].some((prop) => {
+      const name = merged.get(prop)?.match(/var\(\s*(--color-disabled-[\w-]+)/)?.[1];
+      return name !== undefined && tokens.has(name);
+    });
+    if (!dimmed && !tinted) {
+      problems.push(
+        `<${el}>:disabled needs opacity in (0, 0.75] or a color/background/border-color from a declared --color-disabled-* token`,
+      );
+    }
+  }
+  assert.deepEqual(problems, []);
+});
+
+// --- logo and favicon, read from the Base.astro source
+
+/** Opening tags `<name ...>` in .astro source, skipping `>` inside quotes and `{...}` expressions. */
+function sourceTags(src: string, name: string): string[] {
+  const out: string[] = [];
+  for (const m of src.matchAll(new RegExp(`<${name}(?![\\w-])`, "gi"))) {
+    let i = m.index! + m[0].length;
+    let depth = 0;
+    let quote = "";
+    for (; i < src.length; i++) {
+      const ch = src[i]!;
+      if (quote) {
+        if (ch === quote) quote = "";
+      } else if (depth === 0 && (ch === '"' || ch === "'")) quote = ch;
+      else if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      else if (ch === ">" && depth === 0) break;
+    }
+    out.push(src.slice(m.index!, i + 1));
+  }
+  return out;
+}
+
+/** An attribute of a source tag: a static string, an `{expression}`, or undefined. */
+function sourceAttr(tag: string, name: string): { static?: string; expr?: string } | undefined {
+  const m = tag.match(
+    new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|\\{([\\s\\S]*?)\\}(?=\\s|/?>))`, "i"),
+  );
+  if (!m) return undefined;
+  return m[3] !== undefined ? { expr: m[3] } : { static: m[1] ?? m[2]! };
+}
+
+function publicDir(): string {
+  const config = readFileSync(`${repoRoot}astro.config.mjs`, "utf8");
+  const dir = stripComments(config).match(/publicDir\s*:\s*["']([^"']+)["']/)?.[1] ?? "public";
+  return `${repoRoot}${dir.replace(/^\.\//, "").replace(/\/?$/, "/")}`;
+}
+
+/** Is the file a real image (PNG, ICO, JPEG, GIF, WebP or SVG by content)? */
+function isImageFile(path: string): boolean {
+  if (!existsSync(path) || !statSync(path).isFile()) return false;
+  const b = readFileSync(path);
+  if (b.length < 16) return false;
+  const hex = b.subarray(0, 12).toString("hex");
+  return (
+    hex.startsWith("89504e470d0a1a0a") ||
+    hex.startsWith("00000100") ||
+    hex.startsWith("ffd8ff") ||
+    hex.startsWith("47494638") ||
+    (hex.startsWith("52494646") && b.subarray(8, 12).toString("latin1") === "WEBP") ||
+    /<svg[\s>]/i.test(b.subarray(0, 4096).toString("utf8"))
+  );
+}
+
+/** The public-dir file a root-relative URL names, or undefined for anything else. */
+function publicFileFor(href: string | undefined): string | undefined {
+  if (!href || !href.startsWith("/") || href.startsWith("//")) return undefined;
+  return `${publicDir()}${decodeURIComponent(href.replace(/[?#].*$/, "").slice(1))}`;
+}
+
+test("Base.astro links a favicon that is an image in the public dir", () => {
+  const base = stripComments(read(basePath));
+  const head = base.slice(0, base.search(/<body[\s>]/));
+  const icons = sourceTags(head, "link").filter((tag) =>
+    (sourceAttr(tag, "rel")?.static ?? "").toLowerCase().split(/\s+/).includes("icon"),
+  );
+  assert.ok(icons.length > 0, 'Base.astro <head> needs a <link rel="icon" href="/...">');
+  const hrefs = icons.map((tag) => sourceAttr(tag, "href")?.static);
+  assert.ok(
+    hrefs.some((href) => {
+      const file = publicFileFor(href);
+      return file !== undefined && isImageFile(file);
+    }),
+    `the icon link must name an image file in ${relative(repoRoot, publicDir())}, got ${JSON.stringify(hrefs)}`,
+  );
+});
+
+test("the header renders the shop logo from the public dir with the shop name as alt text", () => {
+  const base = stripComments(read(basePath));
+  const start = base.search(/<header[\s>]/);
+  assert.ok(start >= 0, "Base.astro must render a <header>");
+  const header = base.slice(start, base.indexOf("</header>", start));
+  const imgs = sourceTags(header, "img");
+  assert.ok(imgs.length > 0, "the <header> must render an <img> logo");
+  const described = imgs.map((tag) => ({
+    src: sourceAttr(tag, "src")?.static,
+    alt: sourceAttr(tag, "alt"),
+  }));
+  const ok = described.some(({ src, alt }) => {
+    const file = publicFileFor(src);
+    const altIsName =
+      (alt?.static !== undefined && /okinawa\s*dream/i.test(alt.static)) ||
+      (alt?.expr !== undefined && /["'`]site\.name["'`]/.test(alt.expr));
+    return file !== undefined && isImageFile(file) && altIsName;
+  });
+  assert.ok(
+    ok,
+    `the header logo needs src="/..." naming an image in ${relative(repoRoot, publicDir())} and alt with the shop name, got ${JSON.stringify(described)}`,
   );
 });
