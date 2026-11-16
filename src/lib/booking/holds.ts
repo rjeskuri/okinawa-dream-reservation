@@ -8,7 +8,7 @@ import { isLocale } from "../locale.ts";
 import type { Locale } from "../locale.ts";
 import { bookedAhead } from "../pricing.ts";
 import { JST_OFFSET_MS, jstToday } from "../time.ts";
-import type { Booking, BookingSource, BookingStatus } from "../types.ts";
+import type { Booking, BookingSource, BookingStatus, PackageLength } from "../types.ts";
 import { pickupWindowError } from "./pickup-window.ts";
 import type { PickupWindowReason } from "./pickup-window.ts";
 
@@ -69,12 +69,14 @@ function jstDaySql(column: string): string {
 }
 
 /**
- * A vehicle's rental days: base_usage_days plus the JST dates each CONFIRMED booking touches, past and future. A booking
- * counts by its own dates, because a staff block has no package and a package can change or leave after the booking.
+ * A vehicle's rental days: base_usage_days plus each CONFIRMED booking, past and future, as one day when it lasts 24 hours
+ * or less (owner, 2026-11-15: an hourly rental is one day) and as the JST dates it touches when longer. A booking counts by
+ * its own start and end, because a staff block has no package and a package can change or leave after the booking.
  * Reads vehicle alias `v`.
  */
 const USAGE_SQL = `(v.base_usage_days + COALESCE((
-  SELECT SUM(${jstDaySql("u.end_at")} - ${jstDaySql("u.start_at")} + 1)
+  SELECT SUM(CASE WHEN u.end_at - u.start_at <= ${DAY_MS} THEN 1
+    ELSE ${jstDaySql("u.end_at")} - ${jstDaySql("u.start_at")} + 1 END)
   FROM bookings u WHERE u.vehicle_plate = v.plate AND u.status = 'CONFIRMED'), 0))`;
 
 /**
@@ -111,11 +113,19 @@ const HOLD_SQL = `WITH q(s, e, buf, now, model) AS (SELECT ?1, ?2, ?3, ?4, ?5)
   RETURNING *`;
 
 /** One row whatever exists, with a null for each of the model, package and price that does not. */
-const CATALOG_SQL = `SELECT m.id AS model, pk.days, pr.price_jpy AS price
+const CATALOG_SQL = `SELECT m.id AS model, pk.id AS package, pk.days, pk.hours, pr.price_jpy AS price
   FROM (SELECT ?1 AS model_id, ?2 AS package_id) AS asked
   LEFT JOIN models m ON m.id = asked.model_id AND m.active = 1
   LEFT JOIN packages pk ON pk.id = asked.package_id
   LEFT JOIN prices pr ON pr.rate_class_id = m.rate_class_id AND pr.package_id = pk.id`;
+
+type CatalogRow = {
+  model: string | null;
+  package: string | null;
+  days: number | null;
+  hours: number | null;
+  price: number | null;
+};
 
 function isKey(x: unknown): x is string {
   return typeof x === "string" && x.length > 0 && x.length <= MAX_KEY_LENGTH;
@@ -195,20 +205,21 @@ export async function createHold(db: D1Database, input: HoldInput, now: number):
   const catalog = await db
     .prepare(CATALOG_SQL)
     .bind(modelId, packageId)
-    .first<{ model: string | null; days: number | null; price: number | null }>();
+    .first<CatalogRow>();
   if (!catalog?.model) return refuse("UNKNOWN_MODEL");
-  // An hours package has no days, and no end rule until task #50.
-  if (!catalog.days) return refuse("UNKNOWN_PACKAGE");
+  if (!catalog.package) return refuse("UNKNOWN_PACKAGE");
   if (!catalog.price) return refuse("NO_PRICE");
+  // The packages table's CHECK sets exactly one of the two.
+  const length = { days: catalog.days, hours: catalog.hours } as PackageLength;
 
   const config = await readShopConfig(db);
   // Every closed date from today on, not only to the horizon, because a rental may return past it.
   const closedDates = await readClosedDates(db, jstToday(now), LAST_DATE);
-  const windowError = pickupWindowError(config, closedDates, startAt as number, catalog.days, now);
+  const windowError = pickupWindowError(config, closedDates, startAt as number, length, now);
   if (windowError !== null) return refuse(windowError);
 
   const start = startAt as number;
-  const endAt = rentalEnd(start, { days: catalog.days }, config);
+  const endAt = rentalEnd(start, length, config);
   const bufMs = config.turnaroundMinutes * MINUTE_MS;
   const expiresAt = now + config.holdMinutes * MINUTE_MS;
   const ahead = bookedAhead(now, start) ? 1 : 0;

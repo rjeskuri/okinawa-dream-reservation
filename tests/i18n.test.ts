@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync } from "node:fs";
 import { test } from "node:test";
 import { fallbackOrder, htmlLang, localePath, negotiateLocale } from "../src/i18n/locales.ts";
+import { model } from "../src/i18n/strings/model.ts";
+import { rentals } from "../src/i18n/strings/rentals.ts";
 import { t } from "../src/i18n/t.ts";
 import { isLocale, LOCALES, type Locale } from "../src/lib/locale.ts";
 
@@ -294,4 +296,38 @@ test("every string key exists in all four locales", async () => {
     }
   }
   assert.deepEqual(problems, []);
+});
+
+/** Every reason pickupWindowError gives. RETURN_OUTSIDE_HOURS is #50's: an hours package back after closing time. */
+const WINDOW_REASONS = [
+  "TOO_SOON",
+  "TOO_FAR",
+  "OFF_SLOT",
+  "OUTSIDE_HOURS",
+  "CLOSED_PICKUP",
+  "RETURN_OUTSIDE_HOURS",
+  "CLOSED_RETURN",
+];
+
+// The model page shows `model.error.<reason>` and the listing `rentals.error.<reason>`, and neither has a fallback.
+test("every pickup-window reason has a guest message on the model page and the listing", () => {
+  const pages = [
+    ["model", model, "model.error."],
+    ["rentals", rentals, "rentals.error."],
+  ] as const;
+  for (const [name, dict, prefix] of pages) {
+    for (const reason of WINDOW_REASONS) {
+      for (const locale of LOCALES) {
+        const text = dict[`${prefix}${reason}`]?.[locale];
+        assert.ok(typeof text === "string" && text.trim() !== "", `${name}: ${prefix}${reason} has no ${locale} text`);
+      }
+    }
+    // A late return is not the pickup's hours nor a closed return day, so the guest is told something else.
+    for (const locale of LOCALES) {
+      const late = dict[`${prefix}RETURN_OUTSIDE_HOURS`]?.[locale];
+      for (const other of ["OUTSIDE_HOURS", "CLOSED_RETURN"]) {
+        assert.notEqual(late, dict[`${prefix}${other}`]?.[locale], `${name}: ${locale} says the same for ${other}`);
+      }
+    }
+  }
 });

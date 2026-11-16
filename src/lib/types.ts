@@ -71,12 +71,14 @@ export type Vehicle = {
   baseUsageDays: number;
 };
 
-/** Exactly one of days and hours, as the table's CHECK says, so `days !== null` narrows a package for `rentalEnd`. */
+/** How long a package lasts: exactly one of days and hours, as the table's CHECK says. `rentalEnd` reads it. */
+export type PackageLength = { days: number; hours: null } | { days: null; hours: number };
+
 export type Package = {
   id: string;
   sort: number;
   texts: LocalizedTexts<{ name: string }>;
-} & ({ days: number; hours: null } | { days: null; hours: number });
+} & PackageLength;
 
 export type Price = {
   rateClassId: string;

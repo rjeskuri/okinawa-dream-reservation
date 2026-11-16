@@ -638,9 +638,9 @@ test("home search submits to rentals with the right params", async () => {
   });
 });
 
-test("home search offers day packages only until hours packages can be searched", async () => {
-  // Task #50 makes these bookable. Until then the listing finds nothing for one and a hold refuses it.
-  const cases: { label: string; packages: Package[]; days: string[] }[] = [
+test("home search offers every package, hours packages included, in sort order", async () => {
+  // #50 makes hours packages bookable, so the form offers them beside the day packages.
+  const cases: { label: string; packages: Package[]; offered: string[] }[] = [
     {
       label: "hours packages first, between and last",
       packages: [
@@ -648,12 +648,12 @@ test("home search offers day packages only until hours packages can be searched"
         dayPackage("p-z-1d", 1, 2, "One day"),
         hoursPackage("p-half", 4, 3, "Half day"),
         dayPackage("p-a-3d", 3, 4, "Three days"),
-        hoursPackage("p-short", 1, 5, "Quick ride"),
+        hoursPackage("p-short", 2, 5, "Quick ride"),
       ],
-      days: ["p-z-1d", "p-a-3d"],
+      offered: ["hours-6", "p-z-1d", "p-half", "p-a-3d", "p-short"],
     },
     {
-      // Stored out of sort order, with ids that do not say hours, and with 24 and 72 hours, so a cut on length shows.
+      // Stored out of sort order, with ids that do not say hours, and with 24 and 72 hours.
       label: "stored out of order, 24 and 72 hours",
       packages: [
         dayPackage("p-2d", 2, 4, "Weekend"),
@@ -662,16 +662,22 @@ test("home search offers day packages only until hours packages can be searched"
         hoursPackage("p-b-max", 72, 1, "Three full turns"),
         dayPackage("p-week", 7, 2, "Full week"),
       ],
-      days: ["p-week", "p-2d", "p-a-14d"],
+      offered: ["p-b-max", "p-week", "p-m-long", "p-2d", "p-a-14d"],
+    },
+    {
+      // Hours packages alone are a catalog the form searches, not one it waits out with a notice.
+      label: "hours packages only",
+      packages: [hoursPackage("p-4h", 4, 2, "Four hours"), hoursPackage("p-24h", 24, 1, "Day and night")],
+      offered: ["p-24h", "p-4h"],
     },
   ];
 
-  for (const { label, packages, days } of cases) {
+  for (const { label, packages, offered: expected } of cases) {
     await publish(catalogWith({ packages }));
     for (const locale of LOCALES) {
       const where = `${label}, ${locale}`;
       const form = rentalsForm(await pageHtml(`/${locale}/`), locale);
-      assert.deepEqual(offered(form, "package"), days, `${where}: package values`);
+      assert.deepEqual(offered(form, "package"), expected, `${where}: package values`);
 
       // No package is chosen until the guest chooses one: the default is an empty choice with a label of its own.
       assert.equal(defaultChoice(form, "package"), "", `${where}: the default package`);
@@ -679,8 +685,8 @@ test("home search offers day packages only until hours packages can be searched"
       assertLocaleText(optionLabels(form, "package")[0] ?? "", locale, `${where}: the empty option's label`);
 
       const text = visibleText(form);
-      for (const { id, texts } of packages) {
-        assert.equal(text.includes(texts[locale].name), days.includes(id), `${where}: label of ${id}`);
+      for (const { texts } of packages) {
+        assert.ok(text.includes(texts[locale].name), `${where}: label ${texts[locale].name}`);
       }
     }
   }

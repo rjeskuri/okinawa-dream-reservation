@@ -8,7 +8,31 @@ import type { ShopConfig } from "../src/lib/types.ts";
 
 const MINUTE_MS = 60_000;
 
-const WINDOW_REASONS: string[] = ["OUTSIDE_HOURS", "OFF_SLOT", "CLOSED_PICKUP", "CLOSED_RETURN", "TOO_SOON", "TOO_FAR"];
+const WINDOW_REASONS: string[] = [
+  "OUTSIDE_HOURS",
+  "OFF_SLOT",
+  "CLOSED_PICKUP",
+  "RETURN_OUTSIDE_HOURS",
+  "CLOSED_RETURN",
+  "TOO_SOON",
+  "TOO_FAR",
+];
+
+/** The two columns of a package row that say how long it is: exactly one of them is set. */
+type Length = { days: number; hours: null } | { days: null; hours: number };
+
+function dayPkg(days: number): Length {
+  return { days, hours: null };
+}
+
+function hoursPkg(hours: number): Length {
+  return { days: null, hours };
+}
+
+const ONE_DAY = dayPkg(1);
+
+/** Packages of each kind, short and long, for the checks that hold whatever the package. */
+const EVERY_KIND: Length[] = [dayPkg(1), dayPkg(3), dayPkg(60), hoursPkg(2), hoursPkg(4), hoursPkg(24), hoursPkg(72)];
 
 const CONFIG: ShopConfig = {
   shopOpen: "09:00",
@@ -39,7 +63,8 @@ const LEAD_BOUNDARY = jst("2030-06-09", "09:00");
 type WindowCase = {
   label: string;
   start: number;
-  days?: number;
+  /** One day when left out. */
+  pkg?: Length;
   closed?: string[];
   now?: number;
   config?: Partial<ShopConfig>;
@@ -104,24 +129,24 @@ const WINDOW_CASES: WindowCase[] = [
 
   // Closed dates: the pickup date and the return date, nothing else.
   { label: "closed on a one-day pickup", start: at("09:00"), closed: ["2030-06-10"], expected: "CLOSED_PICKUP" },
-  { label: "closed on a three-day pickup", start: at("09:00"), days: 3, closed: ["2030-06-10"], expected: "CLOSED_PICKUP" },
-  { label: "closed on a two-day return", start: at("09:00"), days: 2, closed: ["2030-06-11"], expected: "CLOSED_RETURN" },
-  { label: "closed on a three-day return", start: at("13:30"), days: 3, closed: ["2030-06-12"], expected: "CLOSED_RETURN" },
+  { label: "closed on a three-day pickup", start: at("09:00"), pkg: dayPkg(3), closed: ["2030-06-10"], expected: "CLOSED_PICKUP" },
+  { label: "closed on a two-day return", start: at("09:00"), pkg: dayPkg(2), closed: ["2030-06-11"], expected: "CLOSED_RETURN" },
+  { label: "closed on a three-day return", start: at("13:30"), pkg: dayPkg(3), closed: ["2030-06-12"], expected: "CLOSED_RETURN" },
   {
     label: "closed on a return past the month end",
     start: jst("2030-06-27", "09:00"),
-    days: 7,
+    pkg: dayPkg(7),
     closed: ["2030-07-03"],
     expected: "CLOSED_RETURN",
   },
-  { label: "closed between pickup and return", start: at("09:00"), days: 3, closed: ["2030-06-11"], expected: null },
-  { label: "closed the day before pickup", start: at("09:00"), days: 3, closed: ["2030-06-09"], expected: null },
-  { label: "closed the day after return", start: at("09:00"), days: 3, closed: ["2030-06-13"], expected: null },
-  { label: "a two-day rental ends before that date", start: at("09:00"), days: 2, closed: ["2030-06-12"], expected: null },
+  { label: "closed between pickup and return", start: at("09:00"), pkg: dayPkg(3), closed: ["2030-06-11"], expected: null },
+  { label: "closed the day before pickup", start: at("09:00"), pkg: dayPkg(3), closed: ["2030-06-09"], expected: null },
+  { label: "closed the day after return", start: at("09:00"), pkg: dayPkg(3), closed: ["2030-06-13"], expected: null },
+  { label: "a two-day rental ends before that date", start: at("09:00"), pkg: dayPkg(2), closed: ["2030-06-12"], expected: null },
   {
     label: "closed all around a rental",
     start: at("09:00"),
-    days: 3,
+    pkg: dayPkg(3),
     closed: ["2030-06-09", "2030-06-11", "2030-06-13"],
     expected: null,
   },
@@ -138,7 +163,7 @@ const WINDOW_CASES: WindowCase[] = [
   {
     label: "an early return on its JST date",
     start: at("06:00"),
-    days: 3,
+    pkg: dayPkg(3),
     closed: ["2030-06-12"],
     config: { shopOpen: "06:00", shopClose: "08:00" },
     expected: "CLOSED_RETURN",
@@ -146,7 +171,7 @@ const WINDOW_CASES: WindowCase[] = [
   {
     label: "an early return, not its UTC date",
     start: at("06:00"),
-    days: 3,
+    pkg: dayPkg(3),
     closed: ["2030-06-11"],
     config: { shopOpen: "06:00", shopClose: "08:00" },
     expected: null,
@@ -169,7 +194,7 @@ const WINDOW_CASES: WindowCase[] = [
   { label: "the slot after the horizon", start: HORIZON + 30 * MINUTE_MS, expected: "TOO_FAR" },
   { label: "the morning after the horizon", start: jst("2030-11-29", "09:00"), expected: "TOO_FAR" },
   { label: "a year out", start: jst("2031-06-02", "09:00"), expected: "TOO_FAR" },
-  { label: "a long rental from the horizon", start: HORIZON, days: 60, expected: null },
+  { label: "a long rental from the horizon", start: HORIZON, pkg: dayPkg(60), expected: null },
   { label: "a 30-day horizon", start: jst("2030-07-01", "12:00"), config: { maxDaysAhead: 30 }, expected: null },
   { label: "past a 30-day horizon", start: jst("2030-07-01", "12:30"), config: { maxDaysAhead: 30 }, expected: "TOO_FAR" },
   { label: "inside a 200-day horizon", start: jst("2030-12-18", "12:00"), config: { maxDaysAhead: 200 }, expected: null },
@@ -193,8 +218,8 @@ function minutesOf(time: string): number {
 }
 
 test("each invalid start gets its reason", () => {
-  for (const { label, start, days = 1, closed = [], now = NOW, config, expected } of WINDOW_CASES) {
-    assert.equal(pickupWindowError({ ...CONFIG, ...config }, closed, start, days, now), expected, label);
+  for (const { label, start, pkg = ONE_DAY, closed = [], now = NOW, config, expected } of WINDOW_CASES) {
+    assert.equal(pickupWindowError({ ...CONFIG, ...config }, closed, start, pkg, now), expected, label);
   }
 
   // Every minute of a day, against the rule worked out from minutes. A minute that is both outside the hours and off
@@ -206,12 +231,169 @@ test("each invalid start gets its reason", () => {
     for (let minute = 0; minute < 24 * 60; minute += 1) {
       const inHours = minute >= open && minute <= close - slotMinutes;
       const onGrid = (minute - open) % slotMinutes === 0;
-      const reason = pickupWindowError(config, [], midnight + minute * MINUTE_MS, 1, NOW);
+      const reason = pickupWindowError(config, [], midnight + minute * MINUTE_MS, ONE_DAY, NOW);
       const label = `minute ${minute} of ${shopOpen} to ${shopClose} at ${slotMinutes} minutes`;
       if (inHours && onGrid) assert.equal(reason, null, label);
       else if (inHours) assert.equal(reason, "OFF_SLOT", label);
       else if (onGrid) assert.equal(reason, "OUTSIDE_HOURS", label);
       else assert.ok(reason === "OUTSIDE_HOURS" || reason === "OFF_SLOT", `${label}: ${reason}`);
+    }
+  }
+});
+
+/** The early shop of the JST cases: 06:00 to 08:00 JST is 21:00 to 23:00 UTC the day before. */
+const EARLY: Partial<ShopConfig> = { shopOpen: "06:00", shopClose: "08:00" };
+
+// #50 (owner, 2026-11-15): an hours package must be back by closing time, and returning at closing is allowed, as a day
+// package returns then. A return before opening is outside the hours too. The JST date of the return is the one a closed
+// date refuses, which for 24 hours is the next day. The reasons come in this order: OFF_SLOT for a non-instant, TOO_SOON,
+// TOO_FAR, OFF_SLOT, OUTSIDE_HOURS, CLOSED_PICKUP, RETURN_OUTSIDE_HOURS, CLOSED_RETURN.
+const HOURS_CASES: WindowCase[] = [
+  // The return between opening and closing, both included.
+  { label: "4 hours from the first slot", start: at("09:00"), pkg: hoursPkg(4), expected: null },
+  { label: "4 hours returning at closing", start: at("14:00"), pkg: hoursPkg(4), expected: null },
+  { label: "4 hours returning a slot past closing", start: at("14:30"), pkg: hoursPkg(4), expected: "RETURN_OUTSIDE_HOURS" },
+  { label: "4 hours from the last slot", start: at("17:30"), pkg: hoursPkg(4), expected: "RETURN_OUTSIDE_HOURS" },
+  { label: "8 hours returning at closing", start: at("10:00"), pkg: hoursPkg(8), expected: null },
+  { label: "8 hours returning past closing", start: at("10:30"), pkg: hoursPkg(8), expected: "RETURN_OUTSIDE_HOURS" },
+  { label: "2 hours from the last slot that fits", start: at("16:00"), pkg: hoursPkg(2), expected: null },
+  { label: "2 hours a slot later", start: at("16:30"), pkg: hoursPkg(2), expected: "RETURN_OUTSIDE_HOURS" },
+  // 24 hours returns at the pickup's own clock the next day, so every slot fits.
+  { label: "24 hours from the first slot", start: at("09:00"), pkg: hoursPkg(24), expected: null },
+  { label: "24 hours from the last slot", start: at("17:30"), pkg: hoursPkg(24), expected: null },
+  // Past midnight the return comes before opening, until it reaches it.
+  { label: "12 hours, returning at 01:00", start: at("13:00"), pkg: hoursPkg(12), expected: "RETURN_OUTSIDE_HOURS" },
+  { label: "20 hours, returning before opening", start: at("12:00"), pkg: hoursPkg(20), expected: "RETURN_OUTSIDE_HOURS" },
+  { label: "21 hours, returning at opening", start: at("12:00"), pkg: hoursPkg(21), expected: null },
+
+  // The hours move with the config.
+  { label: "4 hours to a 17:00 close", start: at("13:00"), pkg: hoursPkg(4), config: { shopClose: "17:00" }, expected: null },
+  {
+    label: "4 hours past a 17:00 close",
+    start: at("13:30"),
+    pkg: hoursPkg(4),
+    config: { shopClose: "17:00" },
+    expected: "RETURN_OUTSIDE_HOURS",
+  },
+  { label: "4 hours to a 19:30 close", start: at("15:30"), pkg: hoursPkg(4), config: { shopClose: "19:30" }, expected: null },
+  {
+    label: "4 hours past a 19:30 close",
+    start: at("16:00"),
+    pkg: hoursPkg(4),
+    config: { shopClose: "19:30" },
+    expected: "RETURN_OUTSIDE_HOURS",
+  },
+  {
+    label: "2 hours to a 9:30 close",
+    start: at("07:30"),
+    pkg: hoursPkg(2),
+    config: { shopOpen: "7:00", shopClose: "9:30" },
+    expected: null,
+  },
+  {
+    label: "2 hours past a 9:30 close",
+    start: at("08:00"),
+    pkg: hoursPkg(2),
+    config: { shopOpen: "7:00", shopClose: "9:30" },
+    expected: "RETURN_OUTSIDE_HOURS",
+  },
+  { label: "1 hour to an early close", start: at("07:00"), pkg: hoursPkg(1), config: EARLY, expected: null },
+  { label: "1 hour past an early close", start: at("07:30"), pkg: hoursPkg(1), config: EARLY, expected: "RETURN_OUTSIDE_HOURS" },
+  { label: "24 hours in an early shop", start: at("07:30"), pkg: hoursPkg(24), config: EARLY, expected: null },
+
+  // Closed dates: the pickup's and the return's JST dates.
+  { label: "24 hours into a closed day", start: at("09:00"), pkg: hoursPkg(24), closed: ["2030-06-11"], expected: "CLOSED_RETURN" },
+  {
+    label: "24 hours from the last slot into a closed day",
+    start: at("17:30"),
+    pkg: hoursPkg(24),
+    closed: ["2030-06-11"],
+    expected: "CLOSED_RETURN",
+  },
+  {
+    label: "24 hours over a month end into a closed day",
+    start: jst("2030-06-30", "12:00"),
+    pkg: hoursPkg(24),
+    closed: ["2030-07-01"],
+    expected: "CLOSED_RETURN",
+  },
+  {
+    label: "24 hours in an early shop into a closed day",
+    start: at("07:30"),
+    pkg: hoursPkg(24),
+    closed: ["2030-06-11"],
+    config: EARLY,
+    expected: "CLOSED_RETURN",
+  },
+  { label: "4 hours the day before a closed day", start: at("14:00"), pkg: hoursPkg(4), closed: ["2030-06-11"], expected: null },
+  {
+    label: "24 hours between closed days",
+    start: at("09:00"),
+    pkg: hoursPkg(24),
+    closed: ["2030-06-09", "2030-06-12"],
+    expected: null,
+  },
+  { label: "48 hours over a closed day", start: at("09:00"), pkg: hoursPkg(48), closed: ["2030-06-11"], expected: null },
+  { label: "48 hours into a closed day", start: at("09:00"), pkg: hoursPkg(48), closed: ["2030-06-12"], expected: "CLOSED_RETURN" },
+  { label: "4 hours on a closed day", start: at("09:00"), pkg: hoursPkg(4), closed: ["2030-06-10"], expected: "CLOSED_PICKUP" },
+
+  // Which reason comes first.
+  { label: "a late 4-hour pickup on a closed day", start: at("14:30"), pkg: hoursPkg(4), closed: ["2030-06-10"], expected: "CLOSED_PICKUP" },
+  {
+    label: "12 hours into a closed day, returning before opening",
+    start: at("13:00"),
+    pkg: hoursPkg(12),
+    closed: ["2030-06-11"],
+    expected: "RETURN_OUTSIDE_HOURS",
+  },
+  { label: "a late 4-hour pickup inside the lead time", start: at("14:30"), pkg: hoursPkg(4), now: at("08:00"), expected: "TOO_SOON" },
+  {
+    label: "a late 4-hour pickup past the horizon",
+    start: jst("2030-11-29", "14:30"),
+    pkg: hoursPkg(4),
+    expected: "TOO_FAR",
+  },
+  { label: "4 hours at the horizon", start: HORIZON, pkg: hoursPkg(4), expected: null },
+  { label: "8 hours at the horizon", start: HORIZON, pkg: hoursPkg(8), expected: "RETURN_OUTSIDE_HOURS" },
+  { label: "4 hours off the grid", start: at("14:15"), pkg: hoursPkg(4), expected: "OFF_SLOT" },
+  { label: "4 hours a millisecond off a late slot", start: at("14:30") + 1, pkg: hoursPkg(4), expected: "OFF_SLOT" },
+  { label: "4 hours from closing time", start: at("18:00"), pkg: hoursPkg(4), expected: "OUTSIDE_HOURS" },
+  { label: "4 hours from before opening", start: at("08:30"), pkg: hoursPkg(4), expected: "OUTSIDE_HOURS" },
+  { label: "2 hours from before an early opening", start: at("05:30"), pkg: hoursPkg(2), config: EARLY, expected: "OUTSIDE_HOURS" },
+
+  // Day packages return at closing on their last day, so the rule never refuses one.
+  { label: "1 day from the last slot", start: at("17:30"), expected: null },
+  { label: "3 days from the last slot", start: at("17:30"), pkg: dayPkg(3), expected: null },
+  { label: "1 day from the last slot of an early shop", start: at("07:30"), config: EARLY, expected: null },
+];
+
+/** Lengths for the minute-by-minute check, real and not, including several that wrap past midnight. */
+const HOUR_LENGTHS = [1, 2, 3, 4, 5, 8, 9, 12, 20, 21, 24, 30, 48, 72];
+
+test("an hours package is refused when its return falls outside shop hours", () => {
+  for (const { label, start, pkg = ONE_DAY, closed = [], now = NOW, config, expected } of HOURS_CASES) {
+    assert.equal(pickupWindowError({ ...CONFIG, ...config }, closed, start, pkg, now), expected, label);
+  }
+
+  // Every minute of a day, for each grid and length, against the rule worked out from minutes: a pickup the day package
+  // takes is taken when the clock `hours` later is between opening and closing, both included.
+  const midnight = at("00:00");
+  for (const [shopOpen, shopClose, slotMinutes] of GRIDS) {
+    const config = { ...CONFIG, shopOpen, shopClose, slotMinutes };
+    const [open, close] = [minutesOf(shopOpen), minutesOf(shopClose)];
+    for (const hours of HOUR_LENGTHS) {
+      for (let minute = 0; minute < 24 * 60; minute += 1) {
+        const inHours = minute >= open && minute <= close - slotMinutes;
+        const onGrid = (minute - open) % slotMinutes === 0;
+        const returnClock = (minute + hours * 60) % (24 * 60);
+        const returnFits = returnClock >= open && returnClock <= close;
+        const reason = pickupWindowError(config, [], midnight + minute * MINUTE_MS, hoursPkg(hours), NOW);
+        const label = `minute ${minute} of ${shopOpen} to ${shopClose} at ${slotMinutes} minutes, ${hours} hours`;
+        if (inHours && onGrid) assert.equal(reason, returnFits ? null : "RETURN_OUTSIDE_HOURS", label);
+        else if (inHours) assert.equal(reason, "OFF_SLOT", label);
+        else if (onGrid) assert.equal(reason, "OUTSIDE_HOURS", label);
+        else assert.ok(reason === "OUTSIDE_HOURS" || reason === "OFF_SLOT", `${label}: ${reason}`);
+      }
     }
   }
 });
@@ -258,23 +440,25 @@ test("a hostile start gets a reason, never an exception", () => {
     String(at("09:00")),
   ];
   for (const start of hostile) {
-    for (const days of [1, 3, 60]) {
-      const reason = pickupWindowError(CONFIG, [], start as number, days, NOW);
-      assert.ok(WINDOW_REASONS.includes(String(reason)), `${String(start)} over ${days} days gave ${reason}`);
+    for (const pkg of EVERY_KIND) {
+      const reason = pickupWindowError(CONFIG, [], start as number, pkg, NOW);
+      assert.ok(WINDOW_REASONS.includes(String(reason)), `${String(start)} over ${JSON.stringify(pkg)} gave ${reason}`);
     }
   }
 
   // The last dates the calendar helpers can write. The return of a long rental falls past year 9999, and only the
-  // horizon applies, so a check that reaches for the return date first must still not throw.
+  // horizon applies, so a check that reaches for the return date or clock first must still not throw.
   const lastPickup = Date.parse("9999-12-31T09:00:00+09:00");
-  for (const days of [1, 3, 60]) {
-    assert.equal(pickupWindowError(CONFIG, [], lastPickup, days, NOW), "TOO_FAR", `${days} days`);
+  const lateLastPickup = Date.parse("9999-12-31T17:30:00+09:00");
+  for (const pkg of EVERY_KIND) {
+    assert.equal(pickupWindowError(CONFIG, [], lastPickup, pkg, NOW), "TOO_FAR", JSON.stringify(pkg));
+    assert.equal(pickupWindowError(CONFIG, [], lateLastPickup, pkg, NOW), "TOO_FAR", `${JSON.stringify(pkg)}, 17:30`);
   }
 
   // The first slot on the first date they can write is a good slot, and only the lead time refuses it.
   const firstPickup = Date.parse("0000-01-01T09:00:00+09:00");
-  for (const days of [1, 3, 60]) {
-    assert.equal(pickupWindowError(CONFIG, [], firstPickup, days, NOW), "TOO_SOON", `${days} days`);
+  for (const pkg of EVERY_KIND) {
+    assert.equal(pickupWindowError(CONFIG, [], firstPickup, pkg, NOW), "TOO_SOON", JSON.stringify(pkg));
   }
 });
 
@@ -284,8 +468,11 @@ test("a bad slot config refuses every start", () => {
   // None of these starts is at fault except through the grid: 09:00 and 13:30 pass every other check.
   for (const slotMinutes of BAD_SLOT_MINUTES) {
     for (const start of [at("09:00"), at("13:30"), at("17:30")]) {
-      const reason = pickupWindowError({ ...CONFIG, slotMinutes }, [], start, 1, NOW);
-      assert.ok(WINDOW_REASONS.includes(String(reason)), `slotMinutes ${slotMinutes} at ${start} gave ${reason}`);
+      for (const pkg of EVERY_KIND) {
+        const reason = pickupWindowError({ ...CONFIG, slotMinutes }, [], start, pkg, NOW);
+        const label = `slotMinutes ${slotMinutes} at ${start}, ${JSON.stringify(pkg)}, gave ${reason}`;
+        assert.ok(WINDOW_REASONS.includes(String(reason)), label);
+      }
     }
   }
 });
@@ -325,5 +512,80 @@ test("pickupSlots lists times from open to close minus one slot", () => {
 test("pickupSlots is empty when slotMinutes is not a positive integer", () => {
   for (const slotMinutes of BAD_SLOT_MINUTES) {
     assert.deepEqual(pickupSlots({ ...CONFIG, slotMinutes }), [], `slotMinutes ${slotMinutes}`);
+    for (const pkg of EVERY_KIND) {
+      assert.deepEqual(pickupSlots({ ...CONFIG, slotMinutes }, pkg), [], `slotMinutes ${slotMinutes}, ${JSON.stringify(pkg)}`);
+    }
+  }
+});
+
+/** HH:mm of minutes since midnight, written here and not taken from src/lib/time.ts. */
+function clockOf(minutes: number): string {
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+/** Every pickup slot of a day by the minute arithmetic of task #20: from opening to closing minus one slot. */
+function slotMinutesOf(shopOpen: string, shopClose: string, slotMinutes: number): number[] {
+  const slots: number[] = [];
+  for (let minute = minutesOf(shopOpen); minute <= minutesOf(shopClose) - slotMinutes; minute += slotMinutes) {
+    slots.push(minute);
+  }
+  return slots;
+}
+
+// #50: with an hours package the slots are those whose return is back by closing, as pickupWindowError rules. A day
+// package, or none, keeps every slot.
+test("pickupSlots with an hours package lists only the slots whose return fits shop hours", () => {
+  const table: [string, string, number, number, string[]][] = [
+    ["09:00", "18:00", 30, 4, HALF_HOURS_09_TO_1730.slice(0, 11)],
+    ["09:00", "18:00", 30, 8, ["09:00", "09:30", "10:00"]],
+    ["09:00", "18:00", 30, 2, HALF_HOURS_09_TO_1730.slice(0, 15)],
+    ["09:00", "18:00", 30, 9, ["09:00"]],
+    ["09:00", "18:00", 30, 10, []],
+    ["09:00", "18:00", 30, 24, HALF_HOURS_09_TO_1730],
+    ["09:00", "18:00", 60, 4, ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00"]],
+    ["08:15", "17:45", 45, 4, ["08:15", "09:00", "09:45", "10:30", "11:15", "12:00", "12:45", "13:30"]],
+    ["7:00", "9:30", 30, 2, ["07:00", "07:30"]],
+    ["7:00", "9:30", 30, 24, ["07:00", "07:30", "08:00", "08:30", "09:00"]],
+    ["7:00", "9:30", 30, 12, []],
+    [
+      "10:00",
+      "16:00",
+      20,
+      1,
+      [
+        "10:00", "10:20", "10:40", "11:00", "11:20", "11:40", "12:00", "12:20",
+        "12:40", "13:00", "13:20", "13:40", "14:00", "14:20", "14:40", "15:00",
+      ],
+    ],
+  ];
+  for (const [shopOpen, shopClose, slotMinutes, hours, expected] of table) {
+    const config = { ...CONFIG, shopOpen, shopClose, slotMinutes };
+    const label = `${shopOpen} to ${shopClose} at ${slotMinutes} minutes, ${hours} hours`;
+    assert.deepEqual(pickupSlots(config, hoursPkg(hours)), expected, label);
+  }
+
+  // Each grid and length, against the minute arithmetic, and against pickupWindowError on a day it has no other fault on.
+  for (const [shopOpen, shopClose, slotMinutes] of GRIDS) {
+    const config = { ...CONFIG, shopOpen, shopClose, slotMinutes };
+    const [open, close] = [minutesOf(shopOpen), minutesOf(shopClose)];
+    const every = slotMinutesOf(shopOpen, shopClose, slotMinutes);
+    for (const pkg of [ONE_DAY, dayPkg(3), dayPkg(60)]) {
+      assert.deepEqual(pickupSlots(config, pkg), every.map(clockOf), `${shopOpen} to ${shopClose}, ${JSON.stringify(pkg)}`);
+    }
+    assert.deepEqual(pickupSlots(config), every.map(clockOf), `${shopOpen} to ${shopClose}, no package`);
+
+    for (const hours of HOUR_LENGTHS) {
+      const label = `${shopOpen} to ${shopClose} at ${slotMinutes} minutes, ${hours} hours`;
+      const fits = (minute: number) => {
+        const returnClock = (minute + hours * 60) % (24 * 60);
+        return returnClock >= open && returnClock <= close;
+      };
+      const listed = pickupSlots(config, hoursPkg(hours));
+      assert.deepEqual(listed, every.filter(fits).map(clockOf), label);
+      for (const minute of every) {
+        const reason = pickupWindowError(config, [], at(clockOf(minute)), hoursPkg(hours), NOW);
+        assert.equal(reason, listed.includes(clockOf(minute)) ? null : "RETURN_OUTSIDE_HOURS", `${label}: ${clockOf(minute)}`);
+      }
+    }
   }
 });

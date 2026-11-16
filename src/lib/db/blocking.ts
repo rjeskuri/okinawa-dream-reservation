@@ -1,7 +1,9 @@
 // The single rule that decides whether two rentals of one vehicle conflict, once in JS and once in SQL, and the rule for
 // when a rental ends. docs/data-model.md states both.
 import { addDaysToDate, epochToJst, jstToEpoch } from "../time.ts";
-import type { BookingStatus, ShopConfig } from "../types.ts";
+import type { BookingStatus, PackageLength, ShopConfig } from "../types.ts";
+
+const HOUR_MS = 3_600_000;
 
 /** Whether a booking holds its vehicle at `now`. A hold stops blocking at its expiry, with no cleanup job. */
 export function isBlocking(b: { status: BookingStatus; expiresAt: number | null }, now: number): boolean {
@@ -18,13 +20,22 @@ export function conflicts(
   return b.startAt < a.endAt + bufMs && a.startAt < b.endAt + bufMs;
 }
 
+/** A package length the schema can hold: a whole number of at least 1. */
+function isLength(n: unknown): n is number {
+  return Number.isInteger(n) && (n as number) >= 1;
+}
+
 /**
- * When a rental of a days package ends: shop_close (JST) on the pickup's JST date plus days - 1, so a one-day package
- * returns the same day. This is the only place a rental's end is computed. An hours package has no end rule yet.
+ * When a rental ends. A days package returns at shop_close (JST) on the pickup's JST date plus days - 1, so a one-day
+ * package returns the same day. An hours package returns `hours` after the pickup, whatever the shop's hours: keeping that
+ * inside them is pickupWindowError's. This is the only place a rental's end is computed. A package that does not set
+ * exactly one of days and hours, to a whole number of at least 1, is a RangeError.
  */
-export function rentalEnd(startAt: number, pkg: { days: number }, config: ShopConfig): number {
-  if (!Number.isInteger(pkg.days) || pkg.days < 1) throw new RangeError(`not a days package: ${JSON.stringify(pkg)}`);
-  const lastDay = addDaysToDate(epochToJst(startAt).date, pkg.days - 1);
+export function rentalEnd(startAt: number, pkg: PackageLength, config: ShopConfig): number {
+  const { days, hours } = pkg;
+  if (days === null && isLength(hours)) return startAt + hours * HOUR_MS;
+  if (hours !== null || !isLength(days)) throw new RangeError(`not a package length: ${JSON.stringify(pkg)}`);
+  const lastDay = addDaysToDate(epochToJst(startAt).date, days - 1);
   return jstToEpoch(lastDay, config.shopClose);
 }
 

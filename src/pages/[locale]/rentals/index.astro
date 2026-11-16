@@ -13,6 +13,7 @@ import { t } from "../../../i18n/t.ts";
 import Base from "../../../layouts/Base.astro";
 import { CC_BANDS, searchAvailability } from "../../../lib/booking/availability.ts";
 import { pickupSlots } from "../../../lib/booking/pickup-window.ts";
+import { packageDays } from "../../../lib/calendar.ts";
 import { photoUrl, readPhotoIndex } from "../../../lib/catalog/photos.ts";
 import { readCatalog, type PublishedCatalog } from "../../../lib/db/catalog-store.ts";
 import { isLocale } from "../../../lib/locale.ts";
@@ -77,7 +78,7 @@ const listing = catalog && (await list(catalog));
             max={addDaysToDate(jstToday(now), catalog.config.maxDaysAhead)}
             closedDates={catalog.closedDates}
             value={listing.search.date}
-            packageDays={listing.pkg?.days ?? undefined}
+            packageDays={listing.pkg && packageDays(listing.pkg)}
           />
           <label>
             {t(locale, rentals, "rentals.form.time")}
@@ -95,7 +96,7 @@ const listing = catalog && (await list(catalog));
             <select name="package">
               <option value="">{t(locale, rentals, "rentals.form.any")}</option>
               {catalog.packages.map((pkg) => (
-                <option value={pkg.id} data-days={pkg.days ?? undefined} selected={pkg.id === listing.pkg?.id}>
+                <option value={pkg.id} data-days={packageDays(pkg)} selected={pkg.id === listing.pkg?.id}>
                   {sheetName(pkg.texts, locale)}
                 </option>
               ))}
