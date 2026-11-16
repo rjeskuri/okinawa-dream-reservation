@@ -2,8 +2,12 @@
 // from src/lib/calendar.ts. jstToday is imported only because it is how a minDate is derived from an instant.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import * as calendarLib from "../src/lib/calendar.ts";
 import { monthGrid, returnDate } from "../src/lib/calendar.ts";
+import { LOCALES, type Locale } from "../src/lib/locale.ts";
 import { jstToday } from "../src/lib/time.ts";
+import type { PackageLength } from "../src/lib/types.ts";
+import { expectedSummary } from "./helpers/return-summary.ts";
 
 type Reason = "past" | "too_far" | "closed";
 type Day = { date: string; inMonth: boolean; disabled: boolean; reason?: Reason };
@@ -428,6 +432,70 @@ test("returnDate crosses month and year ends", () => {
   inEachHostZone((zone) => {
     for (const [pickup, days, expected] of table) {
       assert.equal(returnDate(pickup, days), expected, `returnDate(${pickup}, ${days}) on a ${zone} host`);
+    }
+  });
+});
+
+// #137: the date field's text. returnSummary(locale, pickup, pkg, shopClose) is the pure helper the field shows: `pkg` is
+// the chosen package's length, or null when none is chosen. Expected text comes from tests/helpers/return-summary.ts, which
+// fills the dictionary's strings by its own date arithmetic, so the wording stays the dictionary's.
+type Summary = (locale: Locale, pickup: string, pkg: PackageLength | null, shopClose: string) => string;
+
+test("return summary for each package kind", () => {
+  const returnSummary = (calendarLib as unknown as { returnSummary?: Summary }).returnSummary;
+  assert.equal(typeof returnSummary, "function", "src/lib/calendar.ts exports no returnSummary");
+  const summary = returnSummary as Summary;
+
+  // The ticket's own examples, in English: a 3 day package from 17 Nov is back on the 19th by closing, and so on.
+  const days = summary("en", "2026-11-17", { days: 3, hours: null }, "17:00");
+  for (const part of ["Nov 17", "Nov 19", "17:00"]) assert.ok(days.includes(part), `${JSON.stringify(days)} has ${part}`);
+  const sameDay = summary("en", "2026-11-17", { days: 1, hours: null }, "17:00");
+  for (const part of ["Nov 17", "17:00"]) assert.ok(sameDay.includes(part), `${JSON.stringify(sameDay)} has ${part}`);
+  assert.ok(!sameDay.includes("Nov 18"), `${JSON.stringify(sameDay)} names no other day`);
+  const hourly = summary("en", "2026-11-17", { days: null, hours: 4 }, "17:00");
+  for (const part of ["Nov 17", "4"]) assert.ok(hourly.includes(part), `${JSON.stringify(hourly)} has ${part}`);
+  const fullDay = summary("en", "2026-11-17", { days: null, hours: 24 }, "17:00");
+  for (const part of ["Nov 17", "Nov 18"]) assert.ok(fullDay.includes(part), `${JSON.stringify(fullDay)} has ${part}`);
+  assert.ok(!fullDay.includes("17:00"), `${JSON.stringify(fullDay)}: a 24 hour rental is back at its pickup time`);
+  assert.equal(new Set([days, sameDay, hourly, fullDay]).size, 4, "two package kinds read the same");
+  for (const text of [days, sameDay, hourly, fullDay]) assert.ok(!/[{}]/.test(text), `a placeholder is left in ${text}`);
+
+  // Every kind in every locale, over month, year and leap-day ends and three closing times.
+  const pickups = ["2026-11-17", "2026-11-30", "2026-12-31", "2028-02-28", "2027-02-28", "2026-01-05", "2026-07-31"];
+  const packages: (PackageLength | null)[] = [
+    { days: 1, hours: null },
+    { days: 2, hours: null },
+    { days: 3, hours: null },
+    { days: 7, hours: null },
+    { days: 60, hours: null },
+    { days: null, hours: 1 },
+    { days: null, hours: 2 },
+    { days: null, hours: 4 },
+    { days: null, hours: 8 },
+    { days: null, hours: 23 },
+    { days: null, hours: 24 },
+    { days: null, hours: 48 },
+    { days: null, hours: 72 },
+    null,
+  ];
+  for (const locale of LOCALES) {
+    for (const pickup of pickups) {
+      for (const pkg of packages) {
+        for (const close of ["17:00", "18:30", "20:15"]) {
+          const label = `returnSummary(${locale}, ${pickup}, ${JSON.stringify(pkg)}, ${close})`;
+          assert.equal(summary(locale, pickup, pkg, close), expectedSummary(locale, pickup, pkg, close), label);
+        }
+      }
+    }
+  }
+
+  // The host's zone never moves a day.
+  inEachHostZone((zone) => {
+    for (const locale of LOCALES) {
+      for (const pkg of packages) {
+        const label = `returnSummary(${locale}, 2026-12-31, ${JSON.stringify(pkg)}) on a ${zone} host`;
+        assert.equal(summary(locale, "2026-12-31", pkg, "18:30"), expectedSummary(locale, "2026-12-31", pkg, "18:30"), label);
+      }
     }
   });
 });
