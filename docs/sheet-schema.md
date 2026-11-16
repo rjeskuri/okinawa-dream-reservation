@@ -68,6 +68,11 @@ rewrites it on each Publish and ignores whatever is in it, so do not type there.
 
 A row can have several messages.
 
+A Prices row with an error of its own is the one exception: the site keeps the price it already has for that rate class
+and package, so the package stays bookable. The row is still an error, and its message ends with the price kept, for
+example `error: price_jpy -5 must be a whole number of at least 1; the site keeps the last published price 4,000`. See
+[Prices](#prices).
+
 A bad row also skips the rows that depend on it, and each of those gets its own error. Fix the first row and the others
 clear on the next Publish.
 
@@ -172,6 +177,17 @@ value above `price_jpy` is an error, not a cap, because the two columns are most
 is a zero or text. The price is fixed when the guest's hold is made, so a publish after that does not change it.
 
 Example: `ebike`, `day-1`, `4500`, `4000`: ¥4,000 when booked by the day before, ¥4,500 on the day.
+
+A row with an error in `price_jpy` or `advance_price_jpy`, a blank `price_jpy` too, keeps the last published price: the
+site goes on using the `price_jpy` and `advance_price_jpy` it already has for that rate class and package, both as they
+were, never mixed with the row's new values. The row stays an error until it is fixed, and its message names what the
+site uses, for example `the site keeps the last published price 5,200 and advance price 4,800`. The next Publish with a
+good row replaces the kept price with the sheet's. A row that never published has no price to keep: it is skipped and
+its message says the package is not bookable for that rate class.
+
+The rule covers only a row's own errors. A row whose rate class or package is skipped loses its price, as the table
+under [publish_status](#publish_status) says. Deleting a row, or clearing all its cells, removes its price. A repeat of
+an earlier row's rate class and package is an error that changes nothing: the first row decides the price.
 
 ## Models
 

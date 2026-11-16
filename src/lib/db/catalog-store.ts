@@ -273,6 +273,19 @@ export async function readCatalogKeys(
   };
 }
 
+const READ_PRICES_SQL = `SELECT p.rate_class_id AS rateClassId, p.package_id AS packageId, p.price_jpy AS priceJpy,
+p.advance_price_jpy AS advancePriceJpy
+FROM prices p JOIN json_each(?1) k
+ON p.rate_class_id = json_extract(k.value, '$.rateClassId') AND p.package_id = json_extract(k.value, '$.packageId')
+ORDER BY p.rate_class_id, p.package_id`;
+
+/** The stored price of each of `keys` that has one, as readCatalog holds it. One statement, however many keys. */
+export async function readPrices(db: D1Database, keys: { rateClassId: string; packageId: string }[]): Promise<Price[]> {
+  const list = keys.map(({ rateClassId, packageId }) => ({ rateClassId, packageId }));
+  const { results } = await db.prepare(READ_PRICES_SQL).bind(JSON.stringify(list)).all<Price>();
+  return results;
+}
+
 /** A result's rows with their `texts` JSON decoded. */
 function decodeTexts<T>(result: D1Result): T[] {
   return (result.results as { texts: string }[]).map((row) => ({ ...row, texts: JSON.parse(row.texts) }) as T);
