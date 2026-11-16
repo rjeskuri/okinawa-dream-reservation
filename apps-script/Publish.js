@@ -1,4 +1,5 @@
 // The sheet's Okinawa Dream menu: Publish calls the Worker with signed requests, and Set up tabs creates missing tabs.
+// The dashboard items below them are in Dashboard.js.
 // Apps Script files share one global scope and have no modules. Helpers end in `_`, which keeps them off the Run list.
 
 const JST_ = "Asia/Tokyo";
@@ -42,14 +43,20 @@ const SHEET_TABS_ = {
 };
 
 function onOpen() {
-  SpreadsheetApp.getUi()
+  const menu = SpreadsheetApp.getUi()
     .createMenu("Okinawa Dream")
     .addItem("Publish to website", "publish")
     .addItem("Set up tabs", "setupTabs")
-    .addToUi();
+    .addSeparator()
+    .addItem("Open dashboard", "openDashboard");
+  for (const { label, fn } of DASHBOARD_ACTIONS_) menu.addItem(label, fn);
+  menu.addToUi();
 }
 
-/** Creates the missing tabs with their headers. A tab already there keeps its cells, whatever they are. */
+/**
+ * Creates the missing tabs with their headers, and the Dashboard tab with its instructions. A tab already there keeps
+ * its cells, whatever they are.
+ */
 function setupTabs() {
   const workbook = SpreadsheetApp.getActive();
   const missing = Object.keys(SHEET_TABS_).filter((name) => workbook.getSheetByName(name) === null);
@@ -57,6 +64,7 @@ function setupTabs() {
     const headers = SHEET_TABS_[name];
     workbook.insertSheet(name).getRange(1, 1, 1, headers.length).setValues([headers]);
   }
+  if (setupDashboardTab_()) missing.push(DASHBOARD_TAB_);
   workbook.setSpreadsheetTimeZone(JST_);
   SpreadsheetApp.getUi().alert(missing.length > 0 ? `Tabs created: ${missing.join(", ")}` : "Every tab already exists");
 }

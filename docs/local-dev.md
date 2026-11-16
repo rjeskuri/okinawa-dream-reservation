@@ -164,7 +164,9 @@ Rules for the tasks to come:
 - E2e tests fake the Google token, Sheets, Drive, Square and Apps Script endpoints inside `outbound`, switching on the
   request URL.
 - The Apps Script files in `apps-script/` run in a Node `vm` with fake `SpreadsheetApp`, `UrlFetchApp`, `MailApp`, `Utilities`,
-  `PropertiesService`, `CacheService`, `LockService` and `ContentService`.
+  `PropertiesService`, `CacheService`, `LockService`, `ContentService` and `HtmlService`. The `HtmlService` fake reads
+  `apps-script/*.html` and records each sidebar and dialog shown; Node cannot run a panel's own script, so tests scan
+  the HTML instead.
 
 ## Live checks (manual)
 
