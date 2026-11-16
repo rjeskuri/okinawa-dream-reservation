@@ -183,8 +183,20 @@ function bodyText(body: unknown): string {
   return body === undefined ? "" : JSON.stringify(body);
 }
 
+/** The rectangle Google answers: every cell past the data is '', and a row that was never written is all ''. */
+function rectangle(tab: FakeTab, row: number, column: number, numRows: number, numColumns: number): unknown[][] {
+  return Array.from({ length: numRows }, (_, i) =>
+    Array.from({ length: numColumns }, (_, j) => tab.rows[row - 1 + i]?.[column - 1 + j] ?? ""),
+  );
+}
+
 function fakeRange(tab: FakeTab, row: number, column: number, numRows: number, numColumns: number) {
   const range = {
+    getValues: () => rectangle(tab, row, column, numRows, numColumns),
+    getValue: () => rectangle(tab, row, column, 1, 1)[0][0],
+    setValue(value: unknown) {
+      return range.setValues([[value]]);
+    },
     setValues(values: ArrayLike<ArrayLike<unknown>>) {
       tab.touches.push("setValues");
       const copied = Array.from(values, (cells) => Array.from(cells));
@@ -401,6 +413,8 @@ function fakeSheet(name: string, tab: FakeTab) {
       tab.rows.push(Array.from(cells));
       return sheet;
     },
+    // Google answers A1 alone for an empty tab, and otherwise the rectangle from A1 to the last row and column.
+    getDataRange: () => fakeRange(tab, 1, 1, Math.max(1, tab.rows.length), Math.max(1, sheet.getLastColumn())),
     getRange(row: unknown, column: unknown = 1, numRows: unknown = 1, numColumns: unknown = 1) {
       if (typeof row !== "number") throw new Error("this fake's getRange takes (row, column, numRows, numColumns)");
       return fakeRange(tab, row, Number(column), Number(numRows), Number(numColumns));
