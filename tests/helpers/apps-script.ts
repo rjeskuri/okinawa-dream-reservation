@@ -25,7 +25,21 @@ export type FetchCall = {
 
 export type FakeTab = { rows: unknown[][]; touches: string[] };
 
-export type FakeMenu = { name: string; items: [string, string][]; added: boolean };
+/** What addSeparator records in a menu's items, between the `[caption, functionName]` pairs. */
+export const MENU_SEPARATOR = "---";
+
+export type MenuEntry = [caption: string, functionName: string] | typeof MENU_SEPARATOR;
+
+export type FakeMenu = { name: string; items: MenuEntry[]; added: boolean };
+
+/** A sidebar or dialog the script showed: its title and HTML content, and its size when the output set one. */
+export type Shown = {
+  kind: "sidebar" | "modal" | "modeless";
+  title: string;
+  html: string;
+  width?: number;
+  height?: number;
+};
 
 export type Options = {
   /** getProperty answers null for a name left out, as Script Properties does. */
@@ -42,6 +56,8 @@ export type Options = {
   signatureBytes?: number[];
   /** What Google keeps between web app executions. Given, it also sets the time the script sees. */
   web?: WebState;
+  /** Utilities.getUuid answers these in order, then uuid-1, uuid-2 and so on. */
+  uuids?: string[];
 };
 
 export type CacheEntry = { value: string; expiresAt: number };
@@ -80,9 +96,18 @@ export type WebApp = {
 export type AppsScriptWorld = {
   /** Calls a global function of the script, as the menu does. */
   call(name: string, ...args: unknown[]): unknown;
+  /** Whether the script defines a global function of this name, the lookup `call` makes. */
+  isFunction(name: string): boolean;
+  /**
+   * Runs code in the script's global scope and answers a plain copy of its value. Top-level `const` and `let` live in
+   * that scope without being properties of the global object, so this is how a test reads or extends one.
+   */
+  evaluate(code: string): unknown;
   fetches: FetchCall[];
   alerts: string[];
   menus: FakeMenu[];
+  /** Every sidebar and dialog, in the order the script showed them. */
+  shown: Shown[];
   tabs: Map<string, FakeTab>;
   /** Tab names in the order insertSheet created them. */
   inserted: string[];
@@ -174,8 +199,107 @@ function fakeRange(tab: FakeTab, row: number, column: number, numRows: number, n
       });
       return range;
     },
+    /** Every cell of the range takes the value, as on Google. */
+    setValue(value: unknown) {
+      tab.touches.push("setValue");
+      for (let i = 0; i < numRows; i += 1) {
+        const target = (tab.rows[row - 1 + i] ??= []);
+        for (let j = 0; j < numColumns; j += 1) target[column - 1 + j] = value;
+      }
+      return range;
+    },
+    // Formatting changes no cell, but it is still a write: a tab that must stay untouched shows it in `touches`.
+    setFontWeight() {
+      tab.touches.push("setFontWeight");
+      return range;
+    },
+    setFontSize() {
+      tab.touches.push("setFontSize");
+      return range;
+    },
+    setWrap() {
+      tab.touches.push("setWrap");
+      return range;
+    },
   };
   return range;
+}
+
+type FakeHtmlOutput = {
+  getContent(): string;
+  setContent(html: unknown): FakeHtmlOutput;
+  append(html: unknown): FakeHtmlOutput;
+  getTitle(): string;
+  setTitle(title: unknown): FakeHtmlOutput;
+  getWidth(): number | undefined;
+  setWidth(width: unknown): FakeHtmlOutput;
+  getHeight(): number | undefined;
+  setHeight(height: unknown): FakeHtmlOutput;
+  getSandboxMode(): unknown;
+  setSandboxMode(mode: unknown): FakeHtmlOutput;
+};
+
+/** HtmlService's outputs. The set tells the Ui fake a real output from anything else handed to it. */
+function fakeHtmlService(outputs: WeakSet<object>) {
+  const createHtmlOutput = (html: unknown = ""): FakeHtmlOutput => {
+    let content = String(html);
+    let title = "";
+    let width: number | undefined;
+    let height: number | undefined;
+    let sandboxMode: unknown = "IFRAME";
+    const output: FakeHtmlOutput = {
+      getContent: () => content,
+      setContent(next) {
+        content = String(next);
+        return output;
+      },
+      append(more) {
+        content += String(more);
+        return output;
+      },
+      getTitle: () => title,
+      setTitle(next) {
+        title = String(next);
+        return output;
+      },
+      getWidth: () => width,
+      setWidth(next) {
+        width = Number(next);
+        return output;
+      },
+      getHeight: () => height,
+      setHeight(next) {
+        height = Number(next);
+        return output;
+      },
+      getSandboxMode: () => sandboxMode,
+      setSandboxMode(mode) {
+        sandboxMode = mode;
+        return output;
+      },
+    };
+    outputs.add(output);
+    return output;
+  };
+
+  return {
+    SandboxMode: { IFRAME: "IFRAME", NATIVE: "NATIVE", EMULATED: "EMULATED" },
+    XFrameOptionsMode: { ALLOWALL: "ALLOWALL", DEFAULT: "DEFAULT" },
+    createHtmlOutput,
+    /** Reads apps-script/<name>.html, named with or without its `.html`, as Apps Script names its HTML files. */
+    createHtmlOutputFromFile(name: unknown) {
+      const given = String(name);
+      const file = given.endsWith(".html") ? given : `${given}.html`;
+      if (!readdirSync(SCRIPT_DIR).includes(file)) throw new Error(`No HTML file named ${given} was found.`);
+      return createHtmlOutput(readFileSync(new URL(file, SCRIPT_DIR), "utf8"));
+    },
+    createTemplate() {
+      throw new Error("this fake has no HTML templates: build the HTML from getContent(), with no scriptlets");
+    },
+    createTemplateFromFile() {
+      throw new Error("this fake has no HTML templates: build the HTML from getContent(), with no scriptlets");
+    },
+  };
 }
 
 function fakeTextOutput(initial: string) {
@@ -285,6 +409,10 @@ function fakeSheet(name: string, tab: FakeTab) {
       tab.touches.push("setFrozenRows");
       return sheet;
     },
+    setColumnWidth() {
+      tab.touches.push("setColumnWidth");
+      return sheet;
+    },
   };
   return sheet;
 }
@@ -294,8 +422,12 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
   const fetches: FetchCall[] = [];
   const alerts: string[] = [];
   const menus: FakeMenu[] = [];
+  const shown: Shown[] = [];
+  const htmlOutputs = new WeakSet<object>();
   const inserted: string[] = [];
   const timeouts: number[] = [];
+  const uuids = [...(options.uuids ?? [])];
+  let uuidCount = 0;
   const tabs = new Map<string, FakeTab>(
     Object.entries(options.tabs ?? {}).map(([name, rows]) => [
       name,
@@ -338,14 +470,43 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
           entry.items.push([caption, functionName]);
           return menu;
         },
-        addSeparator: () => menu,
+        addSeparator() {
+          entry.items.push(MENU_SEPARATOR);
+          return menu;
+        },
         addToUi() {
           entry.added = true;
         },
       };
       return menu;
     },
+    showSidebar(output: unknown) {
+      show("sidebar", "showSidebar", output);
+    },
+    showModalDialog(output: unknown, title: unknown) {
+      show("modal", "showModalDialog", output, title);
+    },
+    showModelessDialog(output: unknown, title: unknown) {
+      show("modeless", "showModelessDialog", output, title);
+    },
   };
+
+  /** A sidebar takes its title from the output. A dialog takes the one it is given, which Google requires. */
+  function show(kind: Shown["kind"], method: string, output: unknown, title?: unknown): void {
+    if (typeof output !== "object" || output === null || !htmlOutputs.has(output)) {
+      throw new Error(`The parameters don't match the method signature for Ui.${method}: pass an HtmlOutput`);
+    }
+    if (kind !== "sidebar" && typeof title !== "string") {
+      throw new Error(`The parameters don't match the method signature for Ui.${method}: pass a title`);
+    }
+    const html = output as FakeHtmlOutput;
+    const entry: Shown = { kind, title: kind === "sidebar" ? html.getTitle() : String(title), html: html.getContent() };
+    const width = html.getWidth();
+    const height = html.getHeight();
+    if (width !== undefined) entry.width = width;
+    if (height !== undefined) entry.height = height;
+    shown.push(entry);
+  }
 
   const UrlFetchApp = {
     fetch(url: string, request: Record<string, unknown> = {}) {
@@ -372,6 +533,12 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
       return options.signatureBytes === undefined ? hmacSignature(value, key, charset) : [...options.signatureBytes];
     },
     formatDate,
+    getUuid() {
+      const given = uuids.shift();
+      if (given !== undefined) return given;
+      uuidCount += 1;
+      return `uuid-${uuidCount}`;
+    },
   };
 
   const LockService = {
@@ -406,6 +573,7 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
       MimeType: { JSON: "JSON", TEXT: "TEXT" },
       createTextOutput: (content: unknown = "") => fakeTextOutput(String(content)),
     },
+    HtmlService: fakeHtmlService(htmlOutputs),
     PropertiesService: {
       getScriptProperties: () => ({ getProperty: (name: string) => options.properties?.[name] ?? null }),
     },
@@ -441,9 +609,15 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
       if (typeof fn !== "function") throw new Error(`apps-script/ defines no global function ${name}`);
       return fn(...args);
     },
+    isFunction: (name) => typeof context[name] === "function",
+    evaluate(code) {
+      // structuredClone copies into this realm, so the copy passes assert's deepEqual where the original would not.
+      return structuredClone(new Script(code, { filename: "evaluate" }).runInContext(context));
+    },
     fetches,
     alerts,
     menus,
+    shown,
     tabs,
     inserted,
     timeZone: () => timeZone,

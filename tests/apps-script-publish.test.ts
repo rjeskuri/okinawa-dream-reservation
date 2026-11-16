@@ -11,6 +11,8 @@ import {
   type AppsScriptWorld,
   hmacSignature,
   loadAppsScript,
+  MENU_SEPARATOR,
+  type MenuEntry,
   type Options,
   type Reply,
   type Route,
@@ -27,6 +29,8 @@ const PHOTOS = "/api/publish/photos";
 const ASSIGNMENTS = "/api/publish/assignments";
 
 const ROUND_CAP = 10;
+
+const DASHBOARD = "Dashboard";
 
 const REPORT = {
   ok: true,
@@ -952,7 +956,11 @@ test("setupTabs headers equal SHEET_TABS", () => {
   const script = world({ tabs: {} });
   script.call("setupTabs");
 
-  assert.deepEqual([...script.inserted].sort(), Object.keys(SHEET_TABS).sort());
+  // The Worker never reads the Dashboard tab, so it stays out of SHEET_TABS, and the copy equals the original.
+  assert.ok(!(DASHBOARD in SHEET_TABS), "SHEET_TABS has no Dashboard");
+  assert.deepEqual(script.evaluate("SHEET_TABS_"), SHEET_TABS, "SHEET_TABS_ in Publish.js equals SHEET_TABS");
+  // Dashboard holds instructions, not a header row: the dashboard tests check what is in it.
+  assert.deepEqual([...script.inserted].sort(), [...Object.keys(SHEET_TABS), DASHBOARD].sort());
   for (const [name, headers] of Object.entries(SHEET_TABS)) {
     assert.deepEqual(script.tabs.get(name)?.rows, [headers], name);
   }
@@ -961,7 +969,8 @@ test("setupTabs headers equal SHEET_TABS", () => {
 });
 
 test("setupTabs creates exactly the missing tabs and leaves existing ones untouched", () => {
-  const names = Object.keys(SHEET_TABS);
+  // Dashboard is one of the tabs Set up tabs makes, with instructions in place of headers.
+  const names = [...Object.keys(SHEET_TABS), DASHBOARD];
   const existing: Record<string, unknown[][]> = {
     Config: [["key", "value", "my own notes"], ["shop_name", "Okinawa Dream", "keep me"]],
     // Headers that no longer match are for Publish to report. Setup must not repair them.
@@ -974,6 +983,7 @@ test("setupTabs creates exactly the missing tabs and leaves existing ones untouc
   };
   const partials: [string, Record<string, unknown[][]>][] = [
     ["a partly set up sheet", existing],
+    ["a partly set up sheet with its own Dashboard", { ...existing, [DASHBOARD]: [["our notes"], ["", "kept"]] }],
     ["a new spreadsheet", { Sheet1: [] }],
     ["every tab there", Object.fromEntries(names.map((name) => [name, [["kept"]]]))],
     // One case per tab: a typo in any one copied header list has nowhere to hide.
@@ -991,6 +1001,10 @@ test("setupTabs creates exactly the missing tabs and leaves existing ones untouc
     const missing = names.filter((name) => !(name in tabs)).sort();
     assert.deepEqual([...script.inserted].sort(), missing, label);
     for (const name of missing) {
+      if (name === DASHBOARD) {
+        assert.ok((script.tabs.get(name)?.rows.length ?? 0) > 0, `${label}: the new Dashboard has its instructions`);
+        continue;
+      }
       assert.deepEqual(script.tabs.get(name)?.rows, [SHEET_TABS[name as keyof typeof SHEET_TABS]], `${label}: ${name}`);
     }
     for (const [name, rows] of Object.entries(tabs)) {
@@ -1026,12 +1040,17 @@ test("missing properties alert clearly", () => {
 test("onOpen adds the Okinawa Dream menu", () => {
   const script = world();
   script.call("onOpen");
+  // Each panel task adds its entry to DASHBOARD_ACTIONS_, so the list is read from the script as it is now.
+  const actions = script.evaluate("DASHBOARD_ACTIONS_") as { label: string; fn: string }[];
   assert.deepEqual(script.menus, [
     {
       name: "Okinawa Dream",
       items: [
         ["Publish to website", "publish"],
         ["Set up tabs", "setupTabs"],
+        MENU_SEPARATOR,
+        ["Open dashboard", "openDashboard"],
+        ...actions.map(({ label, fn }): MenuEntry => [label, fn]),
       ],
       added: true,
     },
