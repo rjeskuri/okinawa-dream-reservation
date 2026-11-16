@@ -211,15 +211,6 @@ function fakeRange(tab: FakeTab, row: number, column: number, numRows: number, n
       });
       return range;
     },
-    /** Every cell of the range takes the value, as on Google. */
-    setValue(value: unknown) {
-      tab.touches.push("setValue");
-      for (let i = 0; i < numRows; i += 1) {
-        const target = (tab.rows[row - 1 + i] ??= []);
-        for (let j = 0; j < numColumns; j += 1) target[column - 1 + j] = value;
-      }
-      return range;
-    },
     // Formatting changes no cell, but it is still a write: a tab that must stay untouched shows it in `touches`.
     setFontWeight() {
       tab.touches.push("setFontWeight");
@@ -227,10 +218,6 @@ function fakeRange(tab: FakeTab, row: number, column: number, numRows: number, n
     },
     setFontSize() {
       tab.touches.push("setFontSize");
-      return range;
-    },
-    setWrap() {
-      tab.touches.push("setWrap");
       return range;
     },
   };
