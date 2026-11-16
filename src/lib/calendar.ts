@@ -1,5 +1,9 @@
 // The pickup calendar's month grid and return date. Everything is a YYYY-MM-DD calendar date moved through time.ts, so
 // the host's zone never enters, and DatePicker.astro runs this same code in the browser.
+import { htmlLang } from "../i18n/locales.ts";
+import { calendar } from "../i18n/strings/calendar.ts";
+import { t } from "../i18n/t.ts";
+import type { Locale } from "./locale.ts";
 import { addDaysToDate, daysBetweenDates, epochToJst, jstToEpoch } from "./time.ts";
 import type { PackageLength } from "./types.ts";
 
@@ -70,4 +74,31 @@ export function returnDate(pickup: string, days: number): string {
  */
 export function packageDays(pkg: PackageLength): number {
   return pkg.days ?? Math.floor(pkg.hours / 24) + 1;
+}
+
+/** The string `key` of the calendar dictionary in `locale`, with each {name} replaced by its value. */
+function fill(locale: Locale, key: string, values: Record<string, string>): string {
+  return Object.entries(values).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, value), t(locale, calendar, key));
+}
+
+/**
+ * What the date field reads for a pickup of `pkg` (null: no package chosen) at a shop that closes at `shopClose`, HH:mm
+ * as the sheet has it (#137). A days package is back by closing on returnDate's day, an hours package below 24 the same
+ * day, and 24, 48 or 72 hours that many days on at the pickup's own time. Other hours read as an hours package.
+ */
+export function returnSummary(locale: Locale, pickup: string, pkg: PackageLength | null, shopClose: string): string {
+  // The day and short month, formatted in UTC from a UTC midnight, so the host's zone cannot shift the day.
+  const format = new Intl.DateTimeFormat(htmlLang(locale), { month: "short", day: "numeric", timeZone: "UTC" });
+  const date = (day: string) => format.format(new Date(`${day}T00:00:00Z`));
+  if (pkg === null) return date(pickup);
+  if (pkg.days !== null) {
+    if (pkg.days === 1) return fill(locale, "calendar.field.sameDay", { pickup: date(pickup), close: shopClose });
+    const back = date(returnDate(pickup, pkg.days));
+    return fill(locale, "calendar.field.days", { pickup: date(pickup), return: back, close: shopClose });
+  }
+  if (pkg.hours >= 24 && pkg.hours % 24 === 0) {
+    const back = date(addDaysToDate(pickup, pkg.hours / 24));
+    return fill(locale, "calendar.field.fullDay", { pickup: date(pickup), return: back });
+  }
+  return fill(locale, "calendar.field.hours", { pickup: date(pickup), hours: String(pkg.hours) });
 }
