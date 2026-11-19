@@ -31,6 +31,7 @@ import {
   removeRow,
   rowWith,
   setCell,
+  sheetRow,
   statusWrite,
   validWorkbook,
   type StatusWrite,
@@ -868,5 +869,339 @@ test("a failed D1 write leaves the sheet alone", async () => {
     // `ok` tells staff the row is published, and none is.
     assert.deepEqual(calls.updates, []);
     assert.equal(await readCatalog(db), null);
+  });
+});
+
+// #135: a Prices row with an error of its own keeps the price the site already has, so the package stays bookable. The
+// row is still an error, and its cell names the problem and the price kept, both prices where the stored row has an
+// advance price. A row with no stored price is left out as before, and its cell says the package is not bookable. A
+// removed row, a skipped rate class or package and a repeat row behave as before. Every stored price below is checked
+// against the hand-written fixture catalog plus the advance prices FIRST_ADVANCE adds, never against the code's output.
+
+/** Advance prices the first publish of a #135 test adds, so a kept row has both prices to keep. */
+const FIRST_ADVANCE: Record<string, number> = { "bike-125/day-1": 4800, "car-k/day-1": 6900, "bike-400/hours-6": 5550 };
+
+/** The fixture's workbook with FIRST_ADVANCE in its cells. */
+function publishedWorkbook(): Workbook {
+  const workbook = validWorkbook();
+  for (const [key, advance] of Object.entries(FIRST_ADVANCE)) setCell(workbook, "Prices", key, "advance_price_jpy", advance);
+  return workbook;
+}
+
+/** The catalog publishedWorkbook stores. */
+function publishedCatalog(): Catalog {
+  const catalog = expectedCatalog();
+  for (const price of catalog.prices) {
+    price.advancePriceJpy = FIRST_ADVANCE[`${price.rateClassId}/${price.packageId}`] ?? null;
+  }
+  return catalog;
+}
+
+/** A price as a person reads it, as the ticket writes 4,000: thousands grouped by commas. */
+const grouped = (jpy: number): string => jpy.toLocaleString("en-US");
+
+type StoredPrice = { price_jpy: number; advance_price_jpy: number | null };
+
+async function storedPrice(db: D1Database, key: string): Promise<StoredPrice | null> {
+  const [rateClassId, packageId] = key.split("/");
+  return db
+    .prepare("SELECT price_jpy, advance_price_jpy FROM prices WHERE rate_class_id = ?1 AND package_id = ?2")
+    .bind(rateClassId, packageId)
+    .first<StoredPrice>();
+}
+
+/** Publishes `workbook` and returns the report with the Prices tab's cells. */
+async function publishPrices(db: D1Database, workbook: Workbook, now: number) {
+  const { publishCatalog } = await publish();
+  const { sheets, calls } = fakeSheets(workbook);
+  const report = await publishCatalog({ db, sheets, now });
+  assert.equal(calls.updates.length, 1, "one status write");
+  return { report, data: calls.updates[0], prices: statusWrite(calls.updates[0], "Prices").cells };
+}
+
+/** The Prices cell of the row named `key` in `workbook`. */
+function priceCell(workbook: Workbook, cells: unknown[], key: string): unknown {
+  return cells[sheetRow(workbook, "Prices", key) - 2];
+}
+
+/** The cell of a row that keeps the stored price: an error naming its problem and every price kept, not "not bookable". */
+function assertKeptCell(cell: unknown, label: string, problem: string[], kept: StoredPrice): void {
+  const prices = [kept.price_jpy, kept.advance_price_jpy].flatMap((jpy) => (jpy === null ? [] : [grouped(jpy)]));
+  assertError(cell, label, [...problem, ...prices]);
+  assert.doesNotMatch(cell as string, /not bookable/i, `${label}: the package stays bookable`);
+}
+
+/** The cell of a row left out with no price to keep. */
+function assertNotBookableCell(cell: unknown, label: string, problem: string[]): void {
+  assertError(cell, label, problem);
+  assert.match(cell as string, /not bookable/i, `${label} says the package is not bookable`);
+}
+
+/** The stored price of each key in `catalog`, as the prices table holds it. */
+function priceOf(catalog: Catalog, key: string): StoredPrice {
+  const price = catalog.prices.find(({ rateClassId, packageId }) => `${rateClassId}/${packageId}` === key);
+  assert.ok(price, `the catalog has no price ${key}`);
+  return { price_jpy: price.priceJpy, advance_price_jpy: price.advancePriceJpy };
+}
+
+test("a bad Prices row keeps the last published price", async () => {
+  // [row, bad price_jpy]: rows with and without an advance price, at the top, middle and bottom of the tab.
+  const BAD: [key: string, cell: unknown][] = [
+    ["scooter-50/hours-6", -5],
+    ["bike-125/day-1", "abc"],
+    ["bike-400/hours-6", 0],
+    ["car-k/day-3", "-1,000"],
+  ];
+  await withDb(async (db) => {
+    const first = await publishPrices(db, publishedWorkbook(), NOW);
+    assert.equal(first.report.version, 1);
+    assert.deepEqual(canonicalCatalog(await readCatalog(db)), canonicalCatalog(publishedCatalog()));
+
+    const workbook = publishedWorkbook();
+    for (const [key, cell] of BAD) setCell(workbook, "Prices", key, "price_jpy", cell);
+    const { report, data, prices } = await publishPrices(db, workbook, NOW + 60_000);
+
+    // The catalog changes, as the rows stay errors.
+    assert.equal(report.ok, true);
+    assert.equal(report.version, 2);
+    assert.deepEqual(report.counts, { ok: ROWS - BAD.length, warning: 0, error: BAD.length });
+    assert.deepEqual(await catalogMeta(db), [{ id: 1, version: 2, published_at: NOW + 60_000, source: "sheet" }]);
+
+    // Each bad row's key keeps the first publish's row, both prices, and nothing else in the catalog moves.
+    for (const [key] of BAD) assert.deepEqual(await storedPrice(db, key), priceOf(publishedCatalog(), key), key);
+    assert.deepEqual(canonicalCatalog(await readCatalog(db)), canonicalCatalog(publishedCatalog()));
+
+    for (const [key, cell] of BAD) {
+      assertKeptCell(priceCell(workbook, prices, key), key, ["price_jpy", String(cell)], priceOf(publishedCatalog(), key));
+    }
+    const badRows = new Set(BAD.map(([key]) => sheetRow(workbook, "Prices", key)));
+    for (const [index, cell] of prices.entries()) {
+      if (!badRows.has(index + 2)) assert.equal(cell, "ok", `Prices ${index + 2}`);
+    }
+    // The other tabs are untouched by the rule.
+    const { Prices: _prices, ...others } = STATUS_COLUMNS;
+    for (const tab of Object.keys(others)) {
+      assert.ok(statusWrite(data, tab).cells.every((cell) => cell === "ok"), tab);
+    }
+  });
+});
+
+test("a bad advance_price_jpy keeps the whole stored row", async () => {
+  // [row, new price_jpy, bad advance_price_jpy]. Each new price_jpy is valid on its own and differs from the stored
+  // one, so a row that took it with the stored advance price, or with none, shows.
+  const BAD: [key: string, price: number, advance: unknown][] = [
+    // Stored with an advance price: above the new price, and not a number.
+    ["bike-125/day-1", 6000, 6500],
+    ["car-k/day-1", 8100, "free"],
+    // Stored without one: 0 and above the new price.
+    ["bike-400/day-3", 26_000, 0],
+    ["scooter-50/day-3", 9400, 9401],
+  ];
+  await withDb(async (db) => {
+    await publishPrices(db, publishedWorkbook(), NOW);
+
+    const workbook = publishedWorkbook();
+    for (const [key, price, advance] of BAD) {
+      setCell(workbook, "Prices", key, "price_jpy", price);
+      setCell(workbook, "Prices", key, "advance_price_jpy", advance);
+    }
+    const { report, prices } = await publishPrices(db, workbook, NOW + 60_000);
+
+    assert.equal(report.version, 2);
+    assert.deepEqual(report.counts, { ok: ROWS - BAD.length, warning: 0, error: BAD.length });
+    for (const [key] of BAD) assert.deepEqual(await storedPrice(db, key), priceOf(publishedCatalog(), key), key);
+    assert.deepEqual(canonicalCatalog(await readCatalog(db)), canonicalCatalog(publishedCatalog()));
+    for (const [key, , advance] of BAD) {
+      const cell = priceCell(workbook, prices, key);
+      assertKeptCell(cell, key, ["advance_price_jpy", String(advance)], priceOf(publishedCatalog(), key));
+    }
+  });
+});
+
+test("a bad new Prices row is skipped", async (t) => {
+  await t.test("a key the last publish had no price for", async () => {
+    await withDb(async (db) => {
+      await publishPrices(db, publishedWorkbook(), NOW);
+
+      // car-k/hours-6 has no row in the fixture, and day-7 is a package new in this publish. bike-125/day-1 was published
+      // and keeps its price in the same publish, so each cell says what its own row does.
+      const workbook = publishedWorkbook();
+      appendRow(workbook, "Packages", { package_id: "day-7", days: 7, sort: 4, name_ja: "7日", name_en: "7 days", name_zh: "7天", name_ko: "7일" });
+      appendRow(workbook, "Prices", { rate_class_id: "car-k", package_id: "hours-6", price_jpy: -5 });
+      appendRow(workbook, "Prices", { rate_class_id: "bike-125", package_id: "day-7", price_jpy: "lots" });
+      setCell(workbook, "Prices", "bike-125/day-1", "price_jpy", -5);
+      const { report, prices } = await publishPrices(db, workbook, NOW + 60_000);
+
+      assert.equal(report.version, 2);
+      assert.deepEqual(report.counts, { ok: ROWS, warning: 0, error: 3 });
+      assert.equal(await storedPrice(db, "car-k/hours-6"), null);
+      assert.equal(await storedPrice(db, "bike-125/day-7"), null);
+      assert.deepEqual(await storedPrice(db, "bike-125/day-1"), priceOf(publishedCatalog(), "bike-125/day-1"));
+
+      const stored = await readCatalog(db);
+      assert.ok(stored);
+      assert.ok(stored.packages.some(({ id }) => id === "day-7"), "the new package publishes");
+      assert.deepEqual(canonicalCatalog({ ...stored, packages: stored.packages.filter(({ id }) => id !== "day-7") }), canonicalCatalog(publishedCatalog()));
+
+      assertNotBookableCell(priceCell(workbook, prices, "car-k/hours-6"), "car-k/hours-6", ["price_jpy", "-5"]);
+      assertNotBookableCell(priceCell(workbook, prices, "bike-125/day-7"), "bike-125/day-7", ["price_jpy", "lots"]);
+      assertKeptCell(priceCell(workbook, prices, "bike-125/day-1"), "bike-125/day-1", ["price_jpy", "-5"], priceOf(publishedCatalog(), "bike-125/day-1"));
+    });
+  });
+
+  await t.test("the first publish, with nothing stored", async () => {
+    await withDb(async (db) => {
+      const workbook = publishedWorkbook();
+      setCell(workbook, "Prices", "bike-125/day-1", "price_jpy", -5);
+      setCell(workbook, "Prices", "scooter-50/day-3", "advance_price_jpy", 9001);
+      const { report, prices } = await publishPrices(db, workbook, NOW);
+
+      assert.equal(report.version, 1);
+      assert.deepEqual(report.counts, { ok: ROWS - 2, warning: 0, error: 2 });
+      assert.equal(await storedPrice(db, "bike-125/day-1"), null);
+      assert.equal(await storedPrice(db, "scooter-50/day-3"), null);
+      assert.deepEqual(
+        canonicalCatalog(await readCatalog(db)),
+        canonicalCatalog(withoutDropped(publishedCatalog(), { prices: ["bike-125/day-1", "scooter-50/day-3"] })),
+      );
+      assertNotBookableCell(priceCell(workbook, prices, "bike-125/day-1"), "bike-125/day-1", ["price_jpy", "-5"]);
+      assertNotBookableCell(priceCell(workbook, prices, "scooter-50/day-3"), "scooter-50/day-3", ["advance_price_jpy", "9001"]);
+    });
+  });
+});
+
+test("a removed Prices row still removes its price", async (t) => {
+  // Taken out of the sheet, or with its cells cleared, a row is no row at all: only an error keeps a price. Each case
+  // keeps bike-125/day-3 by a bad price in the same publish, so a publish that kept every stored price shows.
+  const REMOVALS: [name: string, remove: (workbook: Workbook, key: string) => void][] = [
+    ["the row deleted", (workbook, key) => removeRow(workbook, "Prices", key)],
+    ["the row's cells cleared", (workbook, key) => workbook.Prices.splice(sheetRow(workbook, "Prices", key) - 1, 1, [])],
+  ];
+  for (const [name, remove] of REMOVALS) {
+    await t.test(name, async () => {
+      await withDb(async (db) => {
+        await publishPrices(db, publishedWorkbook(), NOW);
+
+        const workbook = publishedWorkbook();
+        setCell(workbook, "Prices", "bike-125/day-3", "price_jpy", -5);
+        remove(workbook, "car-k/day-1");
+        remove(workbook, "scooter-50/day-1");
+        await publishPrices(db, workbook, NOW + 60_000);
+
+        assert.equal(await storedPrice(db, "car-k/day-1"), null, "car-k/day-1, which had an advance price");
+        assert.equal(await storedPrice(db, "scooter-50/day-1"), null, "scooter-50/day-1");
+        assert.deepEqual(await storedPrice(db, "bike-125/day-3"), priceOf(publishedCatalog(), "bike-125/day-3"));
+        assert.deepEqual(
+          canonicalCatalog(await readCatalog(db)),
+          canonicalCatalog(withoutDropped(publishedCatalog(), { prices: ["car-k/day-1", "scooter-50/day-1"] })),
+        );
+      });
+    });
+  }
+});
+
+test("a skipped Packages row still drops its prices", async () => {
+  await withDb(async (db) => {
+    await publishPrices(db, publishedWorkbook(), NOW);
+
+    // day-3 is skipped, so all four of its prices go, bike-125/day-3 with its own bad price too. bike-125/day-1, on a kept
+    // package, keeps its price in the same publish.
+    const workbook = publishedWorkbook();
+    setCell(workbook, "Packages", "day-3", "days", "three");
+    setCell(workbook, "Prices", "bike-125/day-3", "price_jpy", -5);
+    setCell(workbook, "Prices", "bike-125/day-1", "price_jpy", -5);
+    const { report, prices } = await publishPrices(db, workbook, NOW + 60_000);
+
+    assert.equal(report.version, 2);
+    const dayThree = ["scooter-50/day-3", "bike-125/day-3", "bike-400/day-3", "car-k/day-3"];
+    for (const key of dayThree) assert.equal(await storedPrice(db, key), null, key);
+    assert.deepEqual(await storedPrice(db, "bike-125/day-1"), priceOf(publishedCatalog(), "bike-125/day-1"));
+    assert.deepEqual(
+      canonicalCatalog(await readCatalog(db)),
+      canonicalCatalog(withoutDropped(publishedCatalog(), { packages: ["day-3"], prices: dayThree })),
+    );
+    for (const key of dayThree) assertError(priceCell(workbook, prices, key), key, ["package_id", "day-3"]);
+    assertKeptCell(priceCell(workbook, prices, "bike-125/day-1"), "bike-125/day-1", ["price_jpy", "-5"], priceOf(publishedCatalog(), "bike-125/day-1"));
+  });
+});
+
+test("a skipped RateClasses row still drops its prices", async () => {
+  await withDb(async (db) => {
+    await publishPrices(db, publishedWorkbook(), NOW);
+
+    // bike-400 is skipped, so its three prices go, bike-400/day-1 with its own bad price and bike-400/hours-6 with its
+    // advance price. rebel-250 rides bike-400, so it goes with it, and its vehicle わ1005 too.
+    const workbook = publishedWorkbook();
+    setCell(workbook, "RateClasses", "bike-400", "group", "boat");
+    setCell(workbook, "Prices", "bike-400/day-1", "price_jpy", -5);
+    setCell(workbook, "Prices", "car-k/day-1", "price_jpy", -5);
+    const { report, prices } = await publishPrices(db, workbook, NOW + 60_000);
+
+    assert.equal(report.version, 2);
+    const bike400 = ["bike-400/hours-6", "bike-400/day-1", "bike-400/day-3"];
+    for (const key of bike400) assert.equal(await storedPrice(db, key), null, key);
+    assert.deepEqual(await storedPrice(db, "car-k/day-1"), priceOf(publishedCatalog(), "car-k/day-1"));
+    for (const key of bike400) assertError(priceCell(workbook, prices, key), key, ["rate_class_id", "bike-400"]);
+    assertKeptCell(priceCell(workbook, prices, "car-k/day-1"), "car-k/day-1", ["price_jpy", "-5"], priceOf(publishedCatalog(), "car-k/day-1"));
+  });
+});
+
+test("a repeat Prices row changes nothing", async (t) => {
+  // The first row of a key owns it, kept or not: a repeat's value never publishes, and a repeat is never what keeps a
+  // stored price, nor what stops one being kept.
+  const CASES: { name: string; first: unknown; repeat: unknown; stored: (published: StoredPrice) => StoredPrice }[] = [
+    { name: "a good row, then a bad repeat", first: 5300, repeat: -5, stored: () => ({ price_jpy: 5300, advance_price_jpy: null }) },
+    { name: "a good row, then a good repeat", first: 5400, repeat: 9999, stored: () => ({ price_jpy: 5400, advance_price_jpy: null }) },
+    { name: "a bad row, then a good repeat", first: -5, repeat: 9999, stored: (published) => published },
+    { name: "a bad row, then a bad repeat", first: -5, repeat: "abc", stored: (published) => published },
+  ];
+  for (const { name, first, repeat, stored } of CASES) {
+    await t.test(name, async () => {
+      await withDb(async (db) => {
+        // bike-125/day-3 was published at 13,800 with no advance price.
+        await publishPrices(db, publishedWorkbook(), NOW);
+        const published = priceOf(publishedCatalog(), "bike-125/day-3");
+
+        const workbook = publishedWorkbook();
+        setCell(workbook, "Prices", "bike-125/day-3", "price_jpy", first);
+        appendRow(workbook, "Prices", { rate_class_id: "bike-125", package_id: "day-3", price_jpy: repeat });
+        const { prices } = await publishPrices(db, workbook, NOW + 60_000);
+
+        assert.deepEqual(await storedPrice(db, "bike-125/day-3"), stored(published));
+        // The repeat stays an error, whichever row is bad.
+        assertError(prices[workbook.Prices.length - 2], "the repeat", []);
+      });
+    });
+  }
+});
+
+test("the next good Publish replaces the kept price with the sheet's value", async () => {
+  // [row, bad price_jpy for the second publish, the third publish's price_jpy and advance_price_jpy ("" is blank)]
+  const ROWS_FIXED: [key: string, bad: unknown, price: number, advance: number | ""][] = [
+    ["bike-125/day-1", -5, 5600, ""],
+    ["car-k/day-1", "abc", 7700, 7100],
+    ["scooter-50/hours-6", 0, 2650, 2400],
+  ];
+  await withDb(async (db) => {
+    await publishPrices(db, publishedWorkbook(), NOW);
+
+    const broken = publishedWorkbook();
+    for (const [key, bad] of ROWS_FIXED) setCell(broken, "Prices", key, "price_jpy", bad);
+    await publishPrices(db, broken, NOW + 60_000);
+    for (const [key] of ROWS_FIXED) assert.deepEqual(await storedPrice(db, key), priceOf(publishedCatalog(), key), `${key} kept`);
+
+    const fixed = publishedWorkbook();
+    for (const [key, , price, advance] of ROWS_FIXED) {
+      setCell(fixed, "Prices", key, "price_jpy", price);
+      setCell(fixed, "Prices", key, "advance_price_jpy", advance);
+    }
+    const { report, prices } = await publishPrices(db, fixed, NOW + 120_000);
+
+    assert.equal(report.version, 3);
+    assert.deepEqual(report.counts, { ok: ROWS, warning: 0, error: 0 });
+    for (const [key, , price, advance] of ROWS_FIXED) {
+      assert.deepEqual(await storedPrice(db, key), { price_jpy: price, advance_price_jpy: advance === "" ? null : advance }, key);
+    }
+    assert.ok(prices.every((cell) => cell === "ok"), `Prices cells: ${JSON.stringify(prices)}`);
   });
 });

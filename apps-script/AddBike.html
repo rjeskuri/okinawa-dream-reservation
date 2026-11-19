@@ -1,0 +1,177 @@
+<style>
+  .bike-hint { margin: 4px 0 0; color: #5f6368; }
+  .bike-warn { margin: 4px 0 0; color: #a50e0e; }
+  .bike-rows { margin: 0; padding-left: 20px; }
+  .bike-rows li { margin: 0 0 6px; }
+  .bike-level-error { color: #a50e0e; font-weight: bold; }
+  .bike-level-warning { color: #b06000; font-weight: bold; }
+  .bike-level-ok { color: #137333; font-weight: bold; }
+</style>
+<h1>Add a bike</h1>
+
+<section data-step="model">
+  <h2>1. Model</h2>
+  <p id="bike-loading">Loading the models…</p>
+  <label for="bike-model">Model</label>
+  <select id="bike-model"></select>
+  <p id="bike-model-info" class="bike-hint"></p>
+</section>
+
+<section data-step="vehicle">
+  <h2>2. Vehicle</h2>
+  <label for="bike-plate">Plate</label>
+  <input id="bike-plate" type="text" autocomplete="off">
+  <p id="bike-plate-used" class="bike-warn" hidden>This plate is already in Vehicles.</p>
+  <label for="bike-odometer">Odometer (km), optional</label>
+  <input id="bike-odometer" type="number" min="0" step="1">
+  <label for="bike-usage">Base usage days, optional</label>
+  <input id="bike-usage" type="number" min="0" step="1">
+  <label for="bike-notes">Notes, optional, not published</label>
+  <textarea id="bike-notes" rows="3"></textarea>
+</section>
+
+<section data-step="check" data-next="Save and publish">
+  <h2>3. Check</h2>
+  <p>The website checked the row as Publish would. Save writes it to Vehicles and publishes.</p>
+  <ul id="bike-fatal" class="bike-rows"></ul>
+  <ul id="bike-check" class="bike-rows"></ul>
+</section>
+
+<section data-step="result">
+  <h2>4. Result</h2>
+  <ul id="bike-written" class="bike-rows"></ul>
+  <h2>Publish</h2>
+  <ul id="bike-publish" class="bike-rows"></ul>
+</section>
+
+<script>
+  // Add a bike: choose a model already in the sheet, enter the vehicle, check the row with the website, then save it
+  // and publish. Text from the sheet goes on the page with textContent only.
+
+  let bikeOptions = { models: [], plates: [] };
+  let bikeDraft = null;
+  let bikeChecked = null;
+
+  function bikeModel() {
+    const id = document.getElementById("bike-model").value;
+    return bikeOptions.models.find((model) => model.id === id) || null;
+  }
+
+  function showModelInfo() {
+    const model = bikeModel();
+    document.getElementById("bike-model-info").textContent = model
+      ? `${model.nameEn} / ${model.nameJa}. Type ${model.typeId}, rate class ${model.rateClassId}, ${model.photos.length} photos.`
+      : "";
+  }
+
+  function showPlateUsed() {
+    const plate = document.getElementById("bike-plate").value.trim();
+    document.getElementById("bike-plate-used").hidden = !bikeOptions.plates.includes(plate);
+  }
+
+  function showOptions(options) {
+    if (!options.ok) throw new Error(options.message);
+    bikeOptions = options;
+    const select = document.getElementById("bike-model");
+    select.append(new Option("Choose a model", ""));
+    for (const model of options.models) {
+      select.append(new Option(`${model.id}: ${model.nameEn} / ${model.nameJa}`, model.id));
+    }
+    showModelInfo();
+  }
+
+  function numberField(id) {
+    const text = document.getElementById(id).value.trim();
+    return text === "" ? undefined : Number(text);
+  }
+
+  function readDraft() {
+    const vehicle = { plate: document.getElementById("bike-plate").value.trim() };
+    const odometerKm = numberField("bike-odometer");
+    const baseUsageDays = numberField("bike-usage");
+    const notes = document.getElementById("bike-notes").value.trim();
+    if (odometerKm !== undefined) vehicle.odometerKm = odometerKm;
+    if (baseUsageDays !== undefined) vehicle.baseUsageDays = baseUsageDays;
+    if (notes !== "") vehicle.notes = notes;
+    return { mode: "existing", modelId: document.getElementById("bike-model").value, vehicle };
+  }
+
+  function listItem(text, className) {
+    const item = document.createElement("li");
+    item.textContent = text;
+    if (className) item.className = className;
+    return item;
+  }
+
+  function checkBlocks(check) {
+    return check.fatal.length > 0 || Object.values(check.rows).some((rows) => rows.some((row) => row.level === "error"));
+  }
+
+  function showCheck(check) {
+    const fatal = document.getElementById("bike-fatal");
+    const rows = document.getElementById("bike-check");
+    fatal.replaceChildren(...check.fatal.map((reason) => listItem(reason, "bike-level-error")));
+    rows.replaceChildren();
+    for (const [tab, checks] of Object.entries(check.rows)) {
+      checks.forEach((row, i) => {
+        const item = listItem(`${tab} row ${i + 1}: `);
+        const level = document.createElement("span");
+        level.className = `bike-level-${row.level}`;
+        level.textContent = row.level;
+        item.append(level);
+        const messages = document.createElement("ul");
+        messages.append(...row.messages.map((message) => listItem(message)));
+        item.append(messages);
+        rows.append(item);
+      });
+    }
+  }
+
+  function showResult(saved) {
+    const written = document.getElementById("bike-written");
+    written.replaceChildren(
+      ...saved.written.map((entry) => listItem(`${entry.tab} row ${entry.row}: publish_status ${entry.status || "(blank)"}`)),
+    );
+    document.getElementById("bike-publish").replaceChildren(...saved.publish.messages.map((message) => listItem(message)));
+  }
+
+  onNext("model", () => {
+    if (!bikeModel()) throw new Error("Choose a model.");
+  });
+
+  onNext("vehicle", () => {
+    const draft = readDraft();
+    if (draft.vehicle.plate === "") throw new Error("Enter a plate.");
+    return callServer("addBikeCheck", draft).then((check) => {
+      if (!check.ok) throw new Error(check.message);
+      bikeDraft = draft;
+      bikeChecked = check;
+      showCheck(check);
+    });
+  });
+
+  onNext("check", () => {
+    if (checkBlocks(bikeChecked)) throw new Error("Fix the errors above in the earlier steps, then check again.");
+    return callServer("addBikeSave", bikeDraft).then((saved) => {
+      if (saved.check) {
+        if (!saved.check.ok) throw new Error(saved.check.message);
+        bikeChecked = saved.check;
+        showCheck(saved.check);
+        throw new Error("The check found a problem, so nothing was saved.");
+      }
+      if (!saved.ok) throw new Error(saved.message);
+      showResult(saved);
+    });
+  });
+
+  document.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("bike-model").addEventListener("change", showModelInfo);
+    document.getElementById("bike-plate").addEventListener("input", showPlateUsed);
+    callServer("addBikeOptions")
+      .then(showOptions)
+      .catch(showError)
+      .finally(() => {
+        document.getElementById("bike-loading").hidden = true;
+      });
+  });
+</script>

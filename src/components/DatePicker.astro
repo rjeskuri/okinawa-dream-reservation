@@ -1,14 +1,18 @@
 ---
-// The pickup date. The markup is a plain `<input type=date>`, which is all a guest without JavaScript gets; the script
-// swaps it for the inline month grid and writes the choice to the hidden `date` input instead. Closed dates exist only
-// in the grid, because a date input cannot exclude them, so the server must still check what it receives.
+// The pickup date. The markup is a plain `<input type=date>`, which is all a guest without JavaScript gets; the script,
+// src/scripts/date-picker.ts, swaps it for a date field that opens the month grid (#137) and writes the choice to the
+// hidden `date` input instead. Closed dates exist only in the grid, because a date input cannot exclude them, so the server
+// must still check what it receives.
 //
-// A page reports the chosen package by setting the `package-days` attribute of `<date-picker>` (removing it clears the
-// return date) and hears each pickup through the `change` event of the hidden input, which bubbles.
+// A page reports the chosen package by setting the `package-days` attribute of `<date-picker>` to packageDays of it, and
+// `package-hours` to an hours package's hours (removing package-hours for a days package, and both for no package), and
+// hears each pickup through the `change` event of the hidden input, which bubbles.
 import { htmlLang } from "../i18n/locales.ts";
 import { calendar } from "../i18n/strings/calendar.ts";
 import { t } from "../i18n/t.ts";
+import { packageDays } from "../lib/calendar.ts";
 import type { Locale } from "../lib/locale.ts";
+import type { PackageLength } from "../lib/types.ts";
 
 interface Props {
   locale: Locale;
@@ -19,17 +23,22 @@ interface Props {
   closedDates?: string[];
   /** The pickup date to start from, YYYY-MM-DD. */
   value?: string;
-  /** The chosen package's length as returnDate counts it, packageDays in src/lib/calendar.ts, when the page knows it. */
-  packageDays?: number;
+  /** The chosen package's length, when the page knows it. */
+  pkg?: PackageLength | null;
+  /** The shop's closing time, HH:mm as the sheet has it, which a days package is back by. */
+  shopClose: string;
 }
 
-const { locale, min, max, closedDates = [], value, packageDays } = Astro.props;
+const { locale, min, max, closedDates = [], value, pkg, shopClose } = Astro.props;
 const config = {
+  locale,
   lang: htmlLang(locale),
+  shopClose,
   closedDates,
   labels: {
     pickup: t(locale, calendar, "calendar.pickup"),
     return: t(locale, calendar, "calendar.return"),
+    empty: t(locale, calendar, "calendar.field.empty"),
     past: t(locale, calendar, "calendar.reason.past"),
     too_far: t(locale, calendar, "calendar.reason.too_far"),
     closed: t(locale, calendar, "calendar.reason.closed"),
@@ -37,11 +46,19 @@ const config = {
 };
 ---
 
-<date-picker data-config={JSON.stringify(config)} package-days={packageDays}>
+<date-picker
+  data-config={JSON.stringify(config)}
+  package-days={pkg ? packageDays(pkg) : undefined}
+  package-hours={pkg?.hours ?? undefined}
+>
   <label data-fallback>
     {t(locale, calendar, "calendar.pickup")}
     <input type="date" name="date" min={min} max={max} value={value} />
   </label>
+  <div class="date-picker-field" data-field-wrap hidden>
+    <span class="date-picker-label" aria-hidden="true">{t(locale, calendar, "calendar.pickup")}</span>
+    <button type="button" data-field aria-expanded="false"></button>
+  </div>
   <div data-calendar hidden>
     <div class="date-picker-head">
       <button type="button" data-previous aria-label={t(locale, calendar, "calendar.previousMonth")}>&lsaquo;</button>
@@ -52,216 +69,60 @@ const config = {
       <thead><tr data-weekdays></tr></thead>
       <tbody data-weeks></tbody>
     </table>
-    <input type="hidden" name="date" disabled />
-    <p data-summary aria-live="polite"></p>
   </div>
+  <input type="hidden" name="date" disabled />
 </date-picker>
 
-<script>
-  import { monthGrid, returnDate, type CalendarDay, type DisabledReason } from "../lib/calendar.ts";
-  import { addDaysToDate } from "../lib/time.ts";
-
-  interface Config {
-    lang: string;
-    closedDates: string[];
-    labels: Record<"pickup" | "return" | DisabledReason, string>;
-  }
-
-  /** YYYY-MM-01 of a month counted from year 0, so adding to the count crosses year ends. */
-  function monthStart(months: number): string {
-    const year = String(Math.floor(months / 12)).padStart(4, "0");
-    const month = String((months % 12) + 1).padStart(2, "0");
-    return `${year}-${month}-01`;
-  }
-
-  /** The same day `delta` months away, or that month's last day when it is shorter. */
-  function addMonths(date: string, delta: number): string {
-    const [year, month, day] = date.split("-").map(Number);
-    const months = year * 12 + month - 1 + delta;
-    const last = addDaysToDate(monthStart(months + 1), -1);
-    const same = addDaysToDate(monthStart(months), day - 1);
-    return same < last ? same : last;
-  }
-
-  /** Where each key moves the cursor. `column` is the cell's place in its week, 0 for Sunday. */
-  const MOVES: Record<string, (date: string, column: number) => string> = {
-    ArrowLeft: (date) => addDaysToDate(date, -1),
-    ArrowRight: (date) => addDaysToDate(date, 1),
-    ArrowUp: (date) => addDaysToDate(date, -7),
-    ArrowDown: (date) => addDaysToDate(date, 7),
-    Home: (date, column) => addDaysToDate(date, -column),
-    End: (date, column) => addDaysToDate(date, 6 - column),
-    PageUp: (date) => addMonths(date, -1),
-    PageDown: (date) => addMonths(date, 1),
-  };
-
-  class DatePicker extends HTMLElement {
-    static observedAttributes = ["package-days"];
-    private refresh?: () => void;
-
-    attributeChangedCallback() {
-      this.refresh?.();
-    }
-
-    connectedCallback() {
-      const { lang, closedDates, labels } = JSON.parse(this.dataset.config ?? "") as Config;
-      const part = <T extends Element>(selector: string) => this.querySelector<T>(selector) as T;
-      const fallback = part<HTMLInputElement>("input[type=date]");
-      const hidden = part<HTMLInputElement>("input[type=hidden]");
-      const previous = part<HTMLButtonElement>("[data-previous]");
-      const next = part<HTMLButtonElement>("[data-next]");
-      const month = part<HTMLElement>("[data-month]");
-      const weekdays = part<HTMLElement>("[data-weekdays]");
-      const weeks = part<HTMLElement>("[data-weeks]");
-      const summary = part<HTMLElement>("[data-summary]");
-      const { min, max } = fallback;
-      const opts = { minDate: min, maxDate: max, closedDates };
-
-      // Every name is formatted in UTC from a UTC midnight, so the guest's own zone cannot shift the day.
-      const formatter = (options: Intl.DateTimeFormatOptions) => {
-        const format = new Intl.DateTimeFormat(lang, { ...options, timeZone: "UTC" });
-        return (date: string) => format.format(new Date(`${date}T00:00:00Z`));
-      };
-      const monthName = formatter({ year: "numeric", month: "long" });
-      const fullDate = formatter({ dateStyle: "full" });
-      const shortWeekday = formatter({ weekday: "short" });
-      const longWeekday = formatter({ weekday: "long" });
-
-      const clamp = (date: string) => (date < min ? min : date > max ? max : date);
-      const gridOf = (date: string) => monthGrid(Number(date.slice(0, 4)), Number(date.slice(5, 7)), opts);
-
-      // The cursor is the date holding the grid's one tab stop, and the month on show is always the cursor's. A browser
-      // empties a malformed value, so the clamped date is a real one, and a pickup that is not selectable is dropped.
-      let cursor = clamp(fallback.value || min);
-      let selected = gridOf(cursor)
-        .flat()
-        .some((day) => day.date === fallback.value && !day.disabled)
-        ? fallback.value
-        : null;
-
-      const dayCell = (day: CalendarDay, back: string | null) => {
-        const cell = document.createElement("td");
-        const note = day.reason === undefined ? (day.date === back ? labels.return : null) : labels[day.reason];
-        cell.textContent = String(Number(day.date.slice(8)));
-        cell.dataset.date = day.date;
-        cell.tabIndex = day.date === cursor ? 0 : -1;
-        cell.classList.toggle("is-outside", !day.inMonth);
-        cell.classList.toggle("is-return", day.date === back);
-        cell.setAttribute("aria-selected", String(day.date === selected));
-        cell.setAttribute("aria-label", note === null ? fullDate(day.date) : `${fullDate(day.date)} (${note})`);
-        if (day.reason !== undefined) {
-          cell.setAttribute("aria-disabled", "true");
-          cell.title = labels[day.reason];
-        }
-        return cell;
-      };
-
-      const focusCursor = () => weeks.querySelector<HTMLElement>('[tabindex="0"]')?.focus();
-
-      const render = () => {
-        // A missing or empty attribute reads as 0. Anything but a whole number of at least 1 has no return date.
-        const days = Number(this.getAttribute("package-days"));
-        const back = selected !== null && Number.isInteger(days) && days >= 1 ? returnDate(selected, days) : null;
-        const shown = cursor.slice(0, 7);
-        month.textContent = monthName(`${shown}-01`);
-        previous.disabled = shown <= min.slice(0, 7);
-        next.disabled = shown >= max.slice(0, 7);
-        weeks.replaceChildren(
-          ...gridOf(cursor).map((week) => {
-            const row = document.createElement("tr");
-            row.replaceChildren(...week.map((day) => dayCell(day, back)));
-            return row;
-          }),
-        );
-        hidden.value = selected ?? "";
-        summary.textContent = [
-          selected !== null ? `${labels.pickup}: ${fullDate(selected)}` : "",
-          back !== null ? `${labels.return}: ${fullDate(back)}` : "",
-        ]
-          .filter((line) => line !== "")
-          .join(" / ");
-      };
-
-      const select = (date: string) => {
-        selected = date;
-        cursor = date;
-        render();
-        focusCursor();
-        hidden.dispatchEvent(new Event("change", { bubbles: true }));
-      };
-
-      const turnMonth = (button: HTMLButtonElement, delta: number) => {
-        cursor = clamp(addMonths(cursor, delta));
-        render();
-        // A disabled button drops the focus it holds.
-        if (button.disabled) focusCursor();
-      };
-
-      previous.addEventListener("click", () => turnMonth(previous, -1));
-      next.addEventListener("click", () => turnMonth(next, 1));
-
-      weeks.addEventListener("click", (event) => {
-        const cell = (event.target as Element).closest<HTMLTableCellElement>("td");
-        if (cell !== null && !cell.hasAttribute("aria-disabled")) select(cell.dataset.date as string);
-      });
-
-      weeks.addEventListener("keydown", (event) => {
-        const cell = (event.target as Element).closest<HTMLTableCellElement>("td");
-        if (cell === null) return;
-        const date = cell.dataset.date as string;
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          if (!cell.hasAttribute("aria-disabled")) select(date);
-          return;
-        }
-        const move = MOVES[event.key];
-        if (move === undefined) return;
-        event.preventDefault();
-        cursor = clamp(move(date, cell.cellIndex));
-        render();
-        focusCursor();
-      });
-
-      weekdays.replaceChildren(
-        ...gridOf(cursor)[0].map((day) => {
-          const heading = document.createElement("th");
-          heading.scope = "col";
-          heading.abbr = longWeekday(day.date);
-          heading.textContent = shortWeekday(day.date);
-          return heading;
-        }),
-      );
-
-      fallback.disabled = true;
-      part<HTMLElement>("[data-fallback]").hidden = true;
-      hidden.disabled = false;
-      part<HTMLElement>("[data-calendar]").hidden = false;
-      this.refresh = render;
-      render();
-    }
-  }
-
-  customElements.define("date-picker", DatePicker);
-</script>
+<script src="../scripts/date-picker.ts"></script>
 
 <style is:global>
   /* Global, because the script builds the cells and scoped styles only reach the markup above. */
   date-picker {
     display: inline-block;
+    position: relative;
   }
   /* The theme's `label { display: block }` outranks the browser's own [hidden] rule. */
   date-picker [hidden] {
     display: none;
+  }
+  /* The field reads as its label and a control, like the selects beside it. */
+  .date-picker-label {
+    display: block;
+    margin-bottom: var(--space-1);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-strong);
+  }
+  date-picker button[data-field] {
+    min-height: var(--control-height);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border);
+    background: var(--color-background);
+    color: var(--color-text);
+    font-size: var(--font-size-base);
+    font-weight: normal;
+    text-align: start;
+  }
+  date-picker button[data-field]:hover {
+    background: var(--color-background);
+    color: var(--color-text);
   }
   .date-picker-head {
     display: flex;
     justify-content: space-between;
     align-items: center;
   }
+  /* The calendar opens over the page below the field. */
   date-picker [data-calendar] {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 10;
+    margin-top: var(--space-1);
     padding: var(--space-3);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-base);
+    background: var(--color-background);
+    box-shadow: var(--shadow-raised);
   }
   .date-picker-head button {
     padding: var(--space-1) var(--space-3);
