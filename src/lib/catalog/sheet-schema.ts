@@ -24,6 +24,12 @@ export type ValidBlock = {
 /** A Prices row left out for an error of its own, by its key and its sheet number. */
 export type SkippedPriceKey = { rateClassId: string; packageId: string; row: number };
 
+/** A Models row left out for an error of its own, by its id and its sheet number. */
+export type SkippedModelKey = { modelId: string; row: number };
+
+/** A Vehicles row left out for an error of its own, by its plate and its sheet number. */
+export type SkippedVehicleKey = { plate: string; row: number };
+
 /** A data row of the Blocks tab: its sheet number, its `block_id` as validated, and whether it made it into `blocks`. */
 export type BlockRow = { row: number; blockId: string; kept: boolean };
 
@@ -191,12 +197,16 @@ class Row {
   }
 
   uniqueSlug(column: string, seen: Set<string>): string {
+    return this.ownedSlug(column, seen).id;
+  }
+
+  /** The id, and whether this row owns it, as `unique` says. */
+  ownedSlug(column: string, seen: Set<string>): { id: string; owns: boolean } {
     const id = this.text(column);
     if (id.length > SLUG_MAX_LENGTH || !SLUG.test(id)) {
       this.error(`${column} ${show(id)} is not a slug: lower-case letters, digits and single hyphens, 40 at most`);
     }
-    this.unique(column, id, seen);
-    return id;
+    return { id, owns: this.unique(column, id, seen) };
   }
 
   /** A reference to a kept row of `tab`, so a row that points at a skipped row is skipped too. */
@@ -514,13 +524,23 @@ function readPhotos(row: Row): string[] {
     .filter((name) => name !== "");
 }
 
-function readModels(rows: Row[], typeIds: Set<string>, rateClassIds: Set<string>): Model[] {
+/**
+ * The models, and in `skipped` the id of each row left out for an error of its own: its type and rate class are both
+ * kept and the row owns its id. A reference to no kept row is not an error of its own, as for Prices (#135): a typo
+ * there reads the same as a skipped Types or RateClasses row. The publish may keep the stored model of those ids (#136).
+ */
+function readModels(
+  rows: Row[],
+  typeIds: Set<string>,
+  rateClassIds: Set<string>,
+): { models: Model[]; skipped: SkippedModelKey[] } {
   const seen = new Set<string>();
-  return keep(rows, (row) => {
-    const id = row.uniqueSlug("model_id", seen);
+  const skipped: SkippedModelKey[] = [];
+  const models = keep(rows, (row) => {
+    const { id, owns } = row.ownedSlug("model_id", seen);
     const typeId = row.known("type_id", typeIds, "Types") as VehicleTypeId;
     const engineCc = readEngineCc(row, typeId);
-    return {
+    const model = {
       id,
       typeId,
       engineCc,
@@ -533,22 +553,43 @@ function readModels(rows: Row[], typeIds: Set<string>, rateClassIds: Set<string>
       texts: row.texts(["name", "summary", "description"]),
       photos: readPhotos(row),
     };
+    const referencesKept = typeIds.has(typeId) && rateClassIds.has(model.rateClassId);
+    if (!row.ok && referencesKept && owns) skipped.push({ modelId: id, row: row.sheetRow });
+    return model;
   });
+  return { models, skipped };
 }
 
-function readVehicles(rows: Row[], modelIds: Set<string>): Vehicle[] {
+/**
+ * The vehicles, and in `skipped` the plate of each row left out for an error of its own: its model is in `modelIds` or
+ * `listedModelIds`, those readModels lists, whose stored model the publish may keep, and the row owns its plate. The
+ * publish may keep the stored vehicle of those plates (#136).
+ */
+function readVehicles(
+  rows: Row[],
+  modelIds: Set<string>,
+  listedModelIds: Set<string>,
+): { vehicles: Vehicle[]; skipped: SkippedVehicleKey[] } {
   const seen = new Set<string>();
-  return keep(rows, (row) => {
+  const skipped: SkippedVehicleKey[] = [];
+  const vehicles = keep(rows, (row) => {
     const plate = row.required("plate");
-    row.unique("plate", plate, seen);
-    return {
+    const owns = row.unique("plate", plate, seen);
+    const vehicle = {
       plate,
       modelId: row.known("model_id", modelIds, "Models"),
       status: row.oneOf("status", VEHICLE_STATUSES),
       odometerKm: row.blank("odometer_km") ? null : row.whole("odometer_km"),
       baseUsageDays: row.blank("base_usage_days") ? 0 : row.whole("base_usage_days"),
     };
+    // `known` recorded one error for a model not in `modelIds`, which is not the row's own.
+    const modelSkipped = !modelIds.has(vehicle.modelId);
+    const ownError = row.statuses.filter(({ level }) => level === "error").length > (modelSkipped ? 1 : 0);
+    const modelKept = !modelSkipped || listedModelIds.has(vehicle.modelId);
+    if (ownError && modelKept && owns) skipped.push({ plate, row: row.sheetRow });
+    return vehicle;
   });
+  return { vehicles, skipped };
 }
 
 function readOptions(rows: Row[]): Option[] {
@@ -600,18 +641,30 @@ function plausibleDates(now: number): DateWindow {
  * same reason, but Config is still read so that `fatal` lists all that is wrong. A bad Config row leaves the catalog
  * null and the other tabs checked. `statuses` numbers rows as the sheet does. A ClosedDates row more than 2 years before
  * or after the JST date of `now` (epoch ms, the publish time) is an error and its date is left out: a date typed as
- * digits, such as 260105, is a serial far in the future. The rest of the catalog still publishes. `skippedPriceKeys`
- * lists the Prices rows left out for an error of their own, as readPrices says, so the publish can keep their prices.
+ * digits, such as 260105, is a serial far in the future. The rest of the catalog still publishes. `skippedPriceKeys`,
+ * `skippedModelKeys` and `skippedVehicleKeys` list the Prices, Models and Vehicles rows left out for an error of their
+ * own, as readPrices, readModels and readVehicles say, so the publish can keep what the site has for them. Those rows
+ * stay errors and stay out of `catalog`. `keptModelIds` names the models the publish keeps for such rows (#136): a
+ * Vehicles row may name one as it would a model in `catalog`, though a kept model is not in it.
  */
 export function validateCatalog(
   raw: Workbook,
   now: number,
-): { catalog: Catalog | null; statuses: RowStatus[]; fatal: string[]; skippedPriceKeys: SkippedPriceKey[] } {
+  keptModelIds: ReadonlySet<string> = new Set(),
+): {
+  catalog: Catalog | null;
+  statuses: RowStatus[];
+  fatal: string[];
+  skippedPriceKeys: SkippedPriceKey[];
+  skippedModelKeys: SkippedModelKey[];
+  skippedVehicleKeys: SkippedVehicleKey[];
+} {
   const fatal: string[] = [];
   const tabs = Object.fromEntries(CATALOG_TABS.map((tab) => [tab, readTab(raw, tab, fatal)]));
   const config = tabs.Config && readConfig(tabs.Config, fatal);
   if (Object.values(tabs).includes(null)) {
-    return { catalog: null, statuses: statusesOf(tabs.Config ?? []), fatal, skippedPriceKeys: [] };
+    const skipped = { skippedPriceKeys: [], skippedModelKeys: [], skippedVehicleKeys: [] };
+    return { catalog: null, statuses: statusesOf(tabs.Config ?? []), fatal, ...skipped };
   }
 
   const rows = tabs as Record<string, Row[]>;
@@ -619,8 +672,10 @@ export function validateCatalog(
   const rateClasses = readRateClasses(rows.RateClasses);
   const packages = readPackages(rows.Packages);
   const { prices, skipped: skippedPriceKeys } = readPrices(rows.Prices, idsOf(rateClasses), idsOf(packages));
-  const models = readModels(rows.Models, idsOf(vehicleTypes), idsOf(rateClasses));
-  const vehicles = readVehicles(rows.Vehicles, idsOf(models));
+  const { models, skipped: skippedModelKeys } = readModels(rows.Models, idsOf(vehicleTypes), idsOf(rateClasses));
+  const modelIds = new Set([...idsOf(models), ...keptModelIds]);
+  const listedModelIds = new Set(skippedModelKeys.map(({ modelId }) => modelId));
+  const { vehicles, skipped: skippedVehicleKeys } = readVehicles(rows.Vehicles, modelIds, listedModelIds);
   const options = readOptions(rows.Options);
   const cancellationTiers = readCancellation(rows.Cancellation);
   const closedDates = readClosedDates(rows.ClosedDates, plausibleDates(now));
@@ -631,6 +686,8 @@ export function validateCatalog(
     statuses: CATALOG_TABS.flatMap((tab) => statusesOf(rows[tab])),
     fatal,
     skippedPriceKeys,
+    skippedModelKeys,
+    skippedVehicleKeys,
   };
 }
 
