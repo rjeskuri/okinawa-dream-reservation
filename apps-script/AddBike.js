@@ -69,6 +69,8 @@ function addBikeSave(draft) {
       for (const tab of Object.keys(built.rows)) {
         for (const cells of built.rows[tab]) written.push({ tab, row: appendRecord_(tab, cells) });
       }
+      // Publish reads the sheet through the Sheets API from the Worker, which does not see writes Apps Script still holds.
+      SpreadsheetApp.flush();
     } catch (error) {
       return {
         ok: false,

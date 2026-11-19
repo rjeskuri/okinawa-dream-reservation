@@ -456,8 +456,9 @@ test("addBikeSave writes the vehicle row under its headers, publishes and answer
     const result = plain(script.call("addBikeSave", draft));
 
     assert.equal(result?.ok, true, `${label}: ${JSON.stringify(result)}`);
-    assert.deepEqual(result.written, [{ tab: "Vehicles", row, status }], `${label}: the row and its status after Publish`);
+    // The Worker reads through the Sheets API, which sees a write only once Apps Script has applied it.
     assert.ok(publishSawRow, `${label}: the row was in the sheet when Publish ran`);
+    assert.deepEqual(result.written, [{ tab: "Vehicles", row, status }], `${label}: the row and its status after Publish`);
 
     // The row, under each header wherever its column is; the staff column stays empty.
     const written = sheetRow(script, "Vehicles", row);
@@ -603,10 +604,11 @@ test("a Publish that fails after the write is reported with the written rows, no
   ];
   for (const { label, publish, routes, status, shows } of cases) {
     let script: AppsScriptWorld | undefined;
+    let publishSawRow = false;
     const publishRoute: Route =
       publish === "writes"
         ? () => {
-            writeStatus(script as AppsScriptWorld, draft.vehicle.plate, status);
+            publishSawRow = writeStatus(script as AppsScriptWorld, draft.vehicle.plate, status);
             return { body: REPORT };
           }
         : (routes[PUBLISH] as Route);
@@ -619,6 +621,7 @@ test("a Publish that fails after the write is reported with the written rows, no
     }, label);
 
     // The row stays written, and the answer says so with its status as the sheet holds it.
+    if (publish === "writes") assert.ok(publishSawRow, `${label}: the row was in the sheet when Publish ran`);
     assert.deepEqual(result?.written, [{ tab: "Vehicles", row, status }], `${label}: ${JSON.stringify(result)}`);
     const expected = { ...expectedVehicle(draft), publish_status: status };
     assert.deepEqual(asText(sheetRow(script, "Vehicles", row), Object.keys(expected)), expected, `${label}: the row`);
