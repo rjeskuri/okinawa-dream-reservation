@@ -11,7 +11,7 @@ const PANEL_HEIGHT_ = 640;
  * The `{ label, fn }` actions the menu, the home and the Dashboard tab list, in order. Each panel adds its line here,
  * and `fn` is a global function that opens it with openPanel_. Read at call time, so file load order never matters.
  */
-const DASHBOARD_ACTIONS_ = [];
+const DASHBOARD_ACTIONS_ = [{ label: "Add a bike", fn: "openAddBike" }];
 
 function openDashboard() {
   SpreadsheetApp.getUi().showSidebar(panelHtml_("Dashboard").setTitle(DASHBOARD_TITLE_));
