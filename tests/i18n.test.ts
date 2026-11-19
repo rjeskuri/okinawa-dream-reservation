@@ -4,10 +4,12 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync } from "node:fs";
 import { test } from "node:test";
 import { fallbackOrder, htmlLang, localePath, negotiateLocale } from "../src/i18n/locales.ts";
+import { calendar } from "../src/i18n/strings/calendar.ts";
 import { model } from "../src/i18n/strings/model.ts";
 import { rentals } from "../src/i18n/strings/rentals.ts";
 import { t } from "../src/i18n/t.ts";
 import { isLocale, LOCALES, type Locale } from "../src/lib/locale.ts";
+import { FIELD_PLACEHOLDERS } from "./helpers/return-summary.ts";
 
 test("negotiateLocale picks the best supported language", () => {
   const table: [string | null, Locale][] = [
@@ -296,6 +298,20 @@ test("every string key exists in all four locales", async () => {
     }
   }
   assert.deepEqual(problems, []);
+});
+
+// #137: the date field's strings, each with exactly the placeholders tests/helpers/return-summary.ts fills for its kind,
+// so a locale that drops the return day or the closing time shows.
+test("the date field's strings exist in all four locales with their placeholders", () => {
+  for (const [key, placeholders] of Object.entries(FIELD_PLACEHOLDERS)) {
+    for (const locale of LOCALES) {
+      const text = calendar[key]?.[locale];
+      assert.ok(typeof text === "string" && text.trim() !== "", `calendar.ts: ${key} has no ${locale} text`);
+      const found = [...text.matchAll(/\{(\w+)\}/g)].map((match) => match[1]).sort();
+      assert.deepEqual(found, placeholders, `calendar.ts: the placeholders of ${key} in ${locale}: ${JSON.stringify(text)}`);
+      assert.ok(!/[{}]/.test(text.replace(/\{\w+\}/g, "")), `calendar.ts: a stray brace in ${key} in ${locale}`);
+    }
+  }
 });
 
 /** Every reason pickupWindowError gives. RETURN_OUTSIDE_HOURS is #50's: an hours package back after closing time. */

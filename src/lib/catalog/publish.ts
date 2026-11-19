@@ -1,10 +1,14 @@
 // One Publish: reads the catalog tabs, checks them, replaces the catalog in D1 and writes each row's status back to the
-// sheet, in that order. A bad row is left out and reported, and a fatal sheet stops before anything changes. It makes
-// one batchGet, one D1 batch and one batchUpdate, because this runs with 10 ms of CPU. docs/sheet-schema.md is the
-// staff's view of the statuses. Nothing here reads `env`.
-import { replaceCatalog, type AffectedBooking } from "../db/catalog-store.ts";
+// sheet, in that order. A bad row is left out and reported, and a fatal sheet stops before anything changes, but a bad
+// Prices row keeps the price the site has (#135). It makes one batchGet, one D1 batch and one batchUpdate, plus one D1
+// read when a Prices row is bad, because this runs with 10 ms of CPU. docs/sheet-schema.md is the staff's view of the
+// statuses. Nothing here reads `env`.
+import { readPrices, replaceCatalog, type AffectedBooking } from "../db/catalog-store.ts";
 import type { SheetsClient } from "../google/sheets.ts";
-import { CATALOG_TABS, headerKey, STATUS, validateCatalog, type RowStatus } from "./sheet-schema.ts";
+import type { Price } from "../types.ts";
+import {
+  CATALOG_TABS, headerKey, STATUS, validateCatalog, type RowStatus, type SkippedPriceKey,
+} from "./sheet-schema.ts";
 
 type PublishDeps = { db: D1Database; sheets: SheetsClient; now: number };
 
@@ -89,6 +93,24 @@ function statusWrites(workbook: Record<string, unknown[][]>, rows: RowResult[]) 
   });
 }
 
+const yen = (jpy: number): string => jpy.toLocaleString("en-US");
+
+/**
+ * What the site does for each Prices row skipped for an error of its own, by sheet row: it keeps the stored price and
+ * advance price unchanged (#135), or, with none stored, the package cannot be booked on that rate class.
+ */
+function keptPriceNotes(skipped: SkippedPriceKey[], kept: Price[]): Map<number, string> {
+  const keptByKey = new Map(kept.map((price) => [`${price.rateClassId}/${price.packageId}`, price]));
+  return new Map(
+    skipped.map(({ rateClassId, packageId, row }) => {
+      const price = keptByKey.get(`${rateClassId}/${packageId}`);
+      if (price === undefined) return [row, "there is no published price to keep, so this package is not bookable"];
+      const advance = price.advancePriceJpy === null ? "" : ` and advance price ${yen(price.advancePriceJpy)}`;
+      return [row, `the site keeps the last published price ${yen(price.priceJpy)}${advance}`];
+    }),
+  );
+}
+
 /**
  * Rejects with a PublishError on a failure, because a report answers 200. The writes are built before the commit, so
  * only the write itself can fail after `store`, and a failure anywhere else leaves the catalog alone.
@@ -96,14 +118,21 @@ function statusWrites(workbook: Record<string, unknown[][]>, rows: RowResult[]) 
 export async function publishCatalog({ db, sheets, now }: PublishDeps): Promise<PublishReport> {
   const workbook = await step("read", () => sheets.batchGet([...CATALOG_TABS]));
 
-  const { catalog, statuses, fatal } = validateCatalog(workbook, now);
+  const { catalog, statuses, fatal, skippedPriceKeys } = validateCatalog(workbook, now);
   if (catalog === null || fatal.length > 0) {
     return { ok: false, counts: { ok: 0, warning: 0, error: 0 }, fatal, affectedBookings: [] };
   }
-  const rows = rowResults(statuses);
+  // A D1 failure here has changed nothing, as at `store`.
+  const kept = skippedPriceKeys.length === 0 ? [] : await step("store", () => readPrices(db, skippedPriceKeys));
+  const notes = keptPriceNotes(skippedPriceKeys, kept);
+  const rows = rowResults(statuses).map((row) => {
+    const note = row.tab === "Prices" ? notes.get(row.row) : undefined;
+    return note === undefined ? row : { ...row, cell: `${row.cell}; ${note}` };
+  });
   const writes = statusWrites(workbook, rows);
 
-  const stored = await step("store", () => replaceCatalog(db, catalog, { now, source: "sheet" }));
+  const published = { ...catalog, prices: [...catalog.prices, ...kept] };
+  const stored = await step("store", () => replaceCatalog(db, published, { now, source: "sheet" }));
   await step("write-back", () => sheets.batchUpdate(writes));
 
   const { version, affectedBookings } = stored;
