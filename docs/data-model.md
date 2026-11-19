@@ -58,7 +58,7 @@ publish is not `active`.
 | Table | Holds |
 | --- | --- |
 | `bookings` | One rental of one vehicle. `web` bookings come from guests. `block` bookings come from the sheet's OTA blocks, with `external_ref` unique among them. |
-| `refunds` | Square refunds of a booking, from a guest's `cancel` or the Square `dashboard`. |
+| `refunds` | Square refunds of a booking, from a guest's or staff's `cancel` or the Square `dashboard`. |
 | `outbox` | Emails and sheet updates waiting to be sent, each unique by `dedupe_key`. |
 | `webhook_events` | Square events already handled, by event id. |
 | `photos` | Vehicle photos copied from Drive to R2. |
@@ -80,7 +80,12 @@ The main path is `ON_HOLD -> PAYMENT_PENDING -> CONFIRMED -> CANCELLED`:
 
 - `ON_HOLD -> PAYMENT_PENDING`: the guest submits payment while the hold is unexpired.
 - `PAYMENT_PENDING -> CONFIRMED`: Square reports the payment completed for the right amount.
-- `CONFIRMED -> CANCELLED`: the guest cancels from the email link, or a block leaves the sheet.
+- `CONFIRMED -> CANCELLED`: the guest cancels from the email link, staff cancel a web booking from the Dashboard, or a
+  block leaves the sheet. `cancel_reason` is `guest` or `staff`. The guest's link closes at pickup; staff can also cancel
+  a no-show, at the tier for 0 days before. Staff choose the tier refund, all that was paid less earlier refunds, or none,
+  and `refund_due_jpy` records the total refund they settled on: the refunds before it plus this one. It stays NULL on a
+  guest's cancellation, a block and any booking staff did not cancel. Both cancellations land in one batch under the same
+  guard and refund key `rf:<id>`, and call Square only after it.
 
 The other paths:
 

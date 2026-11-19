@@ -105,6 +105,8 @@ const TABLES: Record<string, string[]> = {
     "updated_at INTEGER NOT NULL",
     "confirmed_at INTEGER",
     "cancelled_at INTEGER",
+    // #145: the total refund a staff cancellation settled on. NULL for a guest cancellation, a block, and anything else.
+    "refund_due_jpy INTEGER",
   ],
   refunds: [
     "id TEXT PRIMARY KEY",
@@ -364,6 +366,8 @@ const CHILD_CASES: ConstraintCase[] = [
   // stays valid, because a block booking carries no price.
   column("bookings", "price_jpy", [-1, -12000], [0, 1, null]),
   column("bookings", "deposit_jpy", [-1, -5000], [0, 1, null]),
+  // #145: no refund at all is 0, and NULL is no staff cancellation.
+  column("bookings", "refund_due_jpy", [-1, -5000], [0, 1, 5000, null]),
   column("bookings", "end_at", [START, START - 1, START - 86_400_000], [START + 1, END]),
   column("bookings", "ref", [TAKEN_REF], ["FREE-REF"], "UNIQUE"),
   // A package can leave the catalog while bookings of it remain, so this column is deliberately not a foreign key.
@@ -1040,6 +1044,7 @@ const MONEY_COLUMNS: TypedColumn[] = [
   { table: "bookings", column: "price_jpy", valid: 12000 },
   { table: "bookings", column: "deposit_jpy", valid: 5000 },
   { table: "bookings", column: "paid_jpy", valid: 5000 },
+  { table: "bookings", column: "refund_due_jpy", valid: 5000 },
   { table: "refunds", column: "amount_jpy", valid: 1000 },
 ];
 

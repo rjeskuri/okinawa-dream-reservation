@@ -127,6 +127,8 @@ CREATE TABLE bookings (
   updated_at INTEGER NOT NULL,
   confirmed_at INTEGER,
   cancelled_at INTEGER,
+  -- The total refund a staff cancellation settled on (#145): the refunds before it plus its own. NULL on any other booking.
+  refund_due_jpy INTEGER CHECK (refund_due_jpy >= 0),
   CHECK (end_at > start_at)
 ) STRICT;
 
