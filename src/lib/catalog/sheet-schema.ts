@@ -21,6 +21,9 @@ export type ValidBlock = {
   note: string;
 };
 
+/** A Prices row left out for an error of its own, by its key and its sheet number. */
+export type SkippedPriceKey = { rateClassId: string; packageId: string; row: number };
+
 /** A data row of the Blocks tab: its sheet number, its `block_id` as validated, and whether it made it into `blocks`. */
 export type BlockRow = { row: number; blockId: string; kept: boolean };
 
@@ -425,15 +428,28 @@ function readPackages(rows: Row[]): Package[] {
   }));
 }
 
-function readPrices(rows: Row[], rateClassIds: Set<string>, packageIds: Set<string>): Price[] {
+/**
+ * The prices, and in `skipped` the key of each row left out for an error of its own: its rate class and package are both
+ * kept and the row owns its key, so no other row publishes one. The publish keeps the stored price of those keys (#135).
+ */
+function readPrices(
+  rows: Row[],
+  rateClassIds: Set<string>,
+  packageIds: Set<string>,
+): { prices: Price[]; skipped: SkippedPriceKey[] } {
   const seen = new Set<string>();
-  return keep(rows, (row) => {
+  const skipped: SkippedPriceKey[] = [];
+  const prices = keep(rows, (row) => {
     const rateClassId = row.known("rate_class_id", rateClassIds, "RateClasses");
     const packageId = row.known("package_id", packageIds, "Packages");
-    row.unique("rate_class_id and package_id", `${rateClassId}/${packageId}`, seen);
+    const referencesKept = row.ok;
+    const ownsKey = row.unique("rate_class_id and package_id", `${rateClassId}/${packageId}`, seen);
     const priceJpy = row.money("price_jpy", 1);
-    return { rateClassId, packageId, priceJpy, advancePriceJpy: readAdvancePrice(row, priceJpy) };
+    const advancePriceJpy = readAdvancePrice(row, priceJpy);
+    if (!row.ok && referencesKept && ownsKey) skipped.push({ rateClassId, packageId, row: row.sheetRow });
+    return { rateClassId, packageId, priceJpy, advancePriceJpy };
   });
+  return { prices, skipped };
 }
 
 /**
@@ -584,19 +600,25 @@ function plausibleDates(now: number): DateWindow {
  * same reason, but Config is still read so that `fatal` lists all that is wrong. A bad Config row leaves the catalog
  * null and the other tabs checked. `statuses` numbers rows as the sheet does. A ClosedDates row more than 2 years before
  * or after the JST date of `now` (epoch ms, the publish time) is an error and its date is left out: a date typed as
- * digits, such as 260105, is a serial far in the future. The rest of the catalog still publishes.
+ * digits, such as 260105, is a serial far in the future. The rest of the catalog still publishes. `skippedPriceKeys`
+ * lists the Prices rows left out for an error of their own, as readPrices says, so the publish can keep their prices.
  */
-export function validateCatalog(raw: Workbook, now: number): { catalog: Catalog | null; statuses: RowStatus[]; fatal: string[] } {
+export function validateCatalog(
+  raw: Workbook,
+  now: number,
+): { catalog: Catalog | null; statuses: RowStatus[]; fatal: string[]; skippedPriceKeys: SkippedPriceKey[] } {
   const fatal: string[] = [];
   const tabs = Object.fromEntries(CATALOG_TABS.map((tab) => [tab, readTab(raw, tab, fatal)]));
   const config = tabs.Config && readConfig(tabs.Config, fatal);
-  if (Object.values(tabs).includes(null)) return { catalog: null, statuses: statusesOf(tabs.Config ?? []), fatal };
+  if (Object.values(tabs).includes(null)) {
+    return { catalog: null, statuses: statusesOf(tabs.Config ?? []), fatal, skippedPriceKeys: [] };
+  }
 
   const rows = tabs as Record<string, Row[]>;
   const vehicleTypes = readTypes(rows.Types);
   const rateClasses = readRateClasses(rows.RateClasses);
   const packages = readPackages(rows.Packages);
-  const prices = readPrices(rows.Prices, idsOf(rateClasses), idsOf(packages));
+  const { prices, skipped: skippedPriceKeys } = readPrices(rows.Prices, idsOf(rateClasses), idsOf(packages));
   const models = readModels(rows.Models, idsOf(vehicleTypes), idsOf(rateClasses));
   const vehicles = readVehicles(rows.Vehicles, idsOf(models));
   const options = readOptions(rows.Options);
@@ -608,6 +630,7 @@ export function validateCatalog(raw: Workbook, now: number): { catalog: Catalog 
     },
     statuses: CATALOG_TABS.flatMap((tab) => statusesOf(rows[tab])),
     fatal,
+    skippedPriceKeys,
   };
 }
 
