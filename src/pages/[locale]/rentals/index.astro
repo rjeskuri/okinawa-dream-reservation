@@ -78,7 +78,8 @@ const listing = catalog && (await list(catalog));
             max={addDaysToDate(jstToday(now), catalog.config.maxDaysAhead)}
             closedDates={catalog.closedDates}
             value={listing.search.date}
-            packageDays={listing.pkg && packageDays(listing.pkg)}
+            pkg={listing.pkg}
+            shopClose={catalog.config.shopClose}
           />
           <label>
             {t(locale, rentals, "rentals.form.time")}
@@ -96,7 +97,12 @@ const listing = catalog && (await list(catalog));
             <select name="package">
               <option value="">{t(locale, rentals, "rentals.form.any")}</option>
               {catalog.packages.map((pkg) => (
-                <option value={pkg.id} data-days={packageDays(pkg)} selected={pkg.id === listing.pkg?.id}>
+                <option
+                  value={pkg.id}
+                  data-days={packageDays(pkg)}
+                  data-hours={pkg.hours ?? undefined}
+                  selected={pkg.id === listing.pkg?.id}
+                >
                   {sheetName(pkg.texts, locale)}
                 </option>
               ))}
@@ -174,7 +180,10 @@ const listing = catalog && (await list(catalog));
     const select = event.target as HTMLSelectElement;
     if (select.name === "type" && engine) engine.hidden = BANDLESS_TYPES.includes(select.value);
     if (select.name === "package") {
-      const days = select.selectedOptions[0]?.dataset.days;
+      // The date field reads the package's pickup and return (#137): an hours package by its hours, any by neither.
+      const { days, hours } = select.selectedOptions[0]?.dataset ?? {};
+      if (hours === undefined) picker?.removeAttribute("package-hours");
+      else picker?.setAttribute("package-hours", hours);
       if (days === undefined) picker?.removeAttribute("package-days");
       else picker?.setAttribute("package-days", days);
     }

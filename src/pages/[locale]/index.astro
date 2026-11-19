@@ -61,6 +61,7 @@ const now = Date.now();
             min={epochToJst(now + catalog.config.minLeadHours * HOUR_MS).date}
             max={addDaysToDate(jstToday(now), catalog.config.maxDaysAhead)}
             closedDates={catalog.closedDates}
+            shopClose={catalog.config.shopClose}
           />
           <label>
             {t(locale, pages, "home.search.time")}
