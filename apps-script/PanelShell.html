@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<base target="_top">
+<style>
+  body { margin: 0; padding: 12px 16px; font: 14px/1.4 Arial, sans-serif; color: #202124; background: #fff; }
+  body.panel-busy { cursor: progress; }
+  [hidden] { display: none !important; }
+  h1 { margin: 0 0 12px; font-size: 18px; }
+  h2 { margin: 0 0 8px; font-size: 15px; }
+  label { display: block; margin: 10px 0 4px; font-weight: bold; }
+  input, select, textarea { box-sizing: border-box; width: 100%; padding: 6px; font: inherit; }
+  button { padding: 6px 14px; font: inherit; border: 1px solid #dadce0; border-radius: 4px; background: #fff; cursor: pointer; }
+  button.primary { border-color: #1a73e8; background: #1a73e8; color: #fff; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .panel-error { margin: 0 0 12px; padding: 8px 12px; border: 1px solid #d93025; border-radius: 4px; background: #fce8e6; color: #a50e0e; white-space: pre-wrap; }
+  .panel-status { margin: 0 0 12px; color: #5f6368; }
+  .panel-nav { display: flex; justify-content: space-between; gap: 8px; margin-top: 16px; }
+</style>
+<div id="panel-error" class="panel-error" role="alert" hidden></div>
+<p id="panel-status" class="panel-status" aria-live="polite" hidden>Working…</p>
+<script>
+  // Shared by every panel: server calls, the steps, the busy state and the error box. Panels show guest names and
+  // booking data, so text goes on the page with textContent only.
+  //
+  // Steps are the elements with a data-step name, in page order; data-next renames the Next button on that step. The
+  // last step is where the result shows, with no Back or Next, so an action that ran cannot be sent twice. Put the
+  // action in the onNext handler of the step before it.
+
+  const panelSteps = [];
+  const panelNextHandlers = {};
+  let panelStep = 0;
+  let panelBusyCount = 0;
+  let panelBack = null;
+  let panelNext = null;
+
+  /** Calls a global server function through google.script.run. Every button stays disabled until it answers. */
+  function callServer(name, arg) {
+    setBusy(true);
+    return new Promise((resolve, reject) => {
+      const runner = google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler((error) => reject(error instanceof Error ? error : new Error(String(error))));
+      if (arg === undefined) runner[name]();
+      else runner[name](arg);
+    }).finally(() => setBusy(false));
+  }
+
+  /** Busy disables every button. A button the panel had disabled itself stays disabled afterwards. */
+  function setBusy(busy) {
+    panelBusyCount = Math.max(0, panelBusyCount + (busy ? 1 : -1));
+    const on = panelBusyCount > 0;
+    document.body.classList.toggle("panel-busy", on);
+    document.body.setAttribute("aria-busy", String(on));
+    document.getElementById("panel-status").hidden = !on;
+    for (const button of document.querySelectorAll("button")) {
+      if (on && !button.disabled) {
+        button.disabled = true;
+        button.dataset.busyDisabled = "true";
+      } else if (!on && button.dataset.busyDisabled === "true") {
+        button.disabled = false;
+        delete button.dataset.busyDisabled;
+      }
+    }
+  }
+
+  function showError(error) {
+    const box = document.getElementById("panel-error");
+    box.textContent = typeof error === "string" ? error : (error && error.message) || String(error);
+    box.hidden = false;
+  }
+
+  function clearError() {
+    const box = document.getElementById("panel-error");
+    box.textContent = "";
+    box.hidden = true;
+  }
+
+  /**
+   * Runs when Next is pressed on that step, and may answer a Promise. It answers false to stay, a step name to go
+   * there, or anything else for the next step. What it throws or rejects with shows in the error box.
+   */
+  function onNext(step, handler) {
+    panelNextHandlers[step] = handler;
+  }
+
+  function showStep(step) {
+    const index = typeof step === "number" ? step : panelSteps.findIndex((section) => section.dataset.step === step);
+    if (index < 0 || index >= panelSteps.length) throw new Error(`This panel has no step ${step}`);
+    panelStep = index;
+    panelSteps.forEach((section, i) => {
+      section.hidden = i !== index;
+    });
+    clearError();
+    const last = index === panelSteps.length - 1;
+    panelBack.hidden = index === 0 || last;
+    panelNext.hidden = last;
+    panelNext.textContent = panelSteps[index].dataset.next || "Next";
+  }
+
+  function nextStep() {
+    const handler = panelNextHandlers[panelSteps[panelStep].dataset.step];
+    clearError();
+    setBusy(true);
+    return Promise.resolve()
+      .then(() => (handler ? handler() : true))
+      .finally(() => setBusy(false))
+      .then((answer) => {
+        if (answer !== false) showStep(typeof answer === "string" ? answer : panelStep + 1);
+      })
+      .catch(showError);
+  }
+
+  function backStep() {
+    if (panelStep > 0) showStep(panelStep - 1);
+  }
+
+  function panelButton(text, onClick) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = text;
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    panelSteps.push(...document.querySelectorAll("[data-step]"));
+    if (panelSteps.length === 0) return;
+    panelBack = panelButton("Back", backStep);
+    panelNext = panelButton("Next", nextStep);
+    panelNext.classList.add("primary");
+    const nav = document.createElement("div");
+    nav.className = "panel-nav";
+    nav.append(panelBack, panelNext);
+    panelSteps[panelSteps.length - 1].after(nav);
+    showStep(0);
+  });
+</script>
