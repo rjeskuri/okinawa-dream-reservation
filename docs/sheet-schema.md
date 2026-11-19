@@ -340,7 +340,7 @@ those rows. Each move is queued for the Worker's own update of the tab, which wr
 | Column | Holds |
 | --- | --- |
 | `booking_ref`, `booking_id` | The booking's reference and internal id |
-| `status`, `source` | The booking's status, and `web` or `block` |
+| `status`, `source` | The booking's status, and `web`, `block` or `staff` |
 | `model_id`, `plate` | The model and the assigned vehicle |
 | `override_plate` | **Staff:** the plate to move the booking to |
 | `override_status` | The result of the last override |

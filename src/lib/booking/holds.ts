@@ -8,18 +8,23 @@ import { isLocale } from "../locale.ts";
 import type { Locale } from "../locale.ts";
 import { bookedAhead } from "../pricing.ts";
 import { JST_OFFSET_MS, jstToday } from "../time.ts";
-import type { Booking, BookingSource, BookingStatus, PackageLength } from "../types.ts";
+import type { Booking, BookingSource, BookingStatus, PackageLength, ShopConfig } from "../types.ts";
 import { pickupWindowError } from "./pickup-window.ts";
-import type { PickupWindowReason } from "./pickup-window.ts";
+import type { PickupWindowReason, TooSoonRule } from "./pickup-window.ts";
 
 export type HoldInput = { id: string; modelId: string; packageId: string; startAt: number; locale: Locale };
 
 export type HoldReason = "SOLD_OUT" | "UNKNOWN_MODEL" | "UNKNOWN_PACKAGE" | "NO_PRICE" | "CONFLICT" | PickupWindowReason;
 
-export type HoldResult = { ok: true; booking: Booking } | { ok: false; reason: HoldReason };
+export type HoldRefusal = { ok: false; reason: HoldReason };
+
+export type HoldResult = { ok: true; booking: Booking } | HoldRefusal;
+
+/** A rental that passed every check before a bike is taken for it. */
+export type Rental = { startAt: number; endAt: number; bufMs: number; config: ShopConfig };
 
 /** A row of `bookings` as `SELECT *` gives it. */
-type BookingRow = {
+export type BookingRow = {
   id: string;
   ref: string;
   status: BookingStatus;
@@ -60,8 +65,8 @@ const LAST_DATE = "9999-12-31";
 /** Longer than any id the site makes, so a guest's megabyte string stops here and never meets D1's limit on a value. */
 const MAX_KEY_LENGTH = 200;
 
-/** How many refs one hold tries. */
-const REF_ATTEMPTS = 2;
+/** How many refs one hold, or one staff booking, tries. */
+export const REF_ATTEMPTS = 2;
 
 /** The number of the JST date of an epoch ms column, by SQLite's integer division. */
 function jstDaySql(column: string): string {
@@ -92,6 +97,14 @@ export const assignFreeVehicleSql = `SELECT v.plate FROM vehicles v
   LIMIT 1`;
 
 /**
+ * The price a booking locks from price row `p`: its advance price where it has one and the parameter `ahead` is 1, because
+ * the booking is made before the pickup's JST date (#131), and its regular price otherwise.
+ */
+export function lockedPriceSql(ahead: string): string {
+  return `CASE WHEN ${ahead} = 1 AND p.advance_price_jpy IS NOT NULL THEN p.advance_price_jpy ELSE p.price_jpy END`;
+}
+
+/**
  * The hold. Prices and the type join through the model here, not through keys read earlier, because a publish can move
  * them between that read and this statement. ?11 is 1 when the hold is booked ahead of the pickup's JST date (#131), and
  * then the row's advance price is locked where it has one: the row's prices are read here too, for the same reason. A taken
@@ -101,7 +114,7 @@ const HOLD_SQL = `WITH q(s, e, buf, now, model) AS (SELECT ?1, ?2, ?3, ?4, ?5)
   INSERT INTO bookings (id, ref, status, source, model_id, package_id, vehicle_plate, start_at, end_at, expires_at,
     price_jpy, deposit_jpy, catalog_version, locale, created_at, updated_at)
   SELECT ?6, ?7, 'ON_HOLD', 'web', m.id, p.package_id, v.plate, ?1, ?2, ?8,
-    CASE WHEN ?11 = 1 AND p.advance_price_jpy IS NOT NULL THEN p.advance_price_jpy ELSE p.price_jpy END,
+    ${lockedPriceSql("?11")},
     t.deposit_jpy, c.version, ?9, ?4, ?4
   FROM vehicles v
   JOIN models m ON m.id = v.model_id
@@ -127,15 +140,15 @@ type CatalogRow = {
   price: number | null;
 };
 
-function isKey(x: unknown): x is string {
+export function isKey(x: unknown): x is string {
   return typeof x === "string" && x.length > 0 && x.length <= MAX_KEY_LENGTH;
 }
 
-function refuse(reason: HoldReason): HoldResult {
+function refuse(reason: HoldReason): HoldRefusal {
   return { ok: false, reason };
 }
 
-function toBooking(row: BookingRow): Booking {
+export function toBooking(row: BookingRow): Booking {
   return {
     id: row.id,
     ref: row.ref,
@@ -176,6 +189,47 @@ export async function getBooking(db: D1Database, id: string): Promise<Booking | 
 }
 
 /**
+ * The checks a hold and a staff booking share before either takes a bike, in this order: the model on sale, the package, a
+ * price for the two, and the pickup window, whose TOO_SOON follows `tooSoon`. The three values come from a request body, so
+ * nothing about them is taken from their type.
+ */
+export async function checkRental(
+  db: D1Database,
+  modelId: unknown,
+  packageId: unknown,
+  startAt: unknown,
+  now: number,
+  tooSoon: TooSoonRule,
+): Promise<{ ok: true; rental: Rental } | HoldRefusal> {
+  if (!isKey(modelId)) return refuse("UNKNOWN_MODEL");
+  if (!isKey(packageId)) return refuse("UNKNOWN_PACKAGE");
+  const catalog = await db
+    .prepare(CATALOG_SQL)
+    .bind(modelId, packageId)
+    .first<CatalogRow>();
+  if (!catalog?.model) return refuse("UNKNOWN_MODEL");
+  if (!catalog.package) return refuse("UNKNOWN_PACKAGE");
+  if (!catalog.price) return refuse("NO_PRICE");
+  // The packages table's CHECK sets exactly one of the two.
+  const length = { days: catalog.days, hours: catalog.hours } as PackageLength;
+
+  const config = await readShopConfig(db);
+  // Every closed date from today on, not only to the horizon, because a rental may return past it.
+  const closedDates = await readClosedDates(db, jstToday(now), LAST_DATE);
+  const windowError = pickupWindowError(config, closedDates, startAt as number, length, now, tooSoon);
+  if (windowError !== null) return refuse(windowError);
+
+  const start = startAt as number;
+  const rental = {
+    startAt: start,
+    endAt: rentalEnd(start, length, config),
+    bufMs: config.turnaroundMinutes * MINUTE_MS,
+    config,
+  };
+  return { ok: true, rental };
+}
+
+/**
  * Holds the least-used free bike of the model, or names why not. `input` comes from a request body, so nothing about it
  * is taken from its type. `input.id` is the caller's idempotency key: a replay gets the booking as it now stands, and a
  * different request under a stored id gets CONFLICT.
@@ -200,27 +254,10 @@ export async function createHold(db: D1Database, input: HoldInput, now: number):
   const stored = await getBooking(db, id);
   if (stored !== null) return settle(stored);
 
-  if (!isKey(modelId)) return refuse("UNKNOWN_MODEL");
-  if (!isKey(packageId)) return refuse("UNKNOWN_PACKAGE");
-  const catalog = await db
-    .prepare(CATALOG_SQL)
-    .bind(modelId, packageId)
-    .first<CatalogRow>();
-  if (!catalog?.model) return refuse("UNKNOWN_MODEL");
-  if (!catalog.package) return refuse("UNKNOWN_PACKAGE");
-  if (!catalog.price) return refuse("NO_PRICE");
-  // The packages table's CHECK sets exactly one of the two.
-  const length = { days: catalog.days, hours: catalog.hours } as PackageLength;
+  const checked = await checkRental(db, modelId, packageId, startAt, now, "lead");
+  if (!checked.ok) return checked;
 
-  const config = await readShopConfig(db);
-  // Every closed date from today on, not only to the horizon, because a rental may return past it.
-  const closedDates = await readClosedDates(db, jstToday(now), LAST_DATE);
-  const windowError = pickupWindowError(config, closedDates, startAt as number, length, now);
-  if (windowError !== null) return refuse(windowError);
-
-  const start = startAt as number;
-  const endAt = rentalEnd(start, length, config);
-  const bufMs = config.turnaroundMinutes * MINUTE_MS;
+  const { startAt: start, endAt, bufMs, config } = checked.rental;
   const expiresAt = now + config.holdMinutes * MINUTE_MS;
   const ahead = bookedAhead(now, start) ? 1 : 0;
   for (let attempt = 0; attempt < REF_ATTEMPTS; attempt += 1) {
