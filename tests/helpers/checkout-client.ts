@@ -770,13 +770,13 @@ function parseInto(root: FakeElement, html: string): void {
   }
 }
 
-function parsePage(html: string): FakeDocument {
+export function parsePage(html: string): FakeDocument {
   const document = new FakeDocument();
   parseInto(document, html);
   return document;
 }
 
-function isShown(element: FakeElement): boolean {
+export function isShown(element: FakeElement): boolean {
   for (let at: FakeElement | null = element; at !== null; at = at.parentElement) {
     if (at.hidden || at.style.display === "none") return false;
   }
@@ -790,7 +790,7 @@ function textOf(node: Child): string {
 }
 
 /** The text a guest sees in `element`, which is none when it or an ancestor is hidden. */
-function visibleText(element: FakeElement | null): string {
+export function visibleText(element: FakeElement | null): string {
   if (element === null || !isShown(element)) return "";
   return textOf(element).replace(/\s+/g, " ").trim();
 }
