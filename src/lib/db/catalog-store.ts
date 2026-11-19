@@ -128,9 +128,10 @@ function insertSql({ name, columns, key }: Table): string {
   return `INSERT INTO ${name} (${names.join(", ")}) SELECT ${fields.join(", ")} FROM json_each(?1) WHERE true${upsert}`;
 }
 
-function selectSql({ name, columns, order }: Table): string {
+/** Every row, or with `where` only the rows it matches. */
+function selectSql({ name, columns, order }: Table, where = ""): string {
   const aliased = Object.entries(columns).map(([column, field]) => `${column} AS ${field}`);
-  return `SELECT ${aliased.join(", ")} FROM ${name} ORDER BY ${order}`;
+  return `SELECT ${aliased.join(", ")} FROM ${name}${where && ` WHERE ${where}`} ORDER BY ${order}`;
 }
 
 // The two reports run first in the batch, so they compare the rows as they stand with the catalog in ?1, in the same
@@ -286,9 +287,34 @@ export async function readPrices(db: D1Database, keys: { rateClassId: string; pa
   return results;
 }
 
+const READ_MODELS_SQL = selectSql(MODELS, "id IN (SELECT value FROM json_each(?1))");
+
+const READ_VEHICLES_SQL = selectSql(VEHICLES, "plate IN (SELECT value FROM json_each(?1))");
+
+/** The stored model of each of `ids` that has one, as readCatalog holds it, inactive ones too. One statement. */
+export async function readModels(db: D1Database, ids: string[]): Promise<Model[]> {
+  return decodeModels(await db.prepare(READ_MODELS_SQL).bind(JSON.stringify(ids)).all());
+}
+
+/** The stored vehicle of each of `plates` that has one, as readCatalog holds it, retired ones too. One statement. */
+export async function readVehicles(db: D1Database, plates: string[]): Promise<Vehicle[]> {
+  const { results } = await db.prepare(READ_VEHICLES_SQL).bind(JSON.stringify(plates)).all<Vehicle>();
+  return results;
+}
+
 /** A result's rows with their `texts` JSON decoded. */
 function decodeTexts<T>(result: D1Result): T[] {
   return (result.results as { texts: string }[]).map((row) => ({ ...row, texts: JSON.parse(row.texts) }) as T);
+}
+
+/** A result's model rows as the domain type: `active` is stored as 0 or 1, and `texts` and `photos` as JSON. */
+function decodeModels(result: D1Result): Model[] {
+  type ModelRow = Omit<Model, "active" | "photos"> & { active: number; photos: string };
+  return decodeTexts<ModelRow>(result).map((row) => ({
+    ...row,
+    active: row.active === 1,
+    photos: JSON.parse(row.photos) as string[],
+  }));
 }
 
 /**
@@ -302,16 +328,11 @@ export async function readCatalog(db: D1Database): Promise<PublishedCatalog | nu
   const [published] = meta.results as { version: number; publishedAt: number }[];
   if (published === undefined) return null;
 
-  type ModelRow = Omit<Model, "active" | "photos"> & { active: number; photos: string };
   return {
     config: parseShopConfig(config.results as { key: string; value: string }[]),
     vehicleTypes: decodeTexts<VehicleType>(vehicleTypes),
     rateClasses: decodeTexts<RateClass>(rateClasses),
-    models: decodeTexts<ModelRow>(models).map((row) => ({
-      ...row,
-      active: row.active === 1,
-      photos: JSON.parse(row.photos) as string[],
-    })),
+    models: decodeModels(models),
     vehicles: vehicles.results as Vehicle[],
     packages: decodeTexts<Package>(packages),
     prices: prices.results as Price[],
