@@ -3,6 +3,10 @@
 // TextEncoder are missing there as they are in Apps Script. Values crossing out of the context are copied into plain
 // arrays, because an array built in another realm fails assert's deepEqual on its prototype.
 // loadWebApp is the mail web app's side: each POST is a new execution, as on Google, sharing only what Google keeps.
+// Spreadsheet writes are batched as Apps Script batches them: a write is pending, seen by the script's own later reads
+// but by no one else, until SpreadsheetApp.flush(), a read through the Spreadsheet service, or the end of the execution
+// applies it. `tabs` is what the Sheets API sees, which is what the Worker reads: a route reading or writing `tabs`
+// during a fetch sees only the applied writes, and the script's next read sees what the route wrote.
 import { createHmac } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { createContext, Script } from "node:vm";
@@ -184,6 +188,22 @@ function bodyText(body: unknown): string {
   return body === undefined ? "" : JSON.stringify(body);
 }
 
+/**
+ * Writes the script made that Google has not applied yet, in order. A read through the Spreadsheet service applies
+ * them first, so the script reads its own writes; nothing else sees them until then.
+ */
+type Batch = { pending: (() => void)[]; apply(): void };
+
+function newBatch(): Batch {
+  const batch: Batch = {
+    pending: [],
+    apply() {
+      for (const write of batch.pending.splice(0)) write();
+    },
+  };
+  return batch;
+}
+
 /** The rectangle Google answers: every cell past the data is '', and a row that was never written is all ''. */
 function rectangle(tab: FakeTab, row: number, column: number, numRows: number, numColumns: number): unknown[][] {
   return Array.from({ length: numRows }, (_, i) =>
@@ -191,10 +211,16 @@ function rectangle(tab: FakeTab, row: number, column: number, numRows: number, n
   );
 }
 
-function fakeRange(tab: FakeTab, row: number, column: number, numRows: number, numColumns: number) {
+function fakeRange(batch: Batch, tab: FakeTab, row: number, column: number, numRows: number, numColumns: number) {
   const range = {
-    getValues: () => rectangle(tab, row, column, numRows, numColumns),
-    getValue: () => rectangle(tab, row, column, 1, 1)[0][0],
+    getValues() {
+      batch.apply();
+      return rectangle(tab, row, column, numRows, numColumns);
+    },
+    getValue() {
+      batch.apply();
+      return rectangle(tab, row, column, 1, 1)[0][0];
+    },
     setValue(value: unknown) {
       return range.setValues([[value]]);
     },
@@ -204,10 +230,12 @@ function fakeRange(tab: FakeTab, row: number, column: number, numRows: number, n
       if (copied.length !== numRows || copied.some((cells) => cells.length !== numColumns)) {
         throw new Error("The data's size does not match the range's size");
       }
-      copied.forEach((cells, i) => {
-        const target = (tab.rows[row - 1 + i] ??= []);
-        cells.forEach((cell, j) => {
-          target[column - 1 + j] = cell;
+      batch.pending.push(() => {
+        copied.forEach((cells, i) => {
+          const target = (tab.rows[row - 1 + i] ??= []);
+          cells.forEach((cell, j) => {
+            target[column - 1 + j] = cell;
+          });
         });
       });
       return range;
@@ -391,21 +419,31 @@ const SCRIPT_CLOCK = `(clock) => {
   };
 }`;
 
-function fakeSheet(name: string, tab: FakeTab) {
+function fakeSheet(batch: Batch, name: string, tab: FakeTab) {
   const sheet = {
     getName: () => name,
-    getLastRow: () => tab.rows.length,
-    getLastColumn: () => Math.max(0, ...tab.rows.map((cells) => cells.length)),
+    getLastRow() {
+      batch.apply();
+      return tab.rows.length;
+    },
+    getLastColumn() {
+      batch.apply();
+      return Math.max(0, ...tab.rows.map((cells) => cells.length));
+    },
     appendRow(cells: ArrayLike<unknown>) {
       tab.touches.push("appendRow");
-      tab.rows.push(Array.from(cells));
+      const copied = Array.from(cells);
+      batch.pending.push(() => {
+        tab.rows.push(copied);
+      });
       return sheet;
     },
     // Google answers A1 alone for an empty tab, and otherwise the rectangle from A1 to the last row and column.
-    getDataRange: () => fakeRange(tab, 1, 1, Math.max(1, tab.rows.length), Math.max(1, sheet.getLastColumn())),
+    getDataRange: () =>
+      fakeRange(batch, tab, 1, 1, Math.max(1, sheet.getLastRow()), Math.max(1, sheet.getLastColumn())),
     getRange(row: unknown, column: unknown = 1, numRows: unknown = 1, numColumns: unknown = 1) {
       if (typeof row !== "number") throw new Error("this fake's getRange takes (row, column, numRows, numColumns)");
-      return fakeRange(tab, row, Number(column), Number(numRows), Number(numColumns));
+      return fakeRange(batch, tab, row, Number(column), Number(numRows), Number(numColumns));
     },
     setFrozenRows() {
       tab.touches.push("setFrozenRows");
@@ -437,20 +475,21 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
     ]),
   );
   let timeZone = options.timeZone ?? "America/New_York";
+  const batch = newBatch();
   let lockOwner: object | null = options.lockHeldElsewhere === true ? {} : null;
 
   const spreadsheet = {
     getSheetByName(name: string) {
       const tab = tabs.get(name);
-      return tab === undefined ? null : fakeSheet(name, tab);
+      return tab === undefined ? null : fakeSheet(batch, name, tab);
     },
-    getSheets: () => Array.from(tabs, ([name, tab]) => fakeSheet(name, tab)),
+    getSheets: () => Array.from(tabs, ([name, tab]) => fakeSheet(batch, name, tab)),
     insertSheet(name: string) {
       if (tabs.has(name)) throw new Error(`A sheet with the name "${name}" already exists`);
       const tab: FakeTab = { rows: [], touches: [] };
       tabs.set(name, tab);
       inserted.push(name);
-      return fakeSheet(name, tab);
+      return fakeSheet(batch, name, tab);
     },
     getSpreadsheetTimeZone: () => timeZone,
     setSpreadsheetTimeZone(zone: string) {
@@ -566,7 +605,14 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
   const cache = fakeCache(web);
 
   const context: Record<string, unknown> = createContext({
-    SpreadsheetApp: { getActive: () => spreadsheet, getActiveSpreadsheet: () => spreadsheet, getUi: () => ui },
+    SpreadsheetApp: {
+      getActive: () => spreadsheet,
+      getActiveSpreadsheet: () => spreadsheet,
+      getUi: () => ui,
+      flush() {
+        batch.apply();
+      },
+    },
     UrlFetchApp,
     Utilities,
     MailApp: fakeMailApp(web),
@@ -605,16 +651,25 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
     );
   }
 
+  // Each call and evaluate is an execution: Google applies what is still pending when it ends, returned or thrown.
   return {
     call(name, ...args) {
       const fn = context[name];
       if (typeof fn !== "function") throw new Error(`apps-script/ defines no global function ${name}`);
-      return fn(...args);
+      try {
+        return fn(...args);
+      } finally {
+        batch.apply();
+      }
     },
     isFunction: (name) => typeof context[name] === "function",
     evaluate(code) {
-      // structuredClone copies into this realm, so the copy passes assert's deepEqual where the original would not.
-      return structuredClone(new Script(code, { filename: "evaluate" }).runInContext(context));
+      try {
+        // structuredClone copies into this realm, so the copy passes assert's deepEqual where the original would not.
+        return structuredClone(new Script(code, { filename: "evaluate" }).runInContext(context));
+      } finally {
+        batch.apply();
+      }
     },
     fetches,
     alerts,

@@ -59,6 +59,8 @@ function blockPanelSave(input) {
         channel: "maintenance",
         note: blockText_(reason),
       });
+      // The sync reads the sheet through the Sheets API from the Worker, which does not see writes Apps Script still holds.
+      SpreadsheetApp.flush();
     } catch (error) {
       return blockRefusal_(`Nothing was saved: ${error.message}`);
     }
