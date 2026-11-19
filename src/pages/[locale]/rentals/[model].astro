@@ -147,7 +147,8 @@ const error = errorKey in model ? t(locale, model, errorKey) : null;
             max={addDaysToDate(jstToday(now), catalog.config.maxDaysAhead)}
             closedDates={catalog.closedDates}
             value={pickupDate}
-            packageDays={packageDays(starting)}
+            pkg={starting}
+            shopClose={catalog.config.shopClose}
           />
           <label>
             {t(locale, pages, "home.search.time")}
@@ -167,6 +168,7 @@ const error = errorKey in model ? t(locale, model, errorKey) : null;
                   value={pkg.id}
                   selected={pkg === starting}
                   data-days={packageDays(pkg)}
+                  data-hours={pkg.hours ?? undefined}
                   data-slots={pickupSlots(catalog.config, pkg).join(" ")}
                 >
                   {pkg.texts[locale].name}
@@ -182,12 +184,16 @@ const error = errorKey in model ? t(locale, model, errorKey) : null;
 </Base>
 
 <script>
-  // The calendar shows the return date of the package chosen here, and the time select the pickups it is back by closing
-  // from (#50), keeping the chosen time when that package allows it.
+  // The calendar shows the return date of the package chosen here, the date field its pickup and return (#137), and the
+  // time select the pickups it is back by closing from (#50), keeping the chosen time when that package allows it.
   const select = document.querySelector<HTMLElement>("form.booking select[name=package]");
   select?.addEventListener("change", () => {
     const option = select.querySelector<HTMLOptionElement>("option:checked");
-    document.querySelector("form.booking date-picker")?.setAttribute("package-days", option?.dataset.days ?? "");
+    const picker = document.querySelector("form.booking date-picker");
+    const hours = option?.dataset.hours;
+    if (hours === undefined) picker?.removeAttribute("package-hours");
+    else picker?.setAttribute("package-hours", hours);
+    picker?.setAttribute("package-days", option?.dataset.days ?? "");
     const time = document.querySelector<HTMLElement>("form.booking select[name=time]");
     const slots = option?.dataset.slots?.split(" ").filter((slot) => slot !== "");
     if (time === null || slots === undefined) return;
