@@ -3,7 +3,7 @@
 import { BLOCKING_SQL, OVERLAP_SQL, rentalEnd } from "../db/blocking.ts";
 import { readShopConfig } from "../db/config.ts";
 import { bookedAhead } from "../pricing.ts";
-import type { VehicleTypeId } from "../types.ts";
+import type { PackageLength, VehicleTypeId } from "../types.ts";
 
 export type CcBand = "upto50" | "51to125" | "126to400" | "over400";
 
@@ -49,18 +49,19 @@ GROUP BY m.id
 ORDER BY m.sort, m.id`;
 
 /**
- * The models with at least one free bike for `q`, by model sort, then id. An unknown package and an hours package,
- * which has no end rule until task #50, return nothing. Throws CatalogNotPublished before the first publish, whatever
- * the package, so a site with no catalog is not mistaken for a sold-out one.
+ * The models with at least one free bike for `q`, by model sort, then id. An unknown package returns nothing. Throws
+ * CatalogNotPublished before the first publish, whatever the package, so a site with no catalog is not mistaken for a
+ * sold-out one.
  */
 export async function searchAvailability(db: D1Database, q: AvailabilityQuery): Promise<AvailableModel[]> {
   const [config, pkg] = await Promise.all([
     readShopConfig(db),
-    db.prepare("SELECT days FROM packages WHERE id = ?1").bind(q.packageId).first<{ days: number | null }>(),
+    // The packages table's CHECK sets exactly one of the two.
+    db.prepare("SELECT days, hours FROM packages WHERE id = ?1").bind(q.packageId).first<PackageLength>(),
   ]);
-  if (pkg === null || pkg.days === null) return [];
+  if (pkg === null) return [];
 
-  const endAt = rentalEnd(q.startAt, { days: pkg.days }, config);
+  const endAt = rentalEnd(q.startAt, pkg, config);
   const bufMs = config.turnaroundMinutes * MINUTE_MS;
   const [minCc, maxCc] = q.ccBand === undefined ? [null, null] : CC_BANDS[q.ccBand];
   const ahead = bookedAhead(q.now, q.startAt) ? 1 : 0;

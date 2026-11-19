@@ -1840,3 +1840,59 @@ test("confirm keeps the locked price after midnight", async () => {
     await dispose();
   }
 });
+
+/** [hours, pickup, return, guest, locale]: the return written out by hand, `hours` after the pickup. */
+const HOURLY_STAYS: [number, string, string, Guest, Locale][] = [
+  [4, "2030-06-10 10:30", "2030-06-10 14:30", HANAKO, "ja"],
+  [24, "2030-06-30 17:30", "2030-07-01 17:30", MINHO, "ko"],
+  [2, "2030-07-15 09:00", "2030-07-15 11:00", ADA, "en"],
+  [8, "2030-06-20 09:30", "2030-06-20 17:30", NA, "zh-cn"],
+];
+
+// #50: an hourly booking's emails give its return as the pickup plus its hours, which is not closing time on any day.
+test("an hourly booking's emails show its return at pickup plus its hours", async () => {
+  const settings = PLAIN_SHOP;
+  const { db, dispose } = await createTestDb();
+  try {
+    await seedType(db, { deposit_jpy: CATALOG_DEPOSIT_JPY });
+    await seedConfig(db, { shop_open: settings.open, shop_close: settings.close });
+    await seedCatalogMeta(db);
+    await seedTiers(db, settings.tiers);
+    const rate = await seedRateClass(db);
+    const model = await seedModel(db, {
+      rate_class_id: rate.id,
+      texts: textsOf(FIRST.modelNames, { summary: "A summary", description: "A description" }),
+    });
+    for (let i = 0; i < HOURLY_STAYS.length; i += 1) await seedVehicle(db, { model_id: model.id });
+
+    for (const [index, [hours, pickup, dropoff, guest, locale]] of HOURLY_STAYS.entries()) {
+      const label = `${hours} hours from ${pickup} in ${locale}`;
+      const pack = await seedPackage(db, { hours, texts: textsOf(FIRST.packageNames) });
+      await seedPrice(db, { rate_class_id: rate.id, package_id: pack.id, price_jpy: 2500 + index * 1000 });
+
+      const input = { id: randomUUID(), modelId: model.id, packageId: pack.id, startAt: jst(pickup), locale };
+      const held = await createHold(db, input, NOW);
+      assert.ok(held.ok, `${label}: ${JSON.stringify(held)}`);
+      assert.equal(held.booking.endAt, jst(dropoff), `${label}: the hold's return`);
+
+      const paid = await confirmHold(depsAt(db, fakeSquare(), NOW + MINUTE_MS), held.booking.id, payBody(guest, locale));
+      assert.ok(paid.ok, `${label}: ${JSON.stringify(paid)}`);
+      const { emails } = await drain(db, NOW + MINUTE_MS);
+
+      // Closing time on the pickup's date and on the return's, neither of which is this booking's return.
+      const closings = [pickup, dropoff].map((wall) => `${wall.slice(0, 10)} ${settings.close} JST`);
+      const texts: [string, string][] = [
+        ["guest", renderWhole(emailOf(emails, "guest_confirmation"), `${label}: guest`)],
+        ["staff", renderWhole(emailOf(emails, "staff_new_booking"), `${label}: staff`)],
+      ];
+      for (const [reader, text] of texts) {
+        assertShows(text, [`${pickup} JST`, `${dropoff} JST`], `${label}: ${reader}`);
+        for (const closing of closings) {
+          assert.ok(!text.includes(closing), `${label}: the ${reader} email gives closing time ${closing}\n${text}`);
+        }
+      }
+    }
+  } finally {
+    await dispose();
+  }
+});

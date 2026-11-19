@@ -97,6 +97,12 @@ export const rentals: Dictionary = {
     "zh-cn": "该取车日期为停业日。",
     ko: "해당 픽업 날짜는 휴업일입니다.",
   },
+  "rentals.error.RETURN_OUTSIDE_HOURS": {
+    ja: "このプランは閉店時間までにご返却いただく必要があります。もっと早い受取時間を選んでください。",
+    en: "This package must be back by closing time. Choose an earlier pickup time.",
+    "zh-cn": "此套餐须在闭店前还车，请选择更早的取车时间。",
+    ko: "이 패키지는 폐점 시간까지 반납해야 합니다. 더 이른 픽업 시간을 선택해 주세요.",
+  },
   "rentals.error.CLOSED_RETURN": {
     ja: "このプランの返却日は休業日です。",
     en: "The shop is closed on this package's return date.",

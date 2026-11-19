@@ -173,6 +173,30 @@ const PRICES = [
   ...priceList("r-k-car", { "p-z-1d": 6720, "p-a-3d": 18650, "p-m-7d": 38140, "p-car-only": 9210 }),
 ];
 
+/**
+ * Hours packages first in sort order, stored out of it, with three classes that start differently when no package is
+ * chosen: on a three-day package past a four-hour one, on the one-day package past a 24-hour one, and, with only hours
+ * packages priced, on the first of those. Other hours and slots than CONFIG's, so a fixed slot list shows.
+ */
+function hoursFirst(): Catalog {
+  return catalogWith({
+    config: { shopOpen: "08:30", shopClose: "17:00", slotMinutes: 45 },
+    packages: [
+      dayPackage("p-x-1d", 1, 4, "Same day"),
+      hoursPackage("p-e-2h", 2, 5, "Two hours"),
+      hoursPackage("p-c-24h", 24, 1, "Day and night"),
+      dayPackage("p-w-7d", 7, 6, "Long week"),
+      hoursPackage("p-d-4h", 4, 2, "Four hours"),
+      dayPackage("p-y-3d", 3, 3, "Long weekend"),
+    ],
+    prices: [
+      ...priceList("r-50cc", { "p-d-4h": 1490, "p-y-3d": 5870, "p-x-1d": 2230 }),
+      ...priceList("r-125cc", { "p-c-24h": 4390, "p-x-1d": 3050, "p-e-2h": 1630, "p-w-7d": 16420 }),
+      ...priceList("r-k-car", { "p-e-2h": 3370, "p-d-4h": 5190 }),
+    ],
+  });
+}
+
 /** Everything a page or a hold reads, with `overrides` on top. */
 function catalogWith({
   config,
@@ -250,10 +274,15 @@ function depositOf(catalog: Catalog, target: Model): number {
   return type.depositJpy;
 }
 
-function daysOf(catalog: Catalog, packageId: string): number {
-  const days = catalog.packages.find(({ id }) => id === packageId)?.days;
-  if (typeof days !== "number") throw new Error(`no day package ${packageId}`);
-  return days;
+/**
+ * When a rental of the package from `date` and `time` returns, without the code under test: closing time on the last day
+ * of a day package, or `hours` after the pickup for an hours package (#50).
+ */
+function returnOf(catalog: Catalog, packageId: string, date: string, time: string): number {
+  const pkg = catalog.packages.find(({ id }) => id === packageId);
+  if (pkg === undefined) throw new Error(`no package ${packageId}`);
+  if (pkg.hours !== null) return jstInstant(date, time) + pkg.hours * HOUR_MS;
+  return jstInstant(addDaysToDate(date, pkg.days - 1), catalog.config.shopClose);
 }
 
 // Reading pages.
@@ -449,6 +478,65 @@ function slotsOf({ shopOpen, shopClose, slotMinutes }: ShopConfig): string[] {
 
 function queryOf(search: Search): string {
   return `?${new URLSearchParams(search as Record<string, string>).toString()}`;
+}
+
+const DAY_MINUTES = 24 * 60;
+
+/**
+ * The pickups a package can start from, without the code under test: every slot for a day package, and for an hours
+ * package the slots it is back from between opening and closing, both included, on whichever day it returns (owner,
+ * 2026-11-15).
+ */
+function slotsFor(config: ShopConfig, pkg: Package): string[] {
+  const { hours } = pkg;
+  if (hours === null) return slotsOf(config);
+  const [open, close] = [parseHHmm(config.shopOpen), parseHHmm(config.shopClose)];
+  return slotsOf(config).filter((slot) => {
+    const back = (parseHHmm(slot) + hours * 60) % DAY_MINUTES;
+    return back >= open && back <= close;
+  });
+}
+
+/**
+ * The `package-days` the date picker gets for a package, without the code under test: a day package's days, and for an
+ * hours package the calendar days a rental of it touches from a pickup at opening, so 1 for 2 to 6 hours and 2 for 24.
+ */
+function daysFor(config: ShopConfig, pkg: Package): number {
+  if (pkg.days !== null) return pkg.days;
+  return Math.floor((parseHHmm(config.shopOpen) + pkg.hours * 60) / DAY_MINUTES) + 1;
+}
+
+/**
+ * The package the form starts on when the query names no bookable one, without the code under test: the one the listing
+ * prices the model's card on, its class's first priced day package in sort order, or the first priced package when the
+ * class has no priced day package (ruling on #50's review).
+ */
+function startingPackage(catalog: Catalog, target: Model): Package {
+  const priced = pricedPackages(catalog, target).map(({ pkg }) => pkg);
+  const start = priced.find(({ days }) => days !== null) ?? priced[0];
+  if (start === undefined) throw new Error(`no priced package for ${target.id}`);
+  return start;
+}
+
+/**
+ * That the form starts on `pkg`: it is the package a guest who leaves the select alone submits, the date picker shows
+ * its return, the time select offers its pickups and no others, and each package option carries its own pickups for
+ * the script that swaps them in.
+ */
+function assertStartsOn(form: string, catalog: Catalog, pkg: Package, label: string): void {
+  assert.equal(defaultChoice(form, "package"), pkg.id, `${label}: the package the form starts on`);
+  assert.deepEqual(offered(form, "time"), slotsFor(catalog.config, pkg), `${label}: time values for ${pkg.id}`);
+  assert.equal(
+    datePickerOf(form, label).picker.attributes["package-days"],
+    String(daysFor(catalog.config, pkg)),
+    `${label}: package-days for ${pkg.id}`,
+  );
+  for (const option of choices(form, "package")) {
+    const own = catalog.packages.find(({ id }) => id === option.attributes.value);
+    assert.ok(own, `${label}: an option for no package: ${option.attributes.value}`);
+    const slots = (option.attributes["data-slots"] ?? "").split(/\s+/).filter((slot) => slot !== "");
+    assert.deepEqual(slots, slotsFor(catalog.config, own), `${label}: data-slots of ${own.id}`);
+  }
 }
 
 // Reading the answer to a post.
@@ -684,7 +772,7 @@ test("the model page shows the model's details and links the license classes", a
   }
 });
 
-test("the booking form offers the published slots and priced day packages", async () => {
+test("the booking form offers the published slots and every priced package", async () => {
   const configs = [
     { shopOpen: "09:00", shopClose: "18:00", slotMinutes: 30, minLeadHours: 30, maxDaysAhead: 120 },
     { shopOpen: "08:30", shopClose: "17:00", slotMinutes: 45, minLeadHours: 54, maxDaysAhead: 45 },
@@ -723,9 +811,11 @@ test("the booking form offers the published slots and priced day packages", asyn
             `${label}: no submit control`,
           );
 
-          assert.deepEqual(offered(form.html, "time"), slotsOf(catalog.config), `${label}: time values`);
-          // A hold refuses an hours package until task #50 and a package with no price, so neither is a choice.
-          const bookable = pricedPackages(catalog, target).filter(({ pkg }) => pkg.days !== null);
+          // With no package chosen the form starts on the class's first priced day package, which every slot fits.
+          const start = startingPackage(catalog, target);
+          assert.deepEqual(offered(form.html, "time"), slotsFor(catalog.config, start), `${label}: time values`);
+          // A hold refuses a package with no price, so it is no choice. Hours packages are bookable (#50), so they are.
+          const bookable = pricedPackages(catalog, target);
           assert.deepEqual(
             offered(form.html, "package"),
             bookable.map(({ pkg }) => pkg.id),
@@ -743,7 +833,7 @@ test("the booking form offers the published slots and priced day packages", asyn
       // The carried search is what the form starts from, whichever of the choices it names.
       const slots = slotsOf(catalog.config);
       for (const [index, target] of [VINO, PCX, NOTE].entries()) {
-        const bookable = pricedPackages(catalog, target).filter(({ pkg }) => pkg.days !== null);
+        const bookable = pricedPackages(catalog, target);
         const search = {
           date: date(11 + index),
           time: slots[index + 2] as string,
@@ -756,6 +846,115 @@ test("the booking form offers the published slots and priced day packages", asyn
         assert.equal(defaultChoice(form.html, "package"), search.package, `${label}: package`);
       }
     });
+  }
+});
+
+// The package the form starts on (#50 review): the time select and the date picker follow it, so a guest who leaves the
+// package alone can book the pickup the listing found free.
+
+test("with no bookable package in the query the form starts on the class's default package", async () => {
+  for (const catalog of [catalogWith(), hoursFirst()]) {
+    await publish(catalog);
+    for (const [index, locale] of LOCALES.entries()) {
+      for (const target of [VINO, PCX, NOTE]) {
+        const start = startingPackage(catalog, target);
+        const priced = new Set(pricedPackages(catalog, target).map(({ pkg }) => pkg.id));
+        const unpriced = [...catalog.packages].sort((a, b) => a.sort - b.sort).find(({ id }) => !priced.has(id));
+        assert.ok(unpriced, `${target.id} has no unpriced package to name`);
+        // What the listing's card links with, which carries no package: the date, the time and the type.
+        const listed = new URLSearchParams({ date: inDays(20 + index), time: slotsOf(catalog.config)[0] as string });
+        listed.set("type", target.typeId);
+        const queries = ["", "?package=", "?package=p-nope", `?package=${unpriced.id}`, `?${listed}`];
+        for (const query of queries) {
+          const label = `${locale} ${target.id} ${query || "no query"}`;
+          assertStartsOn((await loadForm(locale, target.id, query)).html, catalog, start, label);
+        }
+      }
+    }
+  }
+});
+
+test("a package the query names starts the form, and an hours package offers only pickups back by close", async () => {
+  for (const catalog of [catalogWith(), hoursFirst()]) {
+    await publish(catalog);
+    const close = parseHHmm(catalog.config.shopClose);
+    for (const [index, target] of [VINO, PCX, NOTE].entries()) {
+      for (const [n, { pkg }] of pricedPackages(catalog, target).entries()) {
+        const locale = LOCALES[(index + n) % LOCALES.length] as Locale;
+        const label = `${locale} ${target.id} ?package=${pkg.id}`;
+        const form = (await loadForm(locale, target.id, `?package=${pkg.id}`)).html;
+        assertStartsOn(form, catalog, pkg, label);
+        const { hours } = pkg;
+        if (hours === null || hours >= 24) continue;
+
+        // A pickup later than closing less the hours is not back by closing, and the fixture has some.
+        const late = slotsOf(catalog.config).filter((slot) => parseHHmm(slot) > close - hours * 60);
+        assert.ok(late.length > 0, `${label}: the fixture has no late slot`);
+        for (const slot of late) assert.ok(!offered(form, "time").includes(slot), `${label}: offers ${slot}`);
+      }
+    }
+  }
+});
+
+test("a guest who comes from the listing books the pickup it found on the package the form starts on", async () => {
+  type Case = { locale: Locale; target: Model; days: number; time: string; named?: string; start: string };
+  const groups: { catalog: Catalog; cases: Case[] }[] = [
+    {
+      catalog: catalogWith(),
+      cases: [
+        // The listing found these on the one-day package. Six hours from 15:00 or 17:30 is back after the 18:00 close.
+        { locale: "en", target: VINO, days: 21, time: "15:00", start: "p-z-1d" },
+        { locale: "ko", target: PCX, days: 22, time: "17:30", start: "p-z-1d" },
+        { locale: "zh-cn", target: NOTE, days: 23, time: "16:30", start: "p-z-1d" },
+        // Named in the query, six hours from 12:00 is back at closing, so the time stays.
+        { locale: "ja", target: PCX, days: 24, time: "12:00", named: "p-b-6h", start: "p-b-6h" },
+      ],
+    },
+    {
+      catalog: hoursFirst(),
+      cases: [
+        // VINO's first option is four hours, back at 20:00 from 16:00. PCX's is the 24-hour package, which the listing
+        // does not price its card on.
+        { locale: "zh-cn", target: VINO, days: 25, time: "16:00", start: "p-y-3d" },
+        { locale: "en", target: PCX, days: 26, time: "15:15", start: "p-x-1d" },
+        // Only hours packages are priced: four hours from 13:00 is back at the 17:00 close.
+        { locale: "ja", target: NOTE, days: 27, time: "13:00", start: "p-d-4h" },
+        { locale: "ko", target: NOTE, days: 28, time: "09:15", start: "p-d-4h" },
+      ],
+    },
+  ];
+
+  for (const { catalog, cases } of groups) {
+    const version = await publish(catalog);
+    for (const { locale, target, days, time, named, start } of cases) {
+      const date = inDays(days);
+      const query = new URLSearchParams({ date, time, type: target.typeId });
+      if (named !== undefined) query.set("package", named);
+      const label = `${locale} ${target.id} ?${query}`;
+      const form = await loadForm(locale, target.id, `?${query}`);
+
+      // The carried time is one the starting package allows, so it stays selected.
+      const sent = {
+        date: datePickerOf(form.html, label).input.attributes.value,
+        time: defaultChoice(form.html, "time"),
+        package: defaultChoice(form.html, "package"),
+      };
+      assert.deepEqual({ date: sent.date, time: sent.time }, { date, time }, `${label}: the carried search`);
+
+      // What a guest who changes nothing books.
+      const res = await submit(form, sent);
+      await res.text();
+      assert.equal(res.status, 303, `${label}: status`);
+      const next = redirectOf(res, label);
+      const id = checkoutId(next, locale);
+      assert.ok(id !== null, `${label}: Book went to ${next.pathname}${next.search}, not checkout`);
+      const row = await bookingById(id);
+      assert.deepEqual(
+        row && { package_id: row.package_id, start_at: row.start_at, end_at: row.end_at, version: row.catalog_version },
+        { package_id: start, start_at: jstInstant(date, time), end_at: returnOf(catalog, start, date, time), version },
+        label,
+      );
+    }
   }
 });
 
@@ -792,6 +991,9 @@ test("a valid booking form creates a hold and redirects to checkout", async () =
     { locale: "en", target: VINO, package: "p-a-3d", date: inDays(45), time: "13:30" },
     { locale: "zh-cn", target: NOTE, package: "p-m-7d", date: inDays(90), time: "17:30" },
     { locale: "ko", target: PCX, package: "p-m-7d", date: inDays(3), time: "11:00" },
+    // The six-hour package (#50): back six hours after the pickup, here at closing time and two hours before it.
+    { locale: "en", target: VINO, package: "p-b-6h", date: inDays(46), time: "12:00" },
+    { locale: "ja", target: PCX, package: "p-b-6h", date: inDays(33), time: "10:00" },
   ] as const;
   const laterCases = [
     { locale: "ko", target: VINO, package: "p-2d", date: inDays(21), time: "16:00" },
@@ -837,7 +1039,7 @@ test("a valid booking form creates a hold and redirects to checkout", async () =
         model_id: c.target.id,
         package_id: c.package,
         start_at: jstInstant(c.date, c.time),
-        end_at: jstInstant(addDaysToDate(c.date, daysOf(catalog, c.package) - 1), catalog.config.shopClose),
+        end_at: returnOf(catalog, c.package, c.date, c.time),
         price_jpy: priceOf(catalog, c.target, c.package),
         deposit_jpy: depositOf(catalog, c.target),
         locale: c.locale,
@@ -953,6 +1155,11 @@ test("concurrent posts never oversell over HTTP", async () => {
   // Two active bikes and one in maintenance.
   await race("en", PCX, { date: inDays(25), time: "10:00", package: "p-z-1d" }, ["pcx-1", "pcx-2"]);
 
+  // Six hours from 09:00 is back at 15:00 (#50), so with the 60-minute turnaround the same two bikes go again from 16:00.
+  const sameDay = inDays(27);
+  await race("zh-cn", PCX, { date: sameDay, time: "09:00", package: "p-b-6h" }, ["pcx-1", "pcx-2"]);
+  await race("ko", PCX, { date: sameDay, time: "16:00", package: "p-z-1d" }, ["pcx-1", "pcx-2"]);
+
   // Four active bikes, of which a booking and a live hold take two, and an expired hold takes none.
   const date = inDays(40);
   const time = "14:30";
@@ -988,7 +1195,9 @@ function refusals(): { code: string; search: Required<Search>; carried: (keyof S
     { code: "CLOSED_PICKUP", search: { date: inDays(20), time: "10:00", package: "p-z-1d" }, carried: all },
     { code: "CLOSED_RETURN", search: { date: inDays(18), time: "10:00", package: "p-a-3d" }, carried: all },
     { code: "UNKNOWN_PACKAGE", search: { date: day, time: "10:00", package: "p-nope" }, carried: ["date", "time"] },
-    { code: "UNKNOWN_PACKAGE", search: { date: day, time: "10:00", package: "p-b-6h" }, carried: ["date", "time"] },
+    // Six hours from 12:30 is back at 18:30, past closing (#50).
+    { code: "RETURN_OUTSIDE_HOURS", search: { date: day, time: "12:30", package: "p-b-6h" }, carried: all },
+    { code: "RETURN_OUTSIDE_HOURS", search: { date: inDays(13), time: "17:30", package: "p-b-6h" }, carried: all },
     { code: "NO_PRICE", search: { date: day, time: "10:00", package: "p-car-only" }, carried: ["date", "time"] },
   ];
 }
@@ -1045,6 +1254,8 @@ test("sold-out and invalid posts come back with an error", async () => {
   for (const locale of LOCALES) {
     const shown = ["SOLD_OUT", "TOO_SOON", "CLOSED_PICKUP"].map((code) => messages.get(`${code} ${locale}`));
     assert.equal(new Set(shown).size, 3, `${locale}: one text for different errors: ${shown.join(" / ")}`);
+    const hours = ["OUTSIDE_HOURS", "RETURN_OUTSIDE_HOURS", "CLOSED_RETURN"].map((code) => messages.get(`${code} ${locale}`));
+    assert.equal(new Set(hours).size, 3, `${locale}: one text for different errors: ${hours.join(" / ")}`);
   }
 
   // Fields that are no date or time at all never reach createHold as such, and still come back in the locale.
@@ -1184,6 +1395,8 @@ test("a tampered query leaves the model page standing", async () => {
     `?date=${day}&time=10:15&package=p-z-1d`,
     `?date=${day}&time=10:00&package=p-nope`,
     `?date=${day}&time=10:00&package=p-b-6h`,
+    `?date=${day}&time=17:30&package=p-b-6h`,
+    `?date=9999-12-31&time=17:30&package=p-b-6h`,
     `?date=${inDays(20)}&time=10:00&package=p-z-1d`,
     `?date=${day}&time=10:00`,
     `?date=${day}&package=p-z-1d`,

@@ -116,9 +116,26 @@ SELECT b.id FROM bookings b WHERE b.vehicle_plate = ?5 AND <BLOCKING_SQL> AND <O
 
 ## When a rental ends
 
-A package returns by closing time on its last day, not N x 24 hours later: `rentalEnd` gives `shop_close` (JST) on the
-JST date of the pickup plus days - 1. A one-day package is the shop's same-day rental and returns at `shop_close` that
-day, and a three-day package picked up on day D returns at `shop_close` on D + 2.
+A days package returns by closing time on its last day, not N x 24 hours later: `rentalEnd` gives `shop_close` (JST) on
+the JST date of the pickup plus days - 1. A one-day package is the shop's same-day rental and returns at `shop_close`
+that day, and a three-day package picked up on day D returns at `shop_close` on D + 2.
 
-`rentalEnd` is the only place a rental's end is computed. It throws RangeError for an hours package until task #50 sets
-that rule.
+An hours package returns `hours` after the pickup (task #50): a 4-hour rental from 10:00 is back at 14:00, and a 24-hour
+rental from 17:30 is back at 17:30 the next day. A 24-hour package is not the one-day package, which is back at closing
+on the pickup's day; the shop prices them apart.
+
+`rentalEnd` is the only place a rental's end is computed, and availability, holds and the overlap rule all take its end,
+with the turnaround buffer after it. It throws RangeError unless exactly one of days and hours is set, to a whole number
+of at least 1.
+
+An hours package must be back between `shop_open` and `shop_close`, both included, on the date it returns (owner,
+2026-11-15). `pickupWindowError` refuses a pickup that is not with RETURN_OUTSIDE_HOURS, after CLOSED_PICKUP and before
+CLOSED_RETURN, and `pickupSlots(config, pkg)` lists only the pickups that are: from 09:00 to 18:00, a 4-hour rental can
+start until 14:00 and a 24-hour rental at any slot. CLOSED_RETURN reads the JST date of the return, which for 24 hours is
+the next day. A days package returns at closing, so this rule never refuses one.
+
+## Usage for least-used assignment
+
+A hold takes the free bike with the fewest usage days: `base_usage_days` plus one day for each CONFIRMED booking of 24
+hours or less, hourly rentals included (owner, 2026-11-15), and the JST dates it touches for each longer one. A booking
+counts by its own `start_at` and `end_at`, not its package, because a staff block has none and a package can change.

@@ -1,0 +1,48 @@
+<style>
+  .home-missing { margin: 0 0 12px; padding: 8px 12px; border: 1px solid #f9ab00; border-radius: 4px; background: #fef7e0; }
+  .home-missing p, .home-missing ul { margin: 0 0 4px; }
+  .home-actions { display: grid; gap: 8px; }
+  .home-actions button { width: 100%; padding: 10px 12px; text-align: left; }
+</style>
+<h1>Okinawa Dream</h1>
+<div id="home-missing" class="home-missing" hidden>
+  <p>The dashboard cannot reach the website until these are set in Project Settings, under Script Properties:</p>
+  <ul id="home-missing-list"></ul>
+</div>
+<p id="home-loading">Loading…</p>
+<div id="home-actions" class="home-actions"></div>
+<p id="home-none" hidden>No actions yet.</p>
+<script>
+  // The home sidebar: what is missing to reach the website, and one button per dashboard action, each opening its
+  // step-by-step window.
+
+  function showHome(home) {
+    const list = document.getElementById("home-missing-list");
+    for (const name of home.missing) {
+      const item = document.createElement("li");
+      item.textContent = name;
+      list.append(item);
+    }
+    document.getElementById("home-missing").hidden = home.missing.length === 0;
+
+    const actions = document.getElementById("home-actions");
+    for (const action of home.actions) {
+      actions.append(
+        panelButton(action.label, () => {
+          clearError();
+          callServer(action.fn).catch(showError);
+        }),
+      );
+    }
+    document.getElementById("home-none").hidden = home.actions.length > 0;
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    callServer("dashboardHome")
+      .then(showHome)
+      .catch(showError)
+      .finally(() => {
+        document.getElementById("home-loading").hidden = true;
+      });
+  });
+</script>

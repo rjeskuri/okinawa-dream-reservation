@@ -821,10 +821,11 @@ test("the package param preselects the package", async () => {
   }
 });
 
-test("an hours package shows its prices but finds no pickup yet", async () => {
+test("an hours package finds the pickups that are back by closing time", async () => {
   const catalog = sheetCatalog();
+  const sheet = expectedCatalog();
   await publish(catalog);
-  const [date] = openDates(catalog);
+  const [date] = openDates(catalog) as [string];
 
   // The fee schedule links its hours prices here. car-k has none, so its card has no price, and no price of zero.
   const main = await listing("/en/rentals?package=hours-6");
@@ -838,9 +839,43 @@ test("an hours package shows its prices but finds no pickup yet", async () => {
   assertBrowsing(linked, ["pcx-125"], "hours package and class");
   assert.equal(hookText(linked, "data-search-error"), undefined, "hours package and class: a message");
 
-  // searchAvailability finds nothing for an hours package until task #50.
-  const path = `/en/rentals?${searchQuery(date, { package: "hours-6" })}`;
-  assertResults(await listing(path), [], path);
+  // #50: six hours from 10:00 or 12:00 is back by the 18:00 close, so the models priced for it are found, by sort, at its
+  // prices. car-k has no hours-6 price, so nbox-660 is not.
+  for (const time of ["10:00", "12:00"]) {
+    for (const locale of LOCALES) {
+      const path = `/${locale}/rentals?${searchQuery(date, { time, package: "hours-6" })}`;
+      const found = await listing(path);
+      assertResults(found, ["today-50", "pcx-125", "rebel-250"], path);
+      assertMoney(found, sheet, "hours-6", path);
+    }
+  }
+
+  // From 12:30 it would be back at 18:30: no search, the models to browse, and a message in the reader's language.
+  for (const time of ["12:30", "17:30"]) {
+    for (const locale of LOCALES) {
+      const path = `/${locale}/rentals?${searchQuery(date, { time, package: "hours-6" })}`;
+      const refused = await listing(path);
+      assertBrowsing(refused, ACTIVE, path);
+      assertNotice(refused, "data-search-error", locale, path);
+    }
+  }
+
+  // pcx-125's one active bike is booked from 16:30. Six hours from 10:00 is back at 16:00, inside the 60-minute
+  // turnaround, and from 09:30 it is back at 15:30, just clear of it. A day from 09:30 runs to 18:00 and is not.
+  await seedBooking(worker.db, {
+    vehicle_plate: "わ1002",
+    start_at: jstToEpoch(date, "16:30"),
+    end_at: jstToEpoch(date, "18:00"),
+  });
+  const cases: [string, string, string[]][] = [
+    ["10:00", "hours-6", ["today-50", "rebel-250"]],
+    ["09:30", "hours-6", ["today-50", "pcx-125", "rebel-250"]],
+    ["09:30", "day-1", ["today-50", "rebel-250", "nbox-660"]],
+  ];
+  for (const [time, packageId, expected] of cases) {
+    const path = `/en/rentals?${searchQuery(date, { time, package: packageId })}`;
+    assertResults(await listing(path), expected, path);
+  }
 });
 
 // Each card's own price.

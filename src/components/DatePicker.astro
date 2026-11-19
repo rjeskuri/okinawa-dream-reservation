@@ -19,7 +19,7 @@ interface Props {
   closedDates?: string[];
   /** The pickup date to start from, YYYY-MM-DD. */
   value?: string;
-  /** The chosen package's length, when the page already knows it. */
+  /** The chosen package's length as returnDate counts it, packageDays in src/lib/calendar.ts, when the page knows it. */
   packageDays?: number;
 }
 
