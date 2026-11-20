@@ -15,8 +15,9 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: [self-hosted, linux, harness-mac]
+    # The Mac runner shares its cores with Ryan's sessions: unit tests took ~17 min there against ~10 on GitHub's.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
