@@ -15,9 +15,9 @@ permissions:
 
 jobs:
   verify:
-    runs-on: [self-hosted, linux, harness-mac]
-    # The Mac runner shares its cores with Ryan's sessions: unit tests took ~17 min there against ~10 on GitHub's.
-    timeout-minutes: 45
+    # GitHub's runners while the repository is public (free); back to [self-hosted, linux, harness-mac] when private (#179).
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
