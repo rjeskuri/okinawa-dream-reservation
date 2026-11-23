@@ -1,4 +1,4 @@
-// The Add a reservation panel (apps-script/AddReservation.js and AddReservation.html) run in node:vm against the fake
+// The Add a reservation panel (apps-script/AddReservation.js and AddReservationPanel.html) run in node:vm against the fake
 // Google services. The fake Worker answers in the shapes of /api/staff/catalog (staffCatalogView) and
 // /api/staff/reservations, typed from their own modules so the fakes cannot drift from them. Signatures go through the
 // Worker's real verifyEnvelope, and every expected value is written out here by hand, never taken from the script.
@@ -357,14 +357,14 @@ test("Add a reservation is a dashboard action that opens the AddReservation dial
   const shell = panelFile("PanelShell.html");
   const at = shown.html.indexOf(shell);
   assert.ok(at >= 0, "the dialog holds PanelShell.html");
-  assert.ok(shown.html.indexOf(panelFile("AddReservation.html"), at + shell.length) >= 0, "then AddReservation.html");
+  assert.ok(shown.html.indexOf(panelFile("AddReservationPanel.html"), at + shell.length) >= 0, "then AddReservationPanel.html");
   assert.deepEqual(opened.fetches, [], "opening the dialog sends nothing");
   assertSheetUntouched(opened, "opening the dialog");
 
   // The panel reads its choices, draws its id and creates through the public functions.
-  const called = callServerNames(withoutComments(panelFile("AddReservation.html")));
+  const called = callServerNames(withoutComments(panelFile("AddReservationPanel.html")));
   for (const fn of ["reservationPanelOptions", "reservationPanelNewId", "reservationPanelCreate"]) {
-    assert.ok(called.includes(fn), `AddReservation.html calls ${fn}: ${JSON.stringify(called)}`);
+    assert.ok(called.includes(fn), `AddReservationPanel.html calls ${fn}: ${JSON.stringify(called)}`);
   }
 });
 
@@ -716,7 +716,7 @@ test("SOLD_OUT and INVALID_GUEST come back as readable messages with the fields"
 });
 
 test("the panel asks for the guest, model, package and pickup, shows the booking and offers no plate", () => {
-  const html = panelFile("AddReservation.html");
+  const html = panelFile("AddReservationPanel.html");
   const code = withoutComments(html);
 
   // Step by step on the shell: guest, model, package, date and time, review, then the result.

@@ -92,7 +92,7 @@ function htmlFiles(): { name: string; code: string }[] {
 
 function assertScansPanels(files: { name: string }[]): void {
   const names = files.map(({ name }) => name);
-  for (const required of ["PanelShell.html", "Dashboard.html"]) {
+  for (const required of ["PanelShell.html", "DashboardPanel.html"]) {
     assert.ok(names.includes(required), `the scan reads ${required}: ${JSON.stringify(names)}`);
   }
 }
@@ -146,7 +146,7 @@ test("openDashboard shows the home sidebar built on the panel shell", () => {
     const [shown] = script.shown;
     assert.equal(shown.kind, "sidebar");
     assert.equal(shown.title, "Okinawa Dream");
-    assertBuiltOnShell(shown.html, "Dashboard.html", "the home sidebar");
+    assertBuiltOnShell(shown.html, "DashboardPanel.html", "the home sidebar");
     assert.deepEqual(script.fetches, []);
   }
 });
@@ -460,8 +460,8 @@ test("every callServer in the panels names a public global function", () => {
   const calls = files.flatMap(({ name, code }) => callServerNames(code).map((fn) => ({ file: name, fn })));
   // The home loads through callServer, so a scan that finds nothing is broken, not clean.
   assert.ok(
-    calls.some(({ file, fn }) => file === "Dashboard.html" && fn === "dashboardHome"),
-    `Dashboard.html calls dashboardHome: ${JSON.stringify(calls)}`,
+    calls.some(({ file, fn }) => file === "DashboardPanel.html" && fn === "dashboardHome"),
+    `DashboardPanel.html calls dashboardHome: ${JSON.stringify(calls)}`,
   );
   for (const { file, fn } of calls) {
     assert.ok(!fn.endsWith("_"), `${file}: google.script.run cannot call the private ${fn}`);
@@ -503,7 +503,7 @@ test("every dashboard action opens one modal dialog", () => {
   // The dialog every action opens: openPanel_, with its own panel file and title.
   for (const title of ["Add a bike", "予約をキャンセル / Cancel a booking"]) {
     const script = world();
-    script.call("openPanel_", "Dashboard", title);
+    script.call("openPanel_", "DashboardPanel", title);
 
     assert.equal(script.shown.length, 1, `${title}: one dialog`);
     const [shown] = script.shown;
@@ -511,7 +511,7 @@ test("every dashboard action opens one modal dialog", () => {
     assert.equal(shown.title, title);
     assert.equal(shown.width, 720, title);
     assert.equal(shown.height, 640, title);
-    assertBuiltOnShell(shown.html, "Dashboard.html", `the ${title} dialog`);
+    assertBuiltOnShell(shown.html, "DashboardPanel.html", `the ${title} dialog`);
     assert.deepEqual(script.fetches, [], title);
   }
 
