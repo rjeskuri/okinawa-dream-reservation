@@ -1264,6 +1264,149 @@ test("only confirmed web bookings can be cancelled", async () => {
   assert.equal((await bookingNow(booking.id)).status, "CANCELLED");
 });
 
+/** A CONFIRMED booking staff took by phone or at the counter (#149), paid at the shop: no payment id, `paid` on record. */
+function paidAtShop(days: number, paid: number, change: Partial<BookingRow> = {}): Promise<BookingRow> {
+  return confirmed(days, paid, { source: "staff", payment_id: null, ...change });
+}
+
+/** How each language speaks of a refund. Loose, so the wording stays free: only a page that says nothing of one fails. */
+const refundWords: Record<Locale, RegExp> = { ja: /返金/, en: /refund/i, "zh-cn": /退款/, ko: /환불/ };
+
+/** The data of the guest's cancellation mail queued for `booking`, found by its dedupe key: the payload holds no id. */
+async function guestCancellationData(booking: BookingRow): Promise<Record<string, unknown>> {
+  const { results } = await worker.db
+    .prepare("SELECT kind, payload FROM outbox WHERE dedupe_key = ?1")
+    .bind(`email:guest_cancellation:${booking.id}`)
+    .all<{ kind: string; payload: string }>();
+  const mails = results
+    .filter(({ kind }) => kind === "email")
+    .map(({ payload }) => JSON.parse(payload) as { template: string; data: Record<string, unknown> })
+    .filter(({ template }) => template === "guest_cancellation");
+  assert.equal(mails.length, 1, `guest cancellation mails for ${booking.id}`);
+  return mails[0]?.data ?? {};
+}
+
+// [page locale, booking locale, paid on record]. A paid-at-shop booking has nothing paid online, but a row may hold an
+// amount; every tier here gives all of it back, so a page or a POST that took it for a web booking's would show it or send
+// it to Square.
+const AT_SHOP: [Locale, Locale, number][] = [
+  ["ja", "en", 0],
+  ["en", "ko", 9001],
+  ["zh-cn", "ja", 10_001],
+  ["ko", "zh-cn", 6400],
+];
+
+test("a paid-at-shop booking's link says nothing is refunded and cancels on POST", async () => {
+  await setTiers(FULL_REFUND);
+  for (const [locale, bookingLocale, paid] of AT_SHOP) {
+    const label = `${locale}, ${paid} on record`;
+    const booking = await paidAtShop(10, paid, { locale: bookingLocale });
+    const path = linkTo(locale, booking.id, tokenOf(booking.id));
+    const before = await stored();
+
+    // GET: the booking, a word on refunds and no refund to speak of: no tier's percent and not what is on record.
+    const res = await getPage(path);
+    const html = await res.text();
+    assert.equal(res.status, 200, `${label}: GET`);
+    const quoted = mainText(html, label);
+    assert.match(quoted, standalone(booking.ref), `${label}: the booking ref in\n${quoted}`);
+    assert.match(quoted, pickupDate(booking.start_at), `${label}: the pickup date in\n${quoted}`);
+    assert.match(quoted, refundWords[locale], `${label}: nothing said of a refund in\n${quoted}`);
+    assert.doesNotMatch(quoted, percent(100), `${label}: a refund rate in\n${quoted}`);
+    if (paid > 0) assert.doesNotMatch(quoted, figure(paid), `${label}: what is on record, as a refund, in\n${quoted}`);
+    assertInLocale(quoted, locale, label);
+    assert.deepEqual(await stored(), before, `${label}: reading the page changed something`);
+
+    // POST: cancelled, nothing refunded, no Square, and the guest's and staff's mail and the Bookings row queued.
+    const form = await cancelForm(locale, booking);
+    const postedAt = Date.now();
+    const first = await send(form);
+    const firstHtml = await first.text();
+    assert.equal(first.status, 200, `${label}: POST`);
+    const done = mainText(firstHtml, label);
+    assertInLocale(done, locale, `${label}: the result page`);
+    assert.notEqual(done, quoted, `${label}: the result page reads as the quote`);
+    assert.doesNotMatch(done, percent(100), `${label}: a refund rate on the result page`);
+    if (paid > 0) assert.doesNotMatch(done, figure(paid), `${label}: what is on record, as a refund, in\n${done}`);
+    assert.deepEqual(postForms(firstHtml), [], `${label}: a form on the result page`);
+
+    assert.deepEqual(refundCalls, [], `${label}: Square was called`);
+    assert.deepEqual(await refundsOf(booking.id), [], `${label}: a refund row`);
+    const cancelled = await bookingNow(booking.id);
+    assert.equal(cancelled.status, "CANCELLED", label);
+    assert.equal(cancelled.cancel_reason, "guest", label);
+    assert.ok((cancelled.cancelled_at ?? 0) >= postedAt && (cancelled.cancelled_at ?? Infinity) <= Date.now(), label);
+
+    const queued = await queuedFor(booking);
+    assert.deepEqual(queued.map(({ name }) => name), RECEIPT, `${label}: the queue`);
+    assert.partialDeepStrictEqual(queued[0], { to: booking.guest_email, locale: bookingLocale }, label);
+    assert.equal(queued[2]?.to, STAFF_EMAIL, label);
+    assert.partialDeepStrictEqual(
+      await guestCancellationData(booking),
+      { paidAtShop: true, refundJpy: 0, refundStatus: "NONE" },
+      `${label}: the guest's mail`,
+    );
+
+    // Again: already cancelled, and nothing more happens.
+    const after = await stored();
+    await assertAlreadyCancelled(await send(form), locale, `${label}, second POST`);
+    await assertAlreadyCancelled(await getPage(path), locale, `${label}, GET after the cancel`);
+    assert.deepEqual(refundCalls, [], `${label}: Square was called again`);
+    assert.deepEqual(await stored(), after, `${label}: a second POST changed something`);
+  }
+});
+
+test("a block booking's link still answers 404", async () => {
+  await setTiers(FULL_REFUND);
+  const ghost = randomUUID();
+  const ghostPages = { GET: await getPage(linkTo("en", ghost, tokenOf(ghost))), POST: await send(await formFor("en", { id: ghost })) };
+  assert.equal(ghostPages.GET.status, 404, "GET of no booking");
+  assert.equal(ghostPages.POST.status, 404, "POST of no booking");
+  const nothing = { GET: await ghostPages.GET.text(), POST: await ghostPages.POST.text() };
+
+  // Blocks in every state a link could find one in, each signed by the one who holds the secret. Each is no booking at
+  // all, whichever check a page makes first: started, cancelled or neither.
+  const blockRef = () => `e2e-151-${randomUUID()}`;
+  const blockGone = { status: "CANCELLED", cancel_reason: "The row left the Blocks tab", cancelled_at: Date.now() - HOUR_MS };
+  const blocks: [string, Partial<BookingRow>][] = [
+    ["a block", { source: "block", external_ref: blockRef(), payment_id: null, paid_jpy: 0 }],
+    ["a block with an amount on record", { source: "block", external_ref: blockRef(), payment_id: null }],
+    ["an OTA block", { source: "block", external_ref: blockRef(), external_channel: "Klook", payment_id: null }],
+    ["a cancelled block", { source: "block", external_ref: blockRef(), payment_id: null, ...blockGone }],
+    [
+      "a block under way",
+      { source: "block", external_ref: blockRef(), payment_id: null, start_at: Date.now() - HOUR_MS, end_at: Date.now() + DAY_MS },
+    ],
+  ];
+  for (const [what, change] of blocks) {
+    const block = await confirmed(10, 9000, change);
+    const form = await formFor("en", block);
+    const before = await stored();
+
+    const answers = { GET: await getPage(linkTo("en", block.id, tokenOf(block.id))), POST: await send(form) };
+    for (const method of ["GET", "POST"] as const) {
+      const res = answers[method];
+      const html = await res.text();
+      assert.equal(res.status, 404, `${what} ${method}: status ${res.status}`);
+      assert.equal(html, nothing[method], `${what} ${method}: this 404 is not the 404 of no booking`);
+    }
+    for (const locale of LOCALES) {
+      assert.equal(await statusOf(await getPage(linkTo(locale, block.id, tokenOf(block.id)))), 404, `${what}, GET in ${locale}`);
+    }
+
+    assert.deepEqual(refundCalls, [], `${what}: a refund`);
+    assert.deepEqual(await stored(), before, `${what}: something changed`);
+    assert.equal((await bookingNow(block.id)).status, change.status ?? "CONFIRMED", what);
+  }
+
+  // The same signed link on a paid-at-shop booking opens and cancels, so the 404s above are the block's own.
+  const atShop = await paidAtShop(10, 9000);
+  assert.equal(await statusOf(await getPage(linkTo("en", atShop.id, tokenOf(atShop.id)))), 200, "GET of a paid-at-shop booking");
+  assert.equal(await statusOf(await send(await formFor("en", atShop))), 200, "POST of a paid-at-shop booking");
+  assert.equal((await bookingNow(atShop.id)).status, "CANCELLED", "the paid-at-shop booking");
+  assert.deepEqual(refundCalls, [], "the paid-at-shop cancel called Square");
+});
+
 test("unknown locales get 404 on GET and POST", async () => {
   await setTiers(FULL_REFUND);
   const booking = await confirmed(10, 9000);
