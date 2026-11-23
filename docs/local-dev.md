@@ -258,12 +258,17 @@ Setup, once, in order:
    running the version it was deployed with.
 3. Open the test sheet and reload it. The Okinawa Dream menu lists Open dashboard and the four actions. Choose Open
    dashboard: Google asks to authorize the script again, now with access to the Drive files it creates. Allow it.
-4. In Extensions > Apps Script > Project Settings > Script Properties, `PUBLISH_SECRET` is already the value in
-   `.dev.vars`. Add `PHOTO_FOLDER_ID`, the test photo folder's id: the `GOOGLE_DRIVE_FOLDER_ID` the local site uses.
-   Paste values there only.
+4. In Extensions > Apps Script > Project Settings > Script Properties, `PUBLISH_SECRET` and `MAIL_SECRET` already hold
+   the values in `.dev.vars`. Add `PHOTO_FOLDER_ID`, the test photo folder's id: the `GOOGLE_DRIVE_FOLDER_ID` the local
+   site uses. Paste values there only.
 5. Choose Okinawa Dream > Set up tabs. Expect the alert to name Dashboard, and the Dashboard tab to list the four actions
    with their functions.
 6. On the Dashboard tab, add a drawing assigned to `openAddBike`, as [docs/dashboard.md](dashboard.md#setup) says.
+7. In `.dev.vars`, add `STAFF_EMAIL=<inbox>`, with an inbox you can read in place of `<inbox>`. The shop's emails go to
+   it, and the checks call it the `STAFF_EMAIL` inbox. A line in `.dev.vars` wins over the placeholder in
+   `wrangler.jsonc` ([First run](#first-run)), and each email takes the address when it is queued, so set it before the
+   checks. Check that `APPS_SCRIPT_MAIL_URL` there is the URL of the mail web app of task #45, ending in `/exec`:
+   without it no email is sent. Restart `npm run dev` if it is running.
 
 Each run:
 
@@ -291,21 +296,23 @@ The checks, in order:
    If the upload is refused for a missing permission, record Google's words: that settles the `drive.file` question in
    [docs/deploy.md](deploy.md#photo-upload-from-add-a-bike).
 2. **Add a reservation.** Book a guest with your own inbox as the email and a pickup some days ahead. Expect the Booked
-   step with a ref, a plate, the return and the deposit to collect at the shop. Within a few minutes expect the
-   confirmation email in the guest's language, with the deposit to pay at the shop, a line that cancelling refunds
-   nothing, and a cancel link; the new-booking email to the shop; and a Bookings row with source `staff` and `paid_jpy`
-   0. Open the cancel link on this computer, since it points at `SITE_URL`, http://localhost:4321. Expect the page to say
-   nothing was paid online, so cancelling refunds nothing. Press Cancel this booking: expect the done page, the
-   cancellation emails, the Bookings row `CANCELLED`, and nothing in the sandbox. When an email or a row does not come,
-   run the ten-minute cron as in [Crons locally](#crons-locally), which sends what the outbox holds.
-3. **Cancel with each choice.** On http://localhost:4321 make three bookings and pay each deposit with a sandbox test card
-   (task #37), with pickups whose tier gives between 0% and 100% (see the Cancellation tab), so the three choices differ.
+   step with a ref, a plate, the return and the deposit to collect at the shop. Within a few minutes expect, in your
+   inbox, the confirmation email in the guest's language, with the deposit to pay at the shop, a line that cancelling
+   refunds nothing, and a cancel link; the new-booking email in the `STAFF_EMAIL` inbox; and a Bookings row with source
+   `staff` and `paid_jpy` 0. Open the cancel link on this computer, since it points at `SITE_URL`,
+   http://localhost:4321. Expect the page to say nothing was paid online, so cancelling refunds nothing. Press Cancel
+   this booking: expect the done page, the guest's cancellation email in your inbox and the shop's in the `STAFF_EMAIL`
+   inbox, the Bookings row `CANCELLED`, and nothing in the sandbox. When an email or a row does not come, run the
+   ten-minute cron as in [Crons locally](#crons-locally), which sends what the outbox holds.
+3. **Cancel with each choice.** On http://localhost:4321 make three bookings, each with your own inbox as the guest's
+   email, and pay each deposit with a sandbox test card (task #37), with pickups whose tier gives between 0% and 100%
+   (see the Cancellation tab), so the three choices differ.
    Once each shows `CONFIRMED` on the Bookings tab, cancel the first with Tier refund, the second with Full refund and the
    third with No refund. For each, expect the confirm screen to show the choice and amount clicked, and the result to say
    Square accepted or made that refund, or no refund for the third. In the sandbox Seller Dashboard, expect a refund of
-   the tier amount on the first payment, of the whole deposit on the second, and none on the third. Expect the guest and
-   shop cancellation emails, and the three Bookings rows `CANCELLED`. Then run the daily check while `npm run dev` runs,
-   since both read the same local D1. In a second terminal:
+   the tier amount on the first payment, of the whole deposit on the second, and none on the third. Expect the guest's
+   cancellation emails in your inbox and the shop's in the `STAFF_EMAIL` inbox, and the three Bookings rows `CANCELLED`.
+   Then run the daily check while `npm run dev` runs, since both read the same local D1. In a second terminal:
 
    ```sh
    npm run build
