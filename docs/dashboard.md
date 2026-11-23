@@ -83,7 +83,7 @@ tabs goes live too. The Publish copies the new photos to the website.
 | --- | --- |
 | `The check found a problem, so nothing was saved.` | The sheet changed after the check. The window shows the new check. |
 | `A Publish is running, so nothing was saved. ...` | Try again when it has finished. |
-| `Could not write the row, so nothing was published: ...` | Some rows may be on their tabs already, and the window does not say which. Remove what this save added at the bottom of Types, RateClasses, Prices, Models and Vehicles, and from the model's `photos` cell, then start again. |
+| `Could not write the row, so nothing was published: ...` | The save stopped partway. Below the check, the window lists each row it had already written as `<tab> row <n>`; for a model already in Models, its row is listed because this save added photos to its `photos` cell. Delete those rows (or take those photos out of the cell) before saving again, or keep them, add the rest in the tabs and use Publish to website. With no list, nothing was written. |
 | `Publish stopped, the site is unchanged` or `Publish failed: ...` in the result | The rows are in the sheet. Fix the cause, then use Publish to website. Do not run Add a bike again, which would add the rows twice. |
 | `Photos with errors: ...` in the result | The copy to the website refused the named photo, for the reason given. |
 | `Only a JPEG, PNG or WebP photo can be uploaded. ...` | Save the image as one of those first. |
