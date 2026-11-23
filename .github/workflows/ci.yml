@@ -4,7 +4,15 @@ name: CI
 # second run on the push to main would only cost Actions minutes. That push starts Deploy.
 on:
   pull_request:
+  # A manual run can draw every randomized case. A pull request run has no inputs, so PROPERTY_RUNS stays empty and the
+  # randomized tests draw their bounded count.
   workflow_dispatch:
+    inputs:
+      property_runs:
+        description: "PROPERTY_RUNS for the randomized tests: full runs every case, a number runs that many, empty the bounded count"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -27,4 +35,7 @@ jobs:
       - name: Install
         run: npm ci
       - name: Verify
+        # Through env, never interpolated into the script.
+        env:
+          PROPERTY_RUNS: ${{ inputs.property_runs }}
         run: scripts/verify.sh
