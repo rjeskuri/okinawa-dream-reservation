@@ -147,7 +147,8 @@ The `curl` answers `ok`.
 - Both suites run 4 files at a time (`--test-concurrency=4`).
 - Randomized tests draw a bounded number of cases unless `PROPERTY_RUNS` says otherwise: `full` draws every case, a
   number draws that many. A failing case prints `PROPERTY_SEED=<seed> PROPERTY_RUNS=1`; set both to replay that case
-  alone. CI's manual run (`workflow_dispatch`) takes `property_runs` and passes it on as `PROPERTY_RUNS`.
+  alone. A pull request's CI run draws the bounded count; a manual "Run workflow" of CI
+  (`workflow_dispatch`) draws the full count.
 
 ## How fakes work
 
