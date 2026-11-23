@@ -101,7 +101,7 @@ CREATE TABLE bookings (
   id TEXT PRIMARY KEY,
   ref TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL CHECK (status IN ('ON_HOLD','PAYMENT_PENDING','CONFIRMED','CANCELLED','EXPIRED')),
-  source TEXT NOT NULL CHECK (source IN ('web','block')),
+  source TEXT NOT NULL CHECK (source IN ('web','block','staff')),
   model_id TEXT NOT NULL REFERENCES models(id),
   package_id TEXT,
   vehicle_plate TEXT NOT NULL REFERENCES vehicles(plate),

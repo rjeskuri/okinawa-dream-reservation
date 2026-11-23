@@ -8,6 +8,12 @@ import type { PackageLength, ShopConfig } from "../types.ts";
 export type PickupWindowReason =
   "OUTSIDE_HOURS" | "OFF_SLOT" | "CLOSED_PICKUP" | "RETURN_OUTSIDE_HOURS" | "CLOSED_RETURN" | "TOO_SOON" | "TOO_FAR";
 
+/**
+ * When a pickup is too soon. `lead`, a guest's: before now plus min_lead_hours. `slot`, staff's for a booking paid at the
+ * shop (owner, #149): once its slot has ended, so at 10:07 with 30-minute slots 10:00 can still be booked and 09:30 cannot.
+ */
+export type TooSoonRule = "lead" | "slot";
+
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
@@ -58,7 +64,8 @@ export function pickupInstant(date: string, time: string): number {
  *
  * The clock comes first because it is plain arithmetic on any number, and what passes it is close enough to `now` for
  * the calendar helpers, which throw on a start like 1e15. The grid reads the whole instant, since a wall clock to the
- * minute hides stray seconds. A bad slot length refuses every start, as pickupSlots lists none.
+ * minute hides stray seconds. A bad slot length refuses every start, as pickupSlots lists none. `tooSoon` picks the
+ * TOO_SOON rule; every other rule is the same for both.
  */
 export function pickupWindowError(
   config: ShopConfig,
@@ -66,12 +73,17 @@ export function pickupWindowError(
   startAt: number,
   pkg: PackageLength,
   now: number,
+  tooSoon: TooSoonRule = "lead",
 ): PickupWindowReason | null {
   // Number.isFinite because a caller's JSON can put anything here, and a numeric string would pass the comparisons.
   if (!Number.isFinite(startAt)) return "OFF_SLOT";
 
   // Written so that a NaN `now` comes out refused rather than accepted.
-  if (!(startAt >= now + config.minLeadHours * HOUR_MS)) return "TOO_SOON";
+  const inTime =
+    tooSoon === "slot"
+      ? startAt + config.slotMinutes * MINUTE_MS > now
+      : startAt >= now + config.minLeadHours * HOUR_MS;
+  if (!inTime) return "TOO_SOON";
   if (!(startAt <= now + config.maxDaysAhead * DAY_MS)) return "TOO_FAR";
 
   if (!isSlotLength(config.slotMinutes)) return "OFF_SLOT";
