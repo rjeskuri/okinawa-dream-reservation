@@ -39,6 +39,7 @@ import { quoteCancellation } from "../src/lib/booking/cancel.ts";
 import { createSquareClient } from "../src/lib/square/client.ts";
 import type { SquareClient, SquareFailure, SquareRecord, SquareTimeWindow } from "../src/lib/square/client.ts";
 import { createTestDb } from "./helpers/d1.ts";
+import { forRows } from "./helpers/property-rows.ts";
 import { insertRow, seedBooking, seedCatalogMeta, seedConfig, seedModel, seedTiers } from "./helpers/seed.ts";
 import type { BookingRow, TierRow } from "./helpers/seed.ts";
 
@@ -1247,7 +1248,9 @@ test("a clean state has no issues", async () => {
 test("each discrepancy is reported", async () => {
   assert.deepEqual([...new Set(DISCREPANCIES.map(({ type }) => type))].sort(), [...ISSUE_TYPES].sort(), "a row for every issue type");
 
-  for (const { what, seed } of DISCREPANCIES) {
+  // Every row in a full run (PROPERTY_RUNS=full), six by default. "only refund status and dashboard refunds are fixed"
+  // still meets every row on every run, all at once.
+  await forRows(DISCREPANCIES, { bounded: 6, seed: 93 }, async ({ what, seed }) => {
     await withWorld(async (world) => {
       await seedClean(world);
       const { issues, fixes } = await seed(world);
@@ -1261,7 +1264,7 @@ test("each discrepancy is reported", async () => {
       assertOnlyFixes(before, await snapshot(world.db), fixes, what);
       assert.deepEqual(fake.moneyCalls, [], `${what}: money moved`);
     });
-  }
+  });
 });
 
 test("only refund status and dashboard refunds are fixed", async () => {
