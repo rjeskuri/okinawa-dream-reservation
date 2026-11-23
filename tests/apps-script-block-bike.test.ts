@@ -1,4 +1,4 @@
-// The Block a bike panel (apps-script/BlockBike.js and BlockBike.html) run in node:vm against the fake Google services.
+// The Block a bike panel (apps-script/BlockBike.js and BlockBikePanel.html) run in node:vm against the fake Google services.
 // The clock is fixed through the helper's `web` state, so block ids are worked out by hand from the time in Japan and the
 // uuids handed out. Rows are read back by header, never by column, and expected cells are written out here, never taken
 // from the script. Messages are free text: tests look for facts in them (a block id, a booking ref, a plate), not for
@@ -305,14 +305,14 @@ test("Block a bike is a dashboard action that opens the BlockBike dialog", async
   const shell = panelFile("PanelShell.html");
   const at = shown.html.indexOf(shell);
   assert.ok(at >= 0, "the dialog holds PanelShell.html");
-  assert.ok(shown.html.indexOf(panelFile("BlockBike.html"), at + shell.length) >= 0, "then BlockBike.html");
+  assert.ok(shown.html.indexOf(panelFile("BlockBikePanel.html"), at + shell.length) >= 0, "then BlockBikePanel.html");
   assert.deepEqual(script.fetches, [], "opening the dialog sends nothing");
 
   // The panel reads its choices and saves through the public functions.
-  const code = withoutComments(panelFile("BlockBike.html"));
+  const code = withoutComments(panelFile("BlockBikePanel.html"));
   const called = Array.from(code.matchAll(/\bcallServer\s*\(\s*(["'`])([^"'`]*)\1/g), (match) => match[2]);
   for (const fn of ["blockPanelOptions", "blockPanelSave"]) {
-    assert.ok(called.includes(fn), `BlockBike.html calls ${fn}: ${JSON.stringify(called)}`);
+    assert.ok(called.includes(fn), `BlockBikePanel.html calls ${fn}: ${JSON.stringify(called)}`);
   }
 
   // Its choices: every model with every plate and its status, retired and in maintenance too, from the catalog read.

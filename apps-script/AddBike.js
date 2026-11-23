@@ -24,7 +24,7 @@ const ADD_BIKE_SLUG_ = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const ADD_BIKE_SLUG_MAX_ = 40;
 
 function openAddBike() {
-  openPanel_("AddBike", "Add a bike");
+  openPanel_("AddBikePanel", "Add a bike");
 }
 
 /**

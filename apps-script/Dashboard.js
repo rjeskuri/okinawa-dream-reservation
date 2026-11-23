@@ -1,6 +1,7 @@
 // The staff Dashboard: a home sidebar and step-by-step panels, opened from the Okinawa Dream menu. Each panel is
 // PanelShell.html followed by its own HTML file, joined as plain text with no template scriptlets. A panel reaches the
-// script through google.script.run, which can call only global functions whose names do not end in `_`.
+// script through google.script.run, which can call only global functions whose names do not end in `_`. Apps Script
+// names files without their extension, so a panel's HTML takes a Panel suffix (AddBike.js loads AddBikePanel.html).
 
 const DASHBOARD_TAB_ = "Dashboard";
 const DASHBOARD_TITLE_ = "Okinawa Dream";
@@ -19,7 +20,7 @@ const DASHBOARD_ACTIONS_ = [
 ];
 
 function openDashboard() {
-  SpreadsheetApp.getUi().showSidebar(panelHtml_("Dashboard").setTitle(DASHBOARD_TITLE_));
+  SpreadsheetApp.getUi().showSidebar(panelHtml_("DashboardPanel").setTitle(DASHBOARD_TITLE_));
 }
 
 /** What the home sidebar shows. It makes no request: a missing Script Property is listed, not tried. */
