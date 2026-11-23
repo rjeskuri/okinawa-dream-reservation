@@ -4,6 +4,8 @@
 //   guest_confirmation: ref, modelName, packageName, startAt, endAt, priceJpy, paidJpy, shopOpen, shopClose,
 //     guest { familyName, givenName }, cancelUrl, policySummary
 //   guest_cancellation: the same without cancelUrl and policySummary, plus refundJpy and refundStatus
+//   Both guest templates may also carry paidAtShop: true (#150): the deposit is paid at the shop, nothing online.
+//     guest_confirmation then also has depositJpy, the amount due at the shop (paidJpy is 0).
 //   staff_new_booking: ref, modelNameJa, packageNameJa, startAt, endAt, priceJpy, paidJpy, vehiclePlate,
 //     guest { familyName, givenName, email, phone }
 //   staff_cancellation: the same, plus refundJpy and refundStatus
@@ -16,7 +18,10 @@
 // Expected values are literals or derived here, never through src/lib/time.ts or the code under test. Content checks
 // read the text and the HTML with its tags removed, so the markup stays free; the escaping tests read the raw HTML.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { email } from "../src/i18n/strings/email.ts";
+import { t } from "../src/i18n/t.ts";
 import { LOCALES, type Locale } from "../src/lib/locale.ts";
 import { renderEmail } from "../src/lib/mail/templates.ts";
 import type { EmailPayload } from "../src/lib/outbox.ts";
@@ -797,11 +802,209 @@ test("subjects stay one plain line whatever the values", () => {
   assert.ok(subject.includes(`A&B <C> "D" 'E'`), `the title is not plain in ${subject}`);
 });
 
+// --- Paid at the shop (#150) ---------------------------------------------------------------------------------------
+// The new wording is read back through the locale's own string lookup, so these tests pin where it appears and what is
+// gone, never the sentences. The coder adds these keys to src/i18n/strings/email.ts, each static text with no {marks}:
+//   email.label.paidAtShop               the row label "Deposit to pay at the shop" (its value is depositJpy)
+//   email.confirmation.introPaidAtShop   one sentence added after the usual intro: the deposit is paid at pickup
+//   email.confirmation.policyPaidAtShop  the value of the policy row: nothing paid online, so cancelling refunds nothing
+//   email.cancellation.paidAtShop        one line: nothing was paid online, so nothing is refunded
+const PAID_AT_SHOP_KEYS = [
+  "email.label.paidAtShop",
+  "email.confirmation.introPaidAtShop",
+  "email.confirmation.policyPaidAtShop",
+  "email.cancellation.paidAtShop",
+];
+
+function say(locale: Locale, key: string): string {
+  return t(locale, email, key);
+}
+
+/** The deposit due at the shop; the booking's paidJpy fixture is reused, so it differs from the price. */
+function paidAtShopConfirmation(booking: BookingFixture, locale: Locale): Data {
+  return { ...confirmationData(booking, locale), paidAtShop: true, paidJpy: 0, depositJpy: booking.paidJpy };
+}
+
+function paidAtShopCancellation(booking: BookingFixture, locale: Locale, refundJpy: number, status: string): Data {
+  return { ...cancellationData(booking, locale, refundJpy, status), paidAtShop: true, paidJpy: 0 };
+}
+
+/** The row labels a reader sees: the text before ": " on each line, and the header cells of the HTML. */
+function rowLabels(rendered: Rendered): { text: string[]; html: string[] } {
+  const text = rendered.text
+    .split("\n")
+    .filter((line) => line.includes(": "))
+    .map((line) => line.split(": ")[0]);
+  const html = [...rendered.html.matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/gi)].map((m) => decodeEntities(m[1]));
+  return { text, html };
+}
+
+function assertNoRow(rendered: Rendered, label: string, context: string): void {
+  const { text, html } = rowLabels(rendered);
+  assert.ok(!text.includes(label), `${context}: the text has a "${label}" row\n${rendered.text}`);
+  assert.ok(!html.includes(label), `${context}: the html has a "${label}" row\n${rendered.html}`);
+}
+
+/** The value of the row called `label`, from the plain text and from the HTML. */
+function rowValues(rendered: Rendered, label: string): { text?: string; html?: string } {
+  const line = rendered.text.split("\n").find((l) => l.startsWith(`${label}: `));
+  const cells = rendered.html.matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>\s*<td\b[^>]*>([\s\S]*?)<\/td>/gi);
+  const cell = [...cells].find((m) => decodeEntities(m[1]) === label);
+  return { text: line?.slice(label.length + 2), html: cell ? decodeEntities(cell[2]) : undefined };
+}
+
+test("a paid-at-shop confirmation shows the deposit due at the shop and the cancel link, not a deposit paid", () => {
+  for (const booking of BOOKINGS) {
+    for (const locale of LOCALES) {
+      const rendered = render("guest_confirmation", locale, paidAtShopConfirmation(booking, locale));
+      const context = `${booking.ref} ${locale}`;
+      const url = cancelUrl(booking, locale);
+      const label = say(locale, "email.label.paidAtShop");
+      const { ref, pickupJst, returnJst, shopOpen, shopClose, guest } = booking;
+
+      assertShows(
+        rendered,
+        [
+          ref,
+          booking.modelNames[locale],
+          booking.packageNames[locale],
+          pickupJst,
+          returnJst,
+          yen(booking.priceJpy),
+          shopOpen,
+          shopClose,
+          guest.familyName,
+          guest.givenName,
+          url,
+          label,
+          say(locale, "email.confirmation.introPaidAtShop"),
+          say(locale, "email.confirmation.intro"),
+        ],
+        context,
+      );
+      // The deposit due sits in its own row, with the amount from depositJpy.
+      const row = rowValues(rendered, label);
+      assert.ok(row.text !== undefined && yen(booking.paidJpy).test(row.text), `${context}: text row ${row.text}`);
+      assert.ok(row.html !== undefined && yen(booking.paidJpy).test(row.html), `${context}: html row ${row.html}`);
+      // No Deposit paid row, and no zero amount standing for one.
+      assertNoRow(rendered, say(locale, "email.label.paid"), context);
+      assertHides(rendered, [yen(0)], context);
+      // The link stays.
+      assert.ok(hrefs(rendered.html).includes(url), `${context}: no link to ${url} in ${rendered.html}`);
+      assertHides(rendered, guestAbsences(booking, locale), context);
+    }
+  }
+});
+
+test("a paid-at-shop confirmation says cancelling refunds nothing instead of the refund tiers", () => {
+  for (const booking of BOOKINGS) {
+    for (const locale of LOCALES) {
+      const rendered = render("guest_confirmation", locale, paidAtShopConfirmation(booking, locale));
+      const context = `${booking.ref} ${locale}`;
+      const policyLabel = say(locale, "email.label.policy");
+      const line = say(locale, "email.confirmation.policyPaidAtShop");
+
+      // One policy row whose value is the one new line, and the payload's refund tiers nowhere.
+      const row = rowValues(rendered, policyLabel);
+      assert.equal(row.text, line, `${context}: text policy row`);
+      assert.equal(row.html, line, `${context}: html policy row`);
+      assertHides(rendered, [`${booking.policy} (${locale})`], context);
+      assert.equal(rowLabels(rendered).text.filter((label) => label === policyLabel).length, 1, context);
+    }
+  }
+});
+
+test("a paid-at-shop cancellation shows no refund rows", () => {
+  for (const booking of BOOKINGS) {
+    for (const locale of LOCALES) {
+      for (const status of REFUND_STATUSES) {
+        // A payload that wrongly carries a refund must still not show one.
+        const refunds = status === "NONE" ? [0] : [0, booking.refundJpy];
+        for (const refundJpy of refunds) {
+          const rendered = render("guest_cancellation", locale, paidAtShopCancellation(booking, locale, refundJpy, status));
+          const context = `${booking.ref} ${locale} ${status} ${refundJpy}`;
+          const { ref, pickupJst, returnJst, shopOpen, shopClose, guest } = booking;
+
+          assertShows(
+            rendered,
+            [
+              ref,
+              booking.modelNames[locale],
+              booking.packageNames[locale],
+              pickupJst,
+              returnJst,
+              yen(booking.priceJpy),
+              shopOpen,
+              shopClose,
+              guest.familyName,
+              guest.givenName,
+              say(locale, "email.cancellation.intro"),
+              say(locale, "email.cancellation.paidAtShop"),
+            ],
+            context,
+          );
+          assertNoRow(rendered, say(locale, "email.label.paid"), context);
+          assertNoRow(rendered, say(locale, "email.label.refund"), context);
+          assertHides(
+            rendered,
+            [
+              yen(0),
+              ...(refundJpy > 0 ? [yen(refundJpy)] : []),
+              ...["none", "pending", "completed", "failed"].map((word) => say(locale, `email.refund.${word}`)),
+            ],
+            context,
+          );
+        }
+      }
+    }
+  }
+});
+
+test("emails without paidAtShop are unchanged, and paidAtShop alone changes them", () => {
+  // The golden file is today's output, captured before #150, for booking OD-A7K2Q in every locale.
+  const goldenFile = new URL("./fixtures/email/guest-without-paid-at-shop.json", import.meta.url);
+  const golden = JSON.parse(readFileSync(goldenFile, "utf8")) as Record<string, Rendered>;
+  const booking = BOOKINGS[0];
+  for (const locale of LOCALES) {
+    const confirmation = { ...confirmationData(booking, locale), depositJpy: 5_500 };
+    const cases: [string, Template, Data][] = [
+      [`guest_confirmation|${locale}`, "guest_confirmation", confirmation],
+      [`guest_cancellation|${locale}|COMPLETED`, "guest_cancellation", cancellationData(booking, locale, 2_750, "COMPLETED")],
+      [`guest_cancellation|${locale}|NONE`, "guest_cancellation", cancellationData(booking, locale, 0, "NONE")],
+    ];
+    for (const [key, template, data] of cases) {
+      const expected = golden[key];
+      assert.ok(expected, `no golden for ${key}`);
+      assert.deepEqual(render(template, locale, data), expected, `${key}: without paidAtShop`);
+      assert.deepEqual(render(template, locale, { ...data, paidAtShop: false }), expected, `${key}: paidAtShop false`);
+      assert.notDeepEqual(render(template, locale, { ...data, paidAtShop: true }), expected, `${key}: paidAtShop true`);
+    }
+  }
+});
+
+test("the paid-at-shop strings exist in all four locales, each its own wording", () => {
+  for (const key of PAID_AT_SHOP_KEYS) {
+    const texts = LOCALES.map((locale) => say(locale, key));
+    for (const [index, text] of texts.entries()) {
+      assert.ok(text.trim().length > 0, `${key} ${LOCALES[index]} is empty`);
+      assert.ok(!/[{}]/.test(text), `${key} ${LOCALES[index]} has a {mark}, but the template fills none: ${text}`);
+    }
+    assert.equal(new Set(texts).size, LOCALES.length, `${key}: two locales share one text`);
+  }
+  for (const locale of LOCALES) {
+    assert.notEqual(say(locale, "email.label.paidAtShop"), say(locale, "email.label.paid"), locale);
+    assert.notEqual(say(locale, "email.cancellation.paidAtShop"), say(locale, "email.refund.none"), locale);
+    assert.notEqual(say(locale, "email.confirmation.introPaidAtShop"), say(locale, "email.confirmation.intro"), locale);
+  }
+});
+
 test("every template gives a subject, plain text and HTML with nothing missing", () => {
   const payloads: [Template, Locale, Data][] = [];
   for (const booking of BOOKINGS) {
     for (const locale of LOCALES) {
       payloads.push(["guest_confirmation", locale, confirmationData(booking, locale)]);
+      payloads.push(["guest_confirmation", locale, paidAtShopConfirmation(booking, locale)]);
+      payloads.push(["guest_cancellation", locale, paidAtShopCancellation(booking, locale, 0, "NONE")]);
       for (const status of REFUND_STATUSES) {
         const refund = refundOf(booking, status);
         payloads.push(["guest_cancellation", locale, cancellationData(booking, locale, refund, status)]);
