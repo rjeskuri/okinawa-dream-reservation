@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test",
+    "test": "node --test --test-concurrency=4",
     "dev": "astro dev",
     "build": "astro build",
     "lint": "astro check",
-    "test:e2e": "node --test --test-concurrency=1 \"tests/e2e/**/*.e2e.ts\"",
+    "test:e2e": "node --test --test-concurrency=4 \"tests/e2e/**/*.e2e.ts\"",
     "typegen": "wrangler types --strict-vars=false",
     "db:migrate:local": "wrangler d1 migrations apply DB --local"
   },

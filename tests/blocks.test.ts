@@ -12,6 +12,7 @@ import type { ValidBlock } from "../src/lib/catalog/sheet-schema.ts";
 import { conflicts, isBlocking } from "../src/lib/db/blocking.ts";
 import type { BookingStatus } from "../src/lib/types.ts";
 import { createTestDb, type TestDb } from "./helpers/d1.ts";
+import { propertyRuns } from "../src/lib/property.ts";
 import {
   seedBooking,
   seedCatalogMeta,
@@ -1753,10 +1754,11 @@ test("a second sync with no changes is a no-op", async (t) => {
 
 test("blocks and concurrent holds never overlap", async (t) => {
   // The last round names a plate on every row, so each bike has a row that may not fall back to another.
+  // Rounds 1 to 3 run the same race again, for the interleavings it may land in: three rounds in a full run
+  // (PROPERTY_RUNS=full, or a count of its own), one by default.
+  const repeats = propertyRuns(process.env, { bounded: 1, full: 3 });
   const ROUNDS: [round: string, named: boolean][] = [
-    ["round 1", false],
-    ["round 2", false],
-    ["round 3", false],
+    ...Array.from({ length: repeats }, (_, i): [string, boolean] => [`round ${i + 1}`, false]),
     ["round of named plates", true],
   ];
 
