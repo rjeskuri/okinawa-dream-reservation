@@ -39,6 +39,16 @@ A later change to `Mail.js` goes live only with Deploy, Manage deployments, edit
 
 If the authorization lapses, the web app answers with a Google login page and mail waits in the outbox. It waits for 8 attempts only, about 20 hours 36 minutes, and then the message goes dead, so restore the authorization before that.
 
+### Photo upload from Add a bike
+
+Add a bike stores each photo in the photo folder the Worker copies from, as the staff member who runs it (`addBikeUploadPhoto` in `apps-script/AddBike.js`).
+
+1. Under Project Settings, Script Properties, add `PHOTO_FOLDER_ID` with the same folder id as `GOOGLE_DRIVE_FOLDER_ID` under [Vars](#2-vars). Without it the upload refuses with a message that names the property.
+2. Give each staff member edit access to that folder. With view access only, Drive refuses the upload and the panel shows why.
+3. `apps-script/appsscript.json` adds the `https://www.googleapis.com/auth/drive.file` scope (owner decision 6). Each staff member re-authorizes the script once, at the first menu item they run after the new manifest is in.
+
+`drive.file` covers only files the script creates, and it may not let the script add files to a folder it did not create, or see the files staff put there by hand. The live check in task 19 settles that. If it shows `drive.file` cannot write into the existing folder, the fallback is `https://www.googleapis.com/auth/drive` in place of `drive.file`, which reaches the whole Drive of each staff member who runs the script; they then re-authorize once more.
+
 ## 2. Vars
 
 Replace the placeholders under `vars` in `wrangler.jsonc`. They are committed and are not secret.

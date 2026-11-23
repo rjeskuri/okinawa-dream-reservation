@@ -1067,8 +1067,10 @@ test("the manifest runs on V8 in Japan time with the ticket's scopes", () => {
   assert.equal(manifest.runtimeVersion, "V8");
   assert.equal(manifest.timeZone, "Asia/Tokyo");
   // userinfo.email is the scope Google documents for Session.getActiveUser, added by the owner's answer on the ticket.
-  // script.send_mail is the mail web app's, from task #38.
+  // script.send_mail is the mail web app's, from task #38. drive.file is Add a bike's photo upload, from task #155
+  // (owner decision 6): the narrowest Drive scope, acting as the staff member who runs it.
   assert.deepEqual([...manifest.oauthScopes].sort(), [
+    "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/script.container.ui",
     "https://www.googleapis.com/auth/script.external_request",
     "https://www.googleapis.com/auth/script.send_mail",
