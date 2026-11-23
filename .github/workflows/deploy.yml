@@ -1,9 +1,10 @@
 name: Deploy
 
+# The push to main is a pull request landing, and that pull request's CI run is the gate: harness-pr land --catch-up
+# squash-merges exactly the tree it verified, and git hooks refuse direct pushes to main. CI does not run on main, so
+# there is nothing here to wait for (this used to follow CI's run on main through workflow_run).
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
     branches: [main]
   workflow_dispatch:
 
@@ -16,18 +17,18 @@ permissions:
 
 jobs:
   deploy:
-    # A manual run on the main branch (github.ref, because ref_name also matches a tag named main), or a CI run that
-    # passed on a push to this repository's main. The branches filter above also lets through pull requests from a
-    # branch named main and failed runs, and this guard is what refuses them. Keep it one bare expression on one line:
-    # text outside a `${{ }}` would make it always true.
-    if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)
+    # A push to the main branch, or a manual run on it (github.ref, because ref_name also matches a tag named main). The
+    # branches filter above already leaves out other pushes, but a manual run can pick any branch or tag, and this guard
+    # is what refuses them. Keep it one bare expression on one line: text outside a `${{ }}` would make it always true.
+    # GitHub's == ignores case, so a branch named Main would pass: a known residual.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # On workflow_run, github.sha is the tip of main, not the commit CI passed.
+      # On a push, github.sha is the pushed commit; on a manual run, the tip of main.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: actions/setup-node@v7
         with:
           node-version: 24
