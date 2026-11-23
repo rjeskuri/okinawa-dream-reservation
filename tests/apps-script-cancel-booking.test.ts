@@ -617,3 +617,31 @@ test("Worker failures come back as readable messages, not stack traces", () => {
     assert.equal(new Set(said).size, reasons.length, `${fn}: one message per reason: ${JSON.stringify(said)}`);
   }
 });
+
+// /api/staff/cancel answers NOT_CANCELLABLE for a booking that is not CONFIRMED (on hold, in payment, its hold expired)
+// or is a block (src/lib/booking/cancel.ts). Since #151 a confirmed booking paid at the shop cancels too, so the sentence
+// must give that reason and must not say only bookings made on the website can be cancelled (#192).
+test("NOT_CANCELLABLE says the booking is not confirmed, such as a hold, and not that only web bookings cancel", () => {
+  const WEB_ONLY =
+    /made (on|through|via|from|at) the (website|web|site)|booked (on|through|via) the (website|web|site)|\b(web|website|online) (bookings?|reservations?)\b|\bonly\b[^.]*\b(web|website|online)\b/i;
+  const NOT_CONFIRMED = /\bnot (yet )?(a )?confirmed\b|\bunconfirmed\b|\bisn't confirmed\b/i;
+  const HOLD = /\bhold\b|\bheld\b/i;
+
+  const calls: { fn: string; args: unknown[] }[] = [
+    { fn: "cancelPanelQuote", args: [HIGA.id] },
+    { fn: "cancelPanelConfirm", args: [{ bookingId: HIGA.id, choice: "full", refundJpy: 3000 }] },
+    { fn: "cancelPanelConfirm", args: [{ bookingId: HIGA.id, choice: "none", refundJpy: 0 }] },
+  ];
+  for (const { fn, args } of calls) {
+    const what = `${fn}(${JSON.stringify(args)}), NOT_CANCELLABLE`;
+    const script = world({ routes: { [CANCEL]: { body: { ok: false, reason: "NOT_CANCELLABLE" } } } });
+    const answer = call(script, fn, ...args);
+    assert.equal(answer?.ok, false, `${what}: ${JSON.stringify(answer)}`);
+    assert.equal(answer.reason, "NOT_CANCELLABLE", `${what}: the Worker's reason`);
+    assertReadable(answer.message, what);
+    const message = String(answer.message);
+    assert.doesNotMatch(message, WEB_ONLY, `${what}: a paid-at-shop booking cancels too: ${message}`);
+    assert.match(message, NOT_CONFIRMED, `${what}: says the booking is not confirmed: ${message}`);
+    assert.match(message, HOLD, `${what}: names a hold as a booking that cannot be cancelled: ${message}`);
+  }
+});
