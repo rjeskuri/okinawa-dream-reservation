@@ -29,6 +29,7 @@
   const panelSteps = [];
   const panelNextHandlers = {};
   let panelStep = 0;
+  const panelHistory = [];
   let panelBusyCount = 0;
   let panelBack = null;
   let panelNext = null;
@@ -105,13 +106,18 @@
       .then(() => (handler ? handler() : true))
       .finally(() => setBusy(false))
       .then((answer) => {
-        if (answer !== false) showStep(typeof answer === "string" ? answer : panelStep + 1);
+        if (answer === false) return;
+        const from = panelStep;
+        showStep(typeof answer === "string" ? answer : panelStep + 1);
+        panelHistory.push(from);
       })
       .catch(showError);
   }
 
+  /** Back to the step Next came from, so a step a handler skipped over is skipped on the way back too. */
   function backStep() {
-    if (panelStep > 0) showStep(panelStep - 1);
+    if (panelHistory.length > 0) showStep(panelHistory.pop());
+    else if (panelStep > 0) showStep(panelStep - 1);
   }
 
   function panelButton(text, onClick) {
