@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { SHEET_TABS } from "../src/lib/catalog/sheet-schema.ts";
+import { SHEET_TABS, validateBlocks } from "../src/lib/catalog/sheet-schema.ts";
 import { verifyEnvelope } from "../src/lib/crypto.ts";
 import {
   type AppsScriptWorld,
@@ -14,6 +14,7 @@ import {
   type Options,
   type Reply,
   type Route,
+  sheetsApiValues,
   type WebState,
 } from "./helpers/apps-script.ts";
 
@@ -139,10 +140,12 @@ type World = Omit<Options, "tabs" | "routes" | "web"> & {
   routes?: Record<string, Route>;
 };
 
+// The sheet is in Japan time, as Set up tabs leaves it, so a date-time written as text is read on Japan's wall clock.
 function world({ now = NOW, blocks = [STANDARD, STANDARD_ROW], publishLog, routes = {}, ...rest }: World = {}) {
   return loadAppsScript({
     properties: PROPERTIES,
     user: USER,
+    timeZone: "Asia/Tokyo",
     ...rest,
     web: clock(now),
     tabs: { Blocks: blocks, PublishLog: publishLog ?? [[...SHEET_TABS.PublishLog]] },
@@ -274,6 +277,16 @@ function objectsIn(value: unknown): Record<string, unknown>[] {
 const START = "2027-07-15 09:00";
 const END = "2027-07-16 18:00";
 
+/**
+ * The cell a start or end lands in: Sheets reads `YYYY-MM-DD HH:mm` as a date-time on the sheet's wall clock, Japan
+ * time, UTC+9 all year. Worked out here, not by the fake.
+ */
+function jst(text: unknown): Date {
+  const [, year, month, day, hour, minute] = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(String(text)) ?? [];
+  assert.ok(year !== undefined, `a YYYY-MM-DD HH:mm date-time: ${String(text)}`);
+  return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour) - 9, Number(minute)));
+}
+
 test("Block a bike is a dashboard action that opens the BlockBike dialog", async () => {
   const script = world();
   const actions = script.evaluate("DASHBOARD_ACTIONS_") as { label: string; fn: string }[];
@@ -403,8 +416,8 @@ test("save appends a maintenance row under the Blocks headers and syncs it", asy
       block_id: blockId,
       model_id: model,
       plate,
-      start: input.start,
-      end: input.end,
+      start: jst(input.start),
+      end: jst(input.end),
       channel: "maintenance",
       note: input.reason,
     });
@@ -595,8 +608,8 @@ test("an end not after the start or a bad date is refused without writing", () =
     const script = world();
     const answer = save(script, { modelId: "pcx-125", plate: "わ1001", start, end, reason: "check" });
     const written = cellsOf(STANDARD, blocksGrid(script)[2]);
-    assert.equal(written.start, start);
-    assert.equal(written.end, end);
+    assert.deepEqual(written.start, jst(start));
+    assert.deepEqual(written.end, jst(end));
     assert.equal(answer.row, 3);
   }
 
@@ -758,5 +771,69 @@ test("a failed sync keeps the row and says the next Publish syncs it", () => {
       assert.ok(logCell(rows[0], "message").includes(String(answer.blockId)), `${label}: the log names the block`);
       assert.equal(script.lock.held(), false, `${label}: the lock is released`);
     }
+  }
+});
+
+test("a digit-only plate and a reason that looks like a number, date or boolean are kept as typed and read back", () => {
+  // Plates of digits only, which Sheets would read as numbers, one of them with a leading zero.
+  const models: Model[] = [
+    { ...MODELS[0], plates: [{ plate: "0123", status: "active" }, { plate: "わ1001", status: "active" }] },
+    { ...MODELS[1], plates: [{ plate: "2002", status: "active" }, { plate: "007", status: "maintenance" }] },
+    MODELS[2],
+  ];
+  const catalogForBlocks = {
+    models: models.map(({ id }) => ({ id })),
+    vehicles: models.flatMap(({ id, plates }) => plates.map(({ plate }) => ({ plate, modelId: id }))),
+  };
+  const cases: { input: Input; model: string; blocks: unknown[][] }[] = [
+    { input: { modelId: "pcx-125", plate: "0123", start: START, end: END, reason: "2027-07-15" }, model: "pcx-125", blocks: [STANDARD, STANDARD_ROW] },
+    { input: { plate: "2002", start: "2027-03-01 10:30", end: "2027-03-03 17:00", reason: "TRUE" }, model: "forza-250", blocks: [SHUFFLED, ...SHUFFLED_ROWS] },
+    { input: { modelId: "forza-250", plate: "007", start: START, end: END, reason: "09:30" }, model: "forza-250", blocks: [STANDARD] },
+    { input: { modelId: "jimny", plate: "", start: "2028-02-28 23:30", end: "2028-02-29 00:30", reason: "0123" }, model: "jimny", blocks: [SHUFFLED] },
+    { input: { modelId: "pcx-125", plate: "わ1001", start: START, end: END, reason: "1,500" }, model: "pcx-125", blocks: [STANDARD, STANDARD_ROW] },
+    { input: { modelId: "pcx-125", plate: "0123", start: START, end: END, reason: "false" }, model: "pcx-125", blocks: [STANDARD] },
+  ];
+  for (const { input, model, blocks } of cases) {
+    const label = `plate ${JSON.stringify(input.plate)}, reason ${JSON.stringify(input.reason)}`;
+    const holder: { script?: AppsScriptWorld; read?: ReturnType<typeof validateBlocks> } = {};
+    const script = world({
+      blocks,
+      routes: {
+        [CATALOG_PATH]: { body: catalog(models) },
+        // What the blocks step reads: the tab through the Sheets API, checked by the Worker's own validateBlocks.
+        [BLOCKS]: () => {
+          holder.read ??= validateBlocks({ Blocks: sheetsApiValues(holder.script as AppsScriptWorld, "Blocks") }, catalogForBlocks, NOW);
+          return SYNCED;
+        },
+      },
+    });
+    holder.script = script;
+    const answer = save(script, input);
+
+    // The row as the sheet holds it: the typed text stays text, and the start and end stay date-times.
+    const grid = blocksGrid(script);
+    assert.equal(grid.length, blocks.length + 1, `${label}: one row added`);
+    const written = cellsOf(blocks[0], grid[blocks.length]);
+    assert.strictEqual(written.plate, input.plate, `${label}: the plate as typed`);
+    assert.strictEqual(written.note, input.reason, `${label}: the reason as typed`);
+    assert.strictEqual(written.block_id, answer.blockId, `${label}: the block id`);
+    assert.strictEqual(written.model_id, model, label);
+    assert.strictEqual(written.channel, "maintenance", label);
+    assert.deepEqual(written.start, jst(input.start), `${label}: the start is a date-time in Japan`);
+    assert.deepEqual(written.end, jst(input.end), `${label}: the end is a date-time in Japan`);
+
+    // The blocks step reads back what staff typed, and the times they meant.
+    const read = holder.read;
+    assert.ok(read !== undefined, `${label}: the blocks step ran`);
+    const row = blocks.length + 1;
+    const errors = read.statuses.filter((status) => status.row === row && status.level === "error");
+    assert.deepEqual(errors, [], `${label}: the Worker takes the row`);
+    const block = read.blocks.find((each) => each.blockId === answer.blockId);
+    assert.ok(block !== undefined, `${label}: the block is read: ${JSON.stringify(read.blocks)}`);
+    assert.strictEqual(block.plate, input.plate === "" ? null : input.plate, `${label}: the plate read back`);
+    assert.strictEqual(block.note, input.reason, `${label}: the reason read back`);
+    assert.strictEqual(block.modelId, model, label);
+    assert.strictEqual(block.startAt, jst(input.start).getTime(), `${label}: the start read back`);
+    assert.strictEqual(block.endAt, jst(input.end).getTime(), `${label}: the end read back`);
   }
 });
