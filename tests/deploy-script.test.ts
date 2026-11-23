@@ -1,5 +1,5 @@
-// scripts/deploy.sh against fake npm, npx and git, and .github/workflows/deploy.yml through a small YAML reader:
-// nothing deploys without credentials, and only a commit CI passed on main reaches the script.
+// scripts/deploy.sh against fake npm, npx and git, and .github/workflows/{deploy,ci}.yml through a small YAML reader:
+// nothing deploys without credentials, and only a push to main or a manual run on main reaches the script.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomInt, randomUUID } from "node:crypto";
@@ -96,7 +96,7 @@ function runDeploy(
       timeout: 30_000,
     });
     assert.ifError(result.error);
-    // On workflow_run GITHUB_SHA is the tip of main, not the commit CI passed: the commit is the workflow's checkout, in every run.
+    // The commit is the workflow's checkout, in every run: the script never picks one.
     assert.equal(existsSync(gitLog), false, "the script called git");
     const records = existsSync(log) ? readFileSync(log, "utf8").trimEnd().split("\n").map((line) => line.split("\t")) : [];
     const output = result.stdout + result.stderr;
@@ -270,33 +270,47 @@ function scalars(text?: string): string[] {
 
 const REPOSITORY = "rjeskuri/okinawa-dream-reservation";
 // Fresh on every run, so a constant ref cannot name them.
-const CI_COMMIT = randomUUID();
+const PUSHED_COMMIT = randomUUID();
 const MANUAL_COMMIT = randomUUID();
 const HOSTILE_REF = randomUUID();
 
-/** The `github` context of a deploy that CI's completion triggered: a successful push to main unless overridden. */
-function afterCi(run: Record<string, unknown> = {}): object {
+/** The `github` context of a push to `ref`: the pushed commit is github.sha, and the payload's after and head_commit. */
+function pushTo(ref: string): object {
+  const [, kind, name] = /^refs\/(heads|tags)\/(.+)$/.exec(ref) ?? [];
+  assert.ok(name, `not a branch or tag ref: ${ref}`);
+  return {
+    event_name: "push",
+    ref,
+    ref_name: name,
+    ref_type: kind === "tags" ? "tag" : "branch",
+    sha: PUSHED_COMMIT,
+    repository: REPOSITORY,
+    event: { ref, after: PUSHED_COMMIT, head_commit: { id: PUSHED_COMMIT }, repository: { full_name: REPOSITORY } },
+  };
+}
+
+/** The `github` context of the trigger this workflow replaced: CI passing on a push to main, delivered as workflow_run. */
+function afterCi(): object {
   return {
     event_name: "workflow_run",
     ref: "refs/heads/main",
     ref_name: "main",
-    sha: "latest-commit-on-main",
+    sha: randomUUID(),
     repository: REPOSITORY,
     event: {
       workflow_run: {
         conclusion: "success",
         event: "push",
         head_branch: "main",
-        head_sha: CI_COMMIT,
+        head_sha: randomUUID(),
         head_repository: { full_name: REPOSITORY },
         repository: { full_name: REPOSITORY },
-        ...run,
       },
     },
   };
 }
 
-/** The `github` context of a manual run: no triggering CI run, so its fields read as missing, and an input under any name is hostile. */
+/** The `github` context of a manual run: an input under any name is hostile. */
 function manualRun(name: string, refType: "branch" | "tag" = "branch"): object {
   return {
     event_name: "workflow_dispatch",
@@ -305,7 +319,7 @@ function manualRun(name: string, refType: "branch" | "tag" = "branch"): object {
     ref_type: refType,
     sha: MANUAL_COMMIT,
     repository: REPOSITORY,
-    event: { inputs: new Proxy({}, { get: () => HOSTILE_REF }), workflow_run: { head_repository: {}, repository: {} } },
+    event: { inputs: new Proxy({}, { get: () => HOSTILE_REF }) },
   };
 }
 
@@ -333,6 +347,15 @@ function readWorkflow(name: string): string {
   return readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), "utf8");
 }
 
+/** A workflow's `on:` as each event with the raw text of its filters. A list or a lone event has no filters. */
+function triggers(on = ""): Record<string, string> {
+  if (!/:(\s|$)/.test(on)) return Object.fromEntries(scalars(on).map((event) => [event, ""]));
+  return yamlMap(on);
+}
+
+/** An event with no filters or inputs: an empty value, `{}`, `~` or null. */
+const UNFILTERED = /^(\{\s*\}|~|null)?$/;
+
 function readDeployWorkflow() {
   const workflow = yamlMap(withoutComments(readWorkflow("deploy.yml")));
   const runsScript = (text = "") => /\bscripts\/deploy\.sh\b/.test(text);
@@ -349,22 +372,28 @@ function stepKind(step: Record<string, string>): string {
   return step.run === undefined ? scalar(step.uses).split("@")[0] : "run";
 }
 
-test("deploy.yml follows CI on main or a manual dispatch, and nothing else", () => {
-  const on = yamlMap(readDeployWorkflow().workflow.on);
-  assert.deepEqual(Object.keys(on).sort(), ["workflow_dispatch", "workflow_run"]);
-  assert.match(on.workflow_dispatch.trim(), /^(\{\s*\}|~|null)?$/, "a manual run takes no inputs");
-  const trigger = yamlMap(on.workflow_run);
-  assert.deepEqual(scalars(trigger.workflows), ["CI"]);
-  assert.deepEqual(scalars(trigger.types), ["completed"]);
-  assert.deepEqual(scalars(trigger.branches), ["main"]);
-
-  // workflow_run matches on the other workflow's name, and CI must stay unaware of the deploy.
-  const ci = readWorkflow("ci.yml");
-  assert.equal(scalar(yamlMap(withoutComments(ci)).name), "CI");
-  assert.doesNotMatch(ci, /deploy/i);
+test("deploy.yml runs on a push to main or a manual dispatch, and nothing else", () => {
+  // Comments may tell the history; no trigger, guard or checkout ref may wait on another workflow's run.
+  assert.doesNotMatch(withoutComments(readWorkflow("deploy.yml")), /workflow_run/, "deploy.yml still references workflow_run");
+  const on = triggers(readDeployWorkflow().workflow.on);
+  assert.deepEqual(Object.keys(on).sort(), ["push", "workflow_dispatch"]);
+  assert.match(on.workflow_dispatch.trim(), UNFILTERED, "a manual run takes no inputs");
+  // A tags or paths filter beside branches would change which pushes deploy.
+  const push = yamlMap(on.push);
+  assert.deepEqual(Object.keys(push), ["branches"], "push has filters other than branches");
+  assert.deepEqual(scalars(push.branches), ["main"]);
 });
 
-test("the deploy job runs only after a successful push to main, or by hand on main", async (t) => {
+test("CI runs on every pull request and by hand, not on the push to main", () => {
+  const on = triggers(yamlMap(withoutComments(readWorkflow("ci.yml"))).on);
+  assert.deepEqual(Object.keys(on).sort(), ["pull_request", "workflow_dispatch"]);
+  // The pull request run is the only verify before a deploy, so no filter may let a pull request skip it.
+  for (const [event, filters] of Object.entries(on)) {
+    assert.match(filters.trim(), UNFILTERED, `${event} has filters or inputs`);
+  }
+});
+
+test("the deploy job runs only on a push to main, or by hand on main", async (t) => {
   const { workflow, job } = readDeployWorkflow();
   const guard = job.if;
   assert.ok(guard, "the deploy job has no if: guard");
@@ -374,23 +403,14 @@ test("the deploy job runs only after a successful push to main, or by hand on ma
   for (const name of readdirSync(new URL("../.github/workflows/", import.meta.url))) {
     if (name !== "deploy.yml") assert.doesNotMatch(readWorkflow(name), /scripts\/deploy\.sh|wrangler/, `${name} can deploy`);
   }
-  const fork = { head_repository: { full_name: "someone/okinawa-dream-reservation" } };
+  // One row per event shape. ref_name is "main" for the tag too, so only github.ref tells it from the branch.
   const cases: [string, object, boolean][] = [
-    ["CI succeeded on a push to main", afterCi(), true],
+    ["a push to main", pushTo("refs/heads/main"), true],
     ["a manual run on main", manualRun("main"), true],
-    ["CI failed", afterCi({ conclusion: "failure" }), false],
-    ["CI was cancelled", afterCi({ conclusion: "cancelled" }), false],
-    ["CI was skipped", afterCi({ conclusion: "skipped" }), false],
-    ["CI timed out", afterCi({ conclusion: "timed_out" }), false],
-    ["CI could not start", afterCi({ conclusion: "startup_failure" }), false],
-    ["CI ended neutral", afterCi({ conclusion: "neutral" }), false],
-    ["CI is waiting for approval", afterCi({ conclusion: "action_required" }), false],
-    ["CI went stale", afterCi({ conclusion: "stale" }), false],
-    ["CI ended in a conclusion GitHub has yet to add", afterCi({ conclusion: randomUUID() }), false],
-    ["a pull request from a fork's main", afterCi({ event: "pull_request", ...fork }), false],
-    ["a pull request from a branch named main", afterCi({ event: "pull_request" }), false],
-    ["CI started by hand", afterCi({ event: "workflow_dispatch" }), false],
+    ["a push of a tag named main", pushTo("refs/tags/main"), false],
+    ["a push to another branch", pushTo("refs/heads/t/164-run-ci-on-pull-requests-only"), false],
     ["a manual run on another branch", manualRun("t/46-add-a-deploy-script"), false],
+    ["another event on main: CI's completion, the trigger this replaced", afterCi(), false],
   ];
   for (const [name, github, admitted] of cases) {
     await t.test(name, () => {
@@ -414,14 +434,15 @@ test("a manual run on a tag named main is refused", () => {
   assert.ok(!evaluate(guard, onTag), `a tag named main would deploy without CI, guard: ${guard}`);
 });
 
-test("the job checks out the commit CI passed and sets up Node 24 before the script", () => {
+test("the job checks out the pushed commit and sets up Node 24 before the script", () => {
   const { steps } = readDeployWorkflow();
   // Exactly these three, in this order: any further step could swap the commit or the Node version before the script.
   // The npm cache needs the lockfile on disk, so setup-node comes after checkout as well as before the script.
   assert.deepEqual(steps.map(stepKind), ["actions/checkout", "actions/setup-node", "run"]);
   const [checkout, node] = steps.map((step) => yamlMap(step.with));
   assert.match(scalar(checkout.ref), /^\$\{\{.*\}\}$/, "checkout has no ref expression");
-  assert.equal(evaluate(checkout.ref, afterCi()), CI_COMMIT);
+  assert.doesNotMatch(checkout.ref, /workflow_run/, "the checkout ref reads a workflow_run, which a push does not carry");
+  assert.equal(evaluate(checkout.ref, pushTo("refs/heads/main")), PUSHED_COMMIT);
   // An empty ref makes actions/checkout use the dispatched commit, so on a manual run empty is as good as github.sha.
   const dispatched: unknown[] = [MANUAL_COMMIT, "", null, undefined];
   const manualRef = evaluate(checkout.ref, manualRun("main"));
