@@ -2,6 +2,8 @@
 // staff cancelling from the Dashboard with a refund they choose (#145). Tiers count JST calendar days, and online
 // cancellation closes at pickup; staff can cancel after it. A cancellation lands whole in one batch and calls Square only
 // afterwards, so a refund row left in RETRY is what a crash leaves behind, and retryRefunds picks it up from there.
+// A paid-at-shop booking (source 'staff', #151) cancels by the same paths, but nothing of it was paid online, so it
+// refunds nothing whatever paid_jpy holds, and Square never hears of it.
 import { email } from "../../i18n/strings/email.ts";
 import { t } from "../../i18n/t.ts";
 import { hmacSha256Base64, timingSafeEqual } from "../crypto.ts";
@@ -120,10 +122,10 @@ const REFUNDED_SQL =
  * statement at a time. It also holds everything the amount was worked out from, so a booking that moved between the quote
  * and here stays as it is and refunds nothing. The quote already held start_at against `now`, which is fixed for the call,
  * so a start_at that has not moved is a pickup that has not been reached. Staff may cancel past pickup, and for them the
- * held start_at keeps the tier the amount was quoted at.
+ * held start_at keeps the tier the amount was quoted at. A block is never cancelled here.
  */
-const CANCEL_GUARD_SQL = `WHERE id = ?1 AND status = 'CONFIRMED' AND source = 'web' AND start_at = ?3 AND paid_jpy = ?4
-    AND (${REFUNDED_SQL}) = ?5`;
+const CANCEL_GUARD_SQL = `WHERE id = ?1 AND status = 'CONFIRMED' AND source IN ('web', 'staff') AND start_at = ?3
+    AND paid_jpy = ?4 AND (${REFUNDED_SQL}) = ?5`;
 
 const CANCEL_SQL = `UPDATE bookings
   SET status = 'CANCELLED', cancelled_at = ?2, cancel_reason = 'guest', updated_at = ?2
@@ -229,9 +231,15 @@ function refundAtDays(tiers: CancellationTier[], paidJpy: number, daysBefore: nu
   return { daysBefore, refundPercent, refundJpy: Math.floor((paidJpy * refundPercent) / 100) };
 }
 
+/** Whether nothing of `booking` was paid online: a phone or walk-in booking, paid at the shop (#149). */
+export function isPaidAtShop(booking: Pick<Booking, "source">): boolean {
+  return booking.source === "staff";
+}
+
 /**
  * The quote and what it took off, which the guard of a cancellation has to hold still. A guest's quote closes at pickup.
- * Staff may cancel a no-show, at the tier for 0 days before, so for them daysBefore stops at 0.
+ * Staff may cancel a no-show, at the tier for 0 days before, so for them daysBefore stops at 0. A paid-at-shop booking is
+ * quoted under no tier, so 0% and nothing back.
  */
 async function priceCancellation(
   db: D1Database,
@@ -245,12 +253,12 @@ async function priceCancellation(
   if (row === null) return refuse("NOT_FOUND");
 
   const booking = toBooking(row);
-  if (booking.source !== "web") return refuse("NOT_CANCELLABLE");
+  if (booking.source !== "web" && booking.source !== "staff") return refuse("NOT_CANCELLABLE");
   if (booking.status === "CANCELLED") return refuse("ALREADY_CANCELLED");
   if (booking.status !== "CONFIRMED") return refuse("NOT_CANCELLABLE");
   if (!byStaff && now >= booking.startAt) return refuse("STARTED");
 
-  const tiers = await readCancellationTiers(db);
+  const tiers = isPaidAtShop(booking) ? [] : await readCancellationTiers(db);
   const guestTier = refundForCancellation(tiers, booking.paidJpy, booking.startAt, now);
   const tier = byStaff ? refundAtDays(tiers, booking.paidJpy, Math.max(0, guestTier.daysBefore)) : guestTier;
   const refundedJpy = (await db.prepare(REFUNDED_SQL).bind(bookingId).first<number>("total")) ?? 0;
@@ -259,16 +267,17 @@ async function priceCancellation(
 }
 
 /**
- * Reads only. A guest's refund is quoted for a CONFIRMED web booking, up to but not including the pickup instant. Total
- * refunds equal the tier, so what the booking has already had back, from any origin, comes off the amount.
+ * Reads only. A guest's refund is quoted for a CONFIRMED web or paid-at-shop booking, up to but not including the pickup
+ * instant. Total refunds equal the tier, so what the booking has already had back, from any origin, comes off the amount.
  */
 export async function quoteCancellation(db: D1Database, bookingId: string, now: number): Promise<CancellationQuote> {
   return (await priceCancellation(db, bookingId, now)).quote;
 }
 
 /**
- * Reads only. What staff can give back on cancelling a CONFIRMED web booking, before or after pickup: the guest's tier
- * refund, all that was paid, or nothing, each less what the booking has already had back and never below 0.
+ * Reads only. What staff can give back on cancelling a CONFIRMED web or paid-at-shop booking, before or after pickup: the
+ * guest's tier refund, all that was paid online, or nothing, each less what the booking has already had back and never
+ * below 0. A paid-at-shop booking paid nothing online, so every choice gives back 0.
  */
 export async function quoteStaffCancellation(
   db: D1Database,
@@ -278,7 +287,8 @@ export async function quoteStaffCancellation(
   const { quote, refundedJpy } = await priceCancellation(db, bookingId, now, true);
   if (!quote.ok) return quote;
   const { booking, daysBefore, refundPercent, refundJpy } = quote;
-  const amounts = { tier: refundJpy, full: Math.max(0, booking.paidJpy - refundedJpy), none: 0 };
+  const paidOnline = isPaidAtShop(booking) ? 0 : booking.paidJpy;
+  const amounts = { tier: refundJpy, full: Math.max(0, paidOnline - refundedJpy), none: 0 };
   return { ok: true, booking, daysBefore, refundPercent, refundedJpy, amounts };
 }
 
@@ -290,6 +300,8 @@ export function nameIn(texts: string | null | undefined, locale: Locale): string
 /**
  * What a cancellation queues, the sheet item last, which is the item WON_SQL looks for. Written before Square answers, so
  * the status is RETRY and the mail says only that a refund is under way: a guest keeps this mail if it is later rejected.
+ * A paid-at-shop booking's guest mail says nothing was paid online, and a walk-in who gave no email gets none, as they got
+ * no confirmation (staffItems in staff-booking.ts).
  */
 function cancellationItems(
   booking: Booking,
@@ -302,6 +314,7 @@ function cancellationItems(
   const locale = booking.locale ?? "ja";
   const familyName = booking.guestFamilyName ?? "";
   const givenName = booking.guestGivenName ?? "";
+  const atShop = isPaidAtShop(booking);
   const facts = {
     ref,
     startAt,
@@ -311,24 +324,26 @@ function cancellationItems(
     refundJpy,
     refundStatus: refundJpy > 0 ? "RETRY" : "NONE",
   };
-  return [
-    {
-      kind: "email",
-      dedupeKey: `email:guest_cancellation:${id}`,
-      payload: {
-        template: "guest_cancellation",
-        to: booking.guestEmail ?? "",
-        locale,
-        data: {
-          ...facts,
-          modelName: nameIn(names?.model_texts, locale),
-          packageName: nameIn(names?.package_texts, locale),
-          shopOpen,
-          shopClose,
-          guest: { familyName, givenName },
-        },
+  const guestMail: OutboxItem = {
+    kind: "email",
+    dedupeKey: `email:guest_cancellation:${id}`,
+    payload: {
+      template: "guest_cancellation",
+      to: booking.guestEmail ?? "",
+      locale,
+      data: {
+        ...facts,
+        ...(atShop ? { paidAtShop: true } : {}),
+        modelName: nameIn(names?.model_texts, locale),
+        packageName: nameIn(names?.package_texts, locale),
+        shopOpen,
+        shopClose,
+        guest: { familyName, givenName },
       },
     },
+  };
+  return [
+    ...(atShop && booking.guestEmail === "" ? [] : [guestMail]),
     {
       kind: "email",
       dedupeKey: `email:staff_cancellation:${id}`,
@@ -493,10 +508,11 @@ async function tryStaffCancel(
 }
 
 /**
- * Cancels a web booking for staff, from the Dashboard, at any time while it is CONFIRMED, refunding the amount they chose
- * from a quote: `refundJpy` has to be what `choice` gives now. It lands as a guest's cancellation does, under the same
- * guard and refund key, with cancel_reason 'staff' and refund_due_jpy the total it settles on. A refused guard earns one
- * more try, as in cancelBooking, which answers ALREADY_CANCELLED to a call that lost the race.
+ * Cancels a web or paid-at-shop booking for staff, from the Dashboard, at any time while it is CONFIRMED, refunding the
+ * amount they chose from a quote: `refundJpy` has to be what `choice` gives now, which for a paid-at-shop booking is 0. It
+ * lands as a guest's cancellation does, under the same guard and refund key, with cancel_reason 'staff' and refund_due_jpy
+ * the total it settles on. A refused guard earns one more try, as in cancelBooking, which answers ALREADY_CANCELLED to a
+ * call that lost the race.
  */
 export async function cancelByStaff(
   deps: CancelDeps,
