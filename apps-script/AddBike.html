@@ -58,8 +58,20 @@
   </div>
 </section>
 
+<section data-step="photos">
+  <h2>3. Photos</h2>
+  <p class="bike-hint">Optional. Upload stores a JPEG, PNG or WebP in the website's photo folder in Drive right away,
+    under a name of its own. Save adds the names to the model's photos in Models.</p>
+  <p id="bike-photos-had" class="bike-hint"></p>
+  <p id="bike-photos-dropped" class="bike-warn" hidden></p>
+  <label for="bike-photo-file">Photo</label>
+  <input id="bike-photo-file" type="file" accept="image/jpeg,image/png,image/webp">
+  <p><button id="bike-photo-upload" type="button">Upload this photo</button></p>
+  <ul id="bike-photos" class="bike-rows"></ul>
+</section>
+
 <section data-step="rate-class">
-  <h2>3. Rate class</h2>
+  <h2>4. Rate class</h2>
   <p id="bike-class-group" class="bike-hint"></p>
   <label for="bike-class">Rate class</label>
   <select id="bike-class"></select>
@@ -81,7 +93,7 @@
 </section>
 
 <section data-step="prices">
-  <h2>4. Prices</h2>
+  <h2>5. Prices</h2>
   <p id="bike-prices-note" class="bike-hint"></p>
   <table class="bike-prices">
     <thead><tr><th>Package</th><th>Price (JPY)</th><th>Advance price (JPY), optional</th></tr></thead>
@@ -90,7 +102,7 @@
 </section>
 
 <section data-step="deposit">
-  <h2>5. Deposit</h2>
+  <h2>6. Deposit</h2>
   <p id="bike-deposit-note" class="bike-hint"></p>
   <div id="bike-type-new" hidden>
     <label for="bike-deposit">Deposit (JPY)</label>
@@ -108,7 +120,7 @@
 </section>
 
 <section data-step="translations">
-  <h2>6. Translations</h2>
+  <h2>7. Translations</h2>
   <p class="bike-hint">Guests read these as typed. Summary and description may stay blank, with a warning.</p>
   <fieldset>
     <legend>Name</legend>
@@ -134,7 +146,7 @@
 </section>
 
 <section data-step="vehicle">
-  <h2>7. Vehicle</h2>
+  <h2>8. Vehicle</h2>
   <label for="bike-plate">Plate</label>
   <input id="bike-plate" type="text" autocomplete="off">
   <p id="bike-plate-used" class="bike-warn" hidden>This plate is already in Vehicles.</p>
@@ -147,14 +159,14 @@
 </section>
 
 <section data-step="check" data-next="Save and publish">
-  <h2>8. Check</h2>
+  <h2>9. Check</h2>
   <p>The website checked the rows as Publish would. Save writes them to the sheet and publishes.</p>
   <ul id="bike-fatal" class="bike-rows"></ul>
   <ul id="bike-check" class="bike-rows"></ul>
 </section>
 
 <section data-step="result">
-  <h2>9. Result</h2>
+  <h2>10. Result</h2>
   <ul id="bike-written" class="bike-rows"></ul>
   <h2>Publish</h2>
   <ul id="bike-publish" class="bike-rows"></ul>
@@ -163,8 +175,9 @@
 <script>
   // Add a bike: a model already in the sheet, or a new model with its type, rate class, prices, deposit and
   // translations. The rows are checked with the website, then saved and published. A class already in the sheet keeps
-  // its prices and a type already in the sheet keeps its deposit: both show read-only (owner decision 4). Text from
-  // the sheet goes on the page with textContent only.
+  // its prices and a type already in the sheet keeps its deposit: both show read-only (owner decision 4). Photos go to
+  // Drive as each is uploaded, and their names go in the draft for Save. Text from the sheet goes on the page with
+  // textContent only.
 
   const BIKE_LOCALES = ["ja", "en", "zh", "ko"];
   const BIKE_NEW_CLASS = "\u0000new";
@@ -172,6 +185,8 @@
   let bikeOptions = { models: [], plates: [], types: [], rateClasses: [], packages: [] };
   let bikeDraft = null;
   let bikeChecked = null;
+  /** The photos uploaded for one model, each `{ name, fileName }`: its name in Drive and the file it came from. */
+  let bikePhotos = { modelId: "", photos: [] };
 
   function field(id) {
     return document.getElementById(id);
@@ -410,8 +425,77 @@
   }
 
   function readDraft() {
-    if (bikeMode() === "new") return readNewDraft();
-    return { mode: "existing", modelId: field("bike-model").value, vehicle: readVehicle() };
+    const draft =
+      bikeMode() === "new"
+        ? readNewDraft()
+        : { mode: "existing", modelId: field("bike-model").value, vehicle: readVehicle() };
+    draft.photos = bikePhotos.photos.map((photo) => photo.name);
+    return draft;
+  }
+
+  /** The model the photos are for: the one chosen, or the new model's id. */
+  function photoModelId() {
+    return bikeMode() === "new" ? textField("bike-model-id") : field("bike-model").value;
+  }
+
+  /**
+   * Photos uploaded for another model leave the draft, so they are not added to this one. They stay in Drive, where no
+   * model names them and Publish leaves them alone.
+   */
+  function showPhotos() {
+    const modelId = photoModelId();
+    const dropped = field("bike-photos-dropped");
+    if (bikePhotos.modelId !== modelId) {
+      const had = bikePhotos.photos.length > 0;
+      dropped.textContent = had ? `The photos uploaded for ${bikePhotos.modelId} are not added to ${modelId}.` : "";
+      bikePhotos = { modelId, photos: [] };
+    }
+    dropped.hidden = dropped.textContent === "";
+    const model = bikeMode() === "new" ? null : bikeModel();
+    field("bike-photos-had").textContent =
+      model && model.photos.length > 0
+        ? `${model.id} has ${model.photos.join(", ")} already. The photos uploaded here go after them.`
+        : "";
+    field("bike-photos").replaceChildren(
+      ...bikePhotos.photos.map((photo) => listItem(`${photo.fileName}: stored as ${photo.name}`)),
+    );
+  }
+
+  /** The file's bytes as base64, without the `data:...;base64,` prefix that readAsDataURL puts before them. */
+  function readPhoto(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).replace(/^data:[^,]*;base64,/, ""));
+      reader.onerror = () => reject(new Error(`Could not read ${file.name}. Choose it again.`));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /** Busy from the read to the answer, so a second press cannot store the same photo twice. */
+  function uploadPhoto() {
+    const input = field("bike-photo-file");
+    const file = input.files[0];
+    clearError();
+    if (!file) {
+      showError("Choose a photo first.");
+      return;
+    }
+    const modelId = bikePhotos.modelId;
+    setBusy(true);
+    input.disabled = true;
+    readPhoto(file)
+      .then((base64) => callServer("addBikeUploadPhoto", { modelId, fileName: file.name, mimeType: file.type, base64 }))
+      .then((answer) => {
+        if (!answer.ok) throw new Error(answer.message);
+        bikePhotos.photos.push({ name: answer.name, fileName: file.name });
+        input.value = "";
+        showPhotos();
+      })
+      .catch(showError)
+      .finally(() => {
+        input.disabled = false;
+        setBusy(false);
+      });
   }
 
   function listItem(text, className) {
@@ -460,12 +544,15 @@
   onNext("model", () => {
     if (bikeMode() === "existing") {
       if (!bikeModel()) throw new Error("Choose a model.");
-      return "vehicle";
+    } else {
+      if (textField("bike-model-id") === "") throw new Error("Enter the model id.");
+      if (!bikeType()) throw new Error("Choose the type.");
+      fillClasses();
     }
-    if (textField("bike-model-id") === "") throw new Error("Enter the model id.");
-    if (!bikeType()) throw new Error("Choose the type.");
-    fillClasses();
+    showPhotos();
   });
+
+  onNext("photos", () => (bikeMode() === "existing" ? "vehicle" : true));
 
   onNext("rate-class", () => {
     if (field("bike-class").value === "") throw new Error("Choose a rate class, or a new one.");
@@ -516,6 +603,7 @@
     });
     field("bike-class").addEventListener("change", showClass);
     field("bike-plate").addEventListener("input", showPlateUsed);
+    field("bike-photo-upload").addEventListener("click", uploadPhoto);
     for (const radio of document.querySelectorAll('input[name="bike-mode"]')) radio.addEventListener("change", showMode);
     callServer("addBikeOptions")
       .then(showOptions)

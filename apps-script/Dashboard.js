@@ -15,6 +15,7 @@ const DASHBOARD_ACTIONS_ = [
   { label: "Add a bike", fn: "openAddBike" },
   { label: "Add a reservation", fn: "openAddReservation" },
   { label: "Block a bike", fn: "openBlockBike" },
+  { label: "Cancel a booking", fn: "openCancelBooking" },
 ];
 
 function openDashboard() {

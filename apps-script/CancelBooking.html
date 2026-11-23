@@ -1,0 +1,264 @@
+<style>
+  .cancel-hint { margin: 8px 0 0; color: #5f6368; }
+  .cancel-list { width: 100%; border-collapse: collapse; }
+  .cancel-list th, .cancel-list td { padding: 4px 8px; border-bottom: 1px solid #dadce0; text-align: left; vertical-align: top; }
+  .cancel-list label, .cancel-choice label { display: inline; margin: 0; font-weight: normal; cursor: pointer; }
+  .cancel-list input, .cancel-choice input { width: auto; margin: 0 8px 0 0; }
+  .cancel-choice { margin: 8px 0; }
+  .cancel-review { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0 0 12px; }
+  .cancel-review dt { font-weight: bold; }
+  .cancel-review dd { margin: 0; white-space: pre-wrap; }
+  .cancel-notice { margin: 0 0 12px; padding: 8px 12px; border: 1px solid #f9ab00; border-radius: 4px; background: #fef7e0; }
+  .cancel-result { margin: 0 0 12px; padding: 8px 12px; border-radius: 4px; white-space: pre-wrap; }
+  .cancel-result.ok { border: 1px solid #188038; background: #e6f4ea; }
+  .cancel-result.error { border: 1px solid #d93025; background: #fce8e6; }
+  .cancel-result.pending { border: 1px solid #f9ab00; background: #fef7e0; }
+</style>
+<h1>Cancel a booking</h1>
+
+<section data-step="search" data-next="Search">
+  <h2>1. Find the booking</h2>
+  <label for="cancel-text">Ref or guest name</label>
+  <input id="cancel-text" type="text" maxlength="100" autocomplete="off">
+  <label for="cancel-date">Pickup date, in Japan</label>
+  <input id="cancel-date" type="date">
+  <p class="cancel-hint">Fill in either or both. Only confirmed bookings that have not ended are listed.</p>
+</section>
+
+<section data-step="list" data-next="Show the refund" hidden>
+  <h2>2. Pick the booking</h2>
+  <table class="cancel-list">
+    <thead>
+      <tr><th></th><th>Ref</th><th>Guest</th><th>Model</th><th>Plate</th><th>Pickup, in Japan</th></tr>
+    </thead>
+    <tbody id="cancel-bookings"></tbody>
+  </table>
+</section>
+
+<section data-step="choose" hidden>
+  <h2>3. Choose the refund</h2>
+  <p id="cancel-changed" class="cancel-notice" role="status" hidden></p>
+  <dl id="cancel-quote" class="cancel-review"></dl>
+  <div id="cancel-choices"></div>
+</section>
+
+<section data-step="confirm" data-next="Confirm" hidden>
+  <h2>4. Confirm the cancellation</h2>
+  <dl id="cancel-review" class="cancel-review"></dl>
+  <p id="cancel-review-note" class="cancel-hint"></p>
+</section>
+
+<section data-step="result" hidden>
+  <h2>Result</h2>
+  <p id="cancel-result" class="cancel-result"></p>
+  <p class="cancel-hint">The website emails the guest about the cancellation and updates the Bookings tab shortly.</p>
+</section>
+
+<script>
+  // Cancel a booking: search, pick the booking, choose the refund, confirm, then the result. Money moves on Confirm, so
+  // the confirm screen shows `cancelPending` and Confirm sends that same object, built from the latest quote when staff
+  // left the choices. A new quote, or the fresh one a QUOTE_CHANGED answer brings, clears it: staff choose and confirm
+  // again. Text from the server goes on the page with textContent only.
+
+  const CANCEL_CHOICES = ["tier", "full", "none"];
+  const CANCEL_CHOICE_NAMES = { tier: "Tier refund", full: "Full refund", none: "No refund" };
+
+  let cancelBookings = [];
+  /** The latest quote: for the booking picked, or the fresh one QUOTE_CHANGED brought. */
+  let cancelQuote = null;
+  /** What Confirm sends, `{ bookingId, choice, refundJpy }`, exactly as the confirm screen shows it, or null. */
+  let cancelPending = null;
+
+  function cancelField(id) {
+    return document.getElementById(id);
+  }
+
+  function cancelText(tag, text) {
+    const element = document.createElement(tag);
+    element.textContent = text;
+    return element;
+  }
+
+  function cancelYen(value) {
+    return `${Number(value).toLocaleString("en-US")} JPY`;
+  }
+
+  function cancelGuest(booking) {
+    return booking.guestName || "(no name)";
+  }
+
+  function cancelRows(list, rows) {
+    list.replaceChildren();
+    for (const [term, value] of rows) list.append(cancelText("dt", term), cancelText("dd", value));
+  }
+
+  function showBookings() {
+    const body = cancelField("cancel-bookings");
+    body.replaceChildren();
+    cancelBookings.forEach((booking, i) => {
+      const pick = document.createElement("input");
+      pick.type = "radio";
+      pick.name = "cancel-booking";
+      pick.id = `cancel-booking-${i}`;
+      pick.value = booking.id;
+      pick.checked = cancelBookings.length === 1;
+      const first = document.createElement("td");
+      first.append(pick);
+      const row = document.createElement("tr");
+      row.append(first);
+      const model = booking.modelNameJa ? `${booking.modelNameJa} (${booking.modelId})` : booking.modelId;
+      for (const text of [booking.ref, cancelGuest(booking), model, booking.plate, booking.pickupJst]) {
+        const label = cancelText("label", text);
+        label.htmlFor = pick.id;
+        const cell = document.createElement("td");
+        cell.append(label);
+        row.append(cell);
+      }
+      body.append(row);
+    });
+  }
+
+  function cancelNothingToRefund(quote) {
+    return CANCEL_CHOICES.every((choice) => quote.amounts[choice] === 0);
+  }
+
+  function cancelChoiceText(choice, quote) {
+    const amount = cancelYen(quote.amounts[choice]);
+    if (choice === "tier") {
+      return `Tier refund: ${amount}, the ${quote.refundPercent}% the tiers give at ${quote.daysBefore} days before pickup`;
+    }
+    if (choice === "full") return `Full refund: ${amount}, all that is left of what was paid online`;
+    return `No refund: ${amount}`;
+  }
+
+  /** The radio checked on the choices, or '' when none is. */
+  function cancelChoice() {
+    const checked = document.querySelector('input[name="cancel-choice"]:checked');
+    return checked ? checked.value : "";
+  }
+
+  /** Takes a new quote and shows its choices, starting on `selected`. Whatever staff were about to confirm is gone. */
+  function setQuote(quote, selected) {
+    cancelQuote = quote;
+    cancelPending = null;
+    cancelField("cancel-review").replaceChildren();
+    cancelField("cancel-review-note").textContent = "Nothing to confirm yet: go back to the choices and choose the refund.";
+    cancelField("cancel-changed").hidden = true;
+
+    const { booking } = quote;
+    const facts = [
+      ["Booking", `${booking.ref}, ${cancelGuest(booking)}`],
+      ["Pickup, in Japan", booking.pickupJst],
+      ["Paid online", cancelYen(booking.paidJpy)],
+    ];
+    if (quote.refundedJpy > 0) facts.push(["Already refunded", cancelYen(quote.refundedJpy)]);
+    cancelRows(cancelField("cancel-quote"), facts);
+
+    // With nothing to give back, the one way to cancel is no refund: amounts.none, which is 0.
+    const nothing = cancelNothingToRefund(quote);
+    const box = cancelField("cancel-choices");
+    box.replaceChildren();
+    for (const choice of nothing ? ["none"] : CANCEL_CHOICES) {
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "cancel-choice";
+      input.id = `cancel-choice-${choice}`;
+      input.value = choice;
+      input.checked = nothing || choice === selected;
+      const text = nothing
+        ? booking.paidJpy > 0
+          ? "Cancel. What was paid online is already refunded, so nothing more goes back."
+          : "Cancel. Nothing was paid online, so there is nothing to refund."
+        : cancelChoiceText(choice, quote);
+      const label = cancelText("label", text);
+      label.htmlFor = input.id;
+      const line = document.createElement("div");
+      line.className = "cancel-choice";
+      line.append(input, label);
+      box.append(line);
+    }
+  }
+
+  function showChanged(message) {
+    const notice = cancelField("cancel-changed");
+    notice.textContent = message;
+    notice.hidden = false;
+  }
+
+  /** The confirm screen, from the one object Confirm sends. */
+  function showReview() {
+    const { booking } = cancelQuote;
+    const { choice, refundJpy } = cancelPending;
+    cancelRows(cancelField("cancel-review"), [
+      ["Guest", cancelGuest(booking)],
+      ["Ref", booking.ref],
+      ["Pickup, in Japan", booking.pickupJst],
+      ["Refund", CANCEL_CHOICE_NAMES[choice]],
+      ["Back through Square", cancelYen(refundJpy)],
+    ]);
+    cancelField("cancel-review-note").textContent =
+      refundJpy > 0
+        ? `Confirm cancels the booking and sends ${cancelYen(refundJpy)} back to the guest through Square.`
+        : "Confirm cancels the booking. Nothing goes back through Square.";
+  }
+
+  function showResult(booking, answer) {
+    const box = cancelField("cancel-result");
+    box.textContent = `${booking.ref}, ${cancelGuest(booking)}: ${answer.message}`;
+    box.className = "cancel-result";
+    const level = { REJECTED: "error", RETRY: "pending" }[answer.refundStatus] || "ok";
+    box.classList.add(level);
+  }
+
+  onNext("search", () =>
+    callServer("cancelPanelSearch", {
+      text: cancelField("cancel-text").value,
+      date: cancelField("cancel-date").value,
+    }).then((answer) => {
+      if (!answer || answer.ok !== true) throw new Error((answer && answer.message) || "The search failed.");
+      if (answer.bookings.length === 0) {
+        throw new Error("No booking to cancel matches. Only confirmed bookings that have not ended are listed.");
+      }
+      cancelBookings = answer.bookings;
+      showBookings();
+      return true;
+    }),
+  );
+
+  onNext("list", () => {
+    const picked = document.querySelector('input[name="cancel-booking"]:checked');
+    if (!picked) throw new Error("Pick a booking.");
+    return callServer("cancelPanelQuote", picked.value).then((answer) => {
+      if (!answer || answer.ok !== true) throw new Error((answer && answer.message) || "The refund could not be quoted.");
+      setQuote(answer.quote, answer.defaultChoice);
+      return true;
+    });
+  });
+
+  onNext("choose", () => {
+    const choice = cancelChoice();
+    if (!CANCEL_CHOICES.includes(choice)) throw new Error("Choose a refund.");
+    cancelPending = { bookingId: cancelQuote.booking.id, choice, refundJpy: cancelQuote.amounts[choice] };
+    showReview();
+    return true;
+  });
+
+  onNext("confirm", () => {
+    if (cancelPending === null) throw new Error("Nothing to confirm yet: go back to the choices and choose the refund.");
+    const { booking } = cancelQuote;
+    return callServer("cancelPanelConfirm", cancelPending).then((answer) => {
+      if (answer && answer.ok === true) {
+        showResult(booking, answer);
+        return "result";
+      }
+      if (answer && answer.reason === "QUOTE_CHANGED" && answer.quote) {
+        setQuote(answer.quote, cancelChoice());
+        showChanged(answer.message);
+        return "choose";
+      }
+      throw new Error(
+        (answer && answer.message) || "The answer could not be read. Search again to see whether the booking was cancelled.",
+      );
+    });
+  });
+</script>

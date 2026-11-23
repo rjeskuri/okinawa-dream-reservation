@@ -164,9 +164,15 @@ Rules for the tasks to come:
 - E2e tests fake the Google token, Sheets, Drive, Square and Apps Script endpoints inside `outbound`, switching on the
   request URL.
 - The Apps Script files in `apps-script/` run in a Node `vm` with fake `SpreadsheetApp`, `UrlFetchApp`, `MailApp`, `Utilities`,
-  `PropertiesService`, `CacheService`, `LockService`, `ContentService` and `HtmlService`. The `HtmlService` fake reads
-  `apps-script/*.html` and records each sidebar and dialog shown; Node cannot run a panel's own script, so tests scan
-  the HTML instead.
+  `PropertiesService`, `CacheService`, `LockService`, `ContentService`, `HtmlService`, `DriveApp` and `MimeType`. The
+  `HtmlService` fake reads `apps-script/*.html` and records each sidebar and dialog shown; Node cannot run a panel's own
+  script, so tests scan the HTML instead.
+- The `DriveApp` fake holds the folders a test passes as `folders` (id to file names), and `getFolderById` throws for
+  any other id, as Google does for one the user cannot see. `Folder.createFile(blob)` records each file with its
+  folder, name, type and bytes in `drive.created`, and throws in a folder listed in `readOnlyFolders`. `Folder.getFiles`
+  and `getFilesByName` list the files as they were when called. `Utilities.base64Decode` answers signed bytes, as Apps
+  Script does, and throws `Could not decode string.` for text that is not padded base64.
+  `Utilities.newBlob(bytes, type, name)` makes the blob `createFile` takes.
 
 ## Live checks (manual)
 
@@ -188,6 +194,10 @@ The tunnel URL changes on each run. Each time, update `WORKER_BASE_URL` in the A
 `SQUARE_WEBHOOK_URL` in `.dev.vars` (`https://<tunnel host>/api/webhooks/square`, then restart `npm run dev`) and the
 URL of the Square webhook subscription. `astro.config.mjs` already allows `*.trycloudflare.com` hosts; without that the
 dev server answers 403.
+
+Add a bike's photo upload also reads the Script Property `PHOTO_FOLDER_ID`: the test photo folder's id, the same one as
+`GOOGLE_DRIVE_FOLDER_ID`. It does not change between runs; [docs/deploy.md](deploy.md#photo-upload-from-add-a-bike) has
+the scope and folder access it needs.
 
 ### Google Pay and Apple Pay
 
