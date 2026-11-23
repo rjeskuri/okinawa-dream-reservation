@@ -4,14 +4,15 @@ The runbook for task #48. Nothing here has run against a real Cloudflare account
 
 ## How a deploy runs
 
-- CI passes on a push to `main`, then the Deploy workflow (`.github/workflows/deploy.yml`) checks out that commit and runs `scripts/deploy.sh`.
+- A push to `main` starts the Deploy workflow (`.github/workflows/deploy.yml`), which checks out the pushed commit and runs `scripts/deploy.sh`.
+- CI (`.github/workflows/ci.yml`) runs on pull requests only, and the pull request's run is the gate: CI does not run again on `main`, and Deploy does not wait for it. There is no post-merge verify. That is acceptable only because every landing goes through `harness-pr land --catch-up`, which squash-merges exactly the tree a green pull request run verified, and git hooks refuse direct pushes to `main`. A commit that reaches `main` any other way deploys unverified.
 - The script runs `npm ci`, `npm run build`, `npx wrangler d1 migrations apply DB --remote` and `npx wrangler deploy`, and stops at the first failure.
 - If `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_ACCOUNT_ID` is unset or empty, the script prints `deploy skipped: Cloudflare credentials not set` and passes.
-- Manual run: Actions, Deploy, Run workflow on `main`, or `gh workflow run Deploy --ref main`. This is the owner's override, for redeploying without a new commit: it takes no inputs, deploys the tip of `main` and does not wait for CI. On any other branch or tag the job is skipped.
+- Manual run: Actions, Deploy, Run workflow on `main`, or `gh workflow run Deploy --ref main`. This is the owner's override, for redeploying without a new commit: it takes no inputs and deploys the tip of `main`. On any other branch or tag the job is skipped.
 
 ## Order
 
-Do these in the order below. Setting the GitHub secrets comes last, because the next CI success on `main` after that deploys.
+Do these in the order below. Setting the GitHub secrets comes last, because the next push to `main` after that deploys.
 
 ## 1. Resources to create
 
@@ -117,6 +118,6 @@ npx wrangler rollback <version-id> --message "<reason>"
 
 Without a version id, `wrangler rollback` picks the previous version.
 
-- Revert the bad commit on `main` as well. A rollback lasts only until the next deploy, and the next CI success on `main` ships the bad commit again.
+- Revert the bad commit on `main` as well. A rollback lasts only until the next deploy, and the next push to `main` ships the bad commit again.
 - A rollback does not touch D1 or R2. Fix bad data with a new migration.
 - `npx wrangler d1 time-travel restore okinawa-dream --timestamp=<time>` is the last resort: it discards every booking written after that time, so Square will hold deposits the database no longer knows about.

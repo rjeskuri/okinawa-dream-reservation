@@ -31,6 +31,12 @@ export const email: Dictionary = {
   "email.label.return": { ja: "返却", en: "Return", "zh-cn": "还车", ko: "반납" },
   "email.label.price": { ja: "料金", en: "Price", "zh-cn": "费用", ko: "요금" },
   "email.label.paid": { ja: "お支払い済みの予約金", en: "Deposit paid", "zh-cn": "已付订金", ko: "결제한 예약금" },
+  "email.label.paidAtShop": {
+    ja: "店頭でお支払いの予約金",
+    en: "Deposit to pay at the shop",
+    "zh-cn": "到店支付的订金",
+    ko: "매장에서 결제할 예약금",
+  },
   "email.label.hours": { ja: "営業時間", en: "Shop hours", "zh-cn": "营业时间", ko: "영업시간" },
   "email.label.policy": { ja: "キャンセルポリシー", en: "Cancellation policy", "zh-cn": "取消政策", ko: "취소 정책" },
   "email.label.refund": { ja: "返金額", en: "Refund", "zh-cn": "退款金额", ko: "환불 금액" },
@@ -46,6 +52,18 @@ export const email: Dictionary = {
     en: "Your booking is confirmed. Here are the details.",
     "zh-cn": "您的预订已确认，详情如下。",
     ko: "예약이 확정되었습니다. 내용은 다음과 같습니다.",
+  },
+  "email.confirmation.introPaidAtShop": {
+    ja: "予約金は、車両のお受け取りの際に店頭でお支払いください。",
+    en: "The deposit is paid at the shop when you pick up your vehicle.",
+    "zh-cn": "订金请在取车时于店内支付。",
+    ko: "예약금은 차량을 픽업하실 때 매장에서 결제해 주세요.",
+  },
+  "email.confirmation.policyPaidAtShop": {
+    ja: "オンラインでのお支払いはないため、キャンセルしても返金はありません。",
+    en: "Nothing was paid online, so cancelling this booking refunds nothing.",
+    "zh-cn": "您未在线支付任何款项，因此取消预订不会产生退款。",
+    ko: "온라인으로 결제한 금액이 없으므로 예약을 취소해도 환불되는 금액은 없습니다.",
   },
   "email.confirmation.cancelLink": {
     ja: "キャンセルはこちらから:",
@@ -65,6 +83,12 @@ export const email: Dictionary = {
     en: "Your booking has been cancelled. Here are the details.",
     "zh-cn": "您的预订已取消，详情如下。",
     ko: "예약이 취소되었습니다. 내용은 다음과 같습니다.",
+  },
+  "email.cancellation.paidAtShop": {
+    ja: "オンラインでのお支払いはなかったため、返金はありません。",
+    en: "Nothing was paid online, so nothing is refunded.",
+    "zh-cn": "由于没有在线支付，因此无需退款。",
+    ko: "온라인 결제 내역이 없어 환불해 드릴 금액이 없습니다.",
   },
   "email.refund.none": {
     ja: "今回のキャンセルに返金はありません。",
