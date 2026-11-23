@@ -1,4 +1,4 @@
-// The Cancel a booking panel (apps-script/CancelBooking.js and CancelBooking.html) run in node:vm against the fake
+// The Cancel a booking panel (apps-script/CancelBooking.js and CancelBookingPanel.html) run in node:vm against the fake
 // Google services. The fake Worker answers in the shapes of the real /api/staff/bookings and /api/staff/cancel (#148):
 // `{ ok: true, bookings }`, `{ ok: true, quote }`, `{ ok: true, choice, refundJpy, refundStatus }`, `{ ok: false, reason }`
 // and QUOTE_CHANGED with the fresh quote. Signatures go through the Worker's real verifyEnvelope at the script's fixed
@@ -268,24 +268,24 @@ test("Cancel a booking is a dashboard action that opens the CancelBooking dialog
   const shell = panelFile("PanelShell.html");
   const at = shown.html.indexOf(shell);
   assert.ok(at >= 0, "the dialog holds PanelShell.html");
-  assert.ok(shown.html.indexOf(panelFile("CancelBooking.html"), at + shell.length) >= 0, "then CancelBooking.html");
+  assert.ok(shown.html.indexOf(panelFile("CancelBookingPanel.html"), at + shell.length) >= 0, "then CancelBookingPanel.html");
   assert.deepEqual(opened.fetches, [], "opening the dialog sends nothing");
 });
 
 test("the panel shows data with textContent only and calls only the public cancel functions", () => {
-  const code = withoutComments(panelFile("CancelBooking.html"));
+  const code = withoutComments(panelFile("CancelBookingPanel.html"));
   const script = world();
 
   // No markup from data: the Dashboard's scan, on this panel.
   const MARKUP_WRITES = /\binnerHTML\b|\bouterHTML\b|\binsertAdjacentHTML\b|\bdocument\s*\.\s*write|<\?/;
   const line = code.split("\n").find((text) => MARKUP_WRITES.test(text));
-  assert.equal(line, undefined, `CancelBooking.html writes markup: ${line?.trim()}`);
+  assert.equal(line, undefined, `CancelBookingPanel.html writes markup: ${line?.trim()}`);
 
   // Every server call goes through the shell's callServer, so the scan below sees all of them.
-  assert.doesNotMatch(code, /google\s*\.\s*script\s*\.\s*run/, "CancelBooking.html calls the server through callServer only");
+  assert.doesNotMatch(code, /google\s*\.\s*script\s*\.\s*run/, "CancelBookingPanel.html calls the server through callServer only");
   const called = Array.from(code.matchAll(/\bcallServer\s*\(\s*(["'`])([^"'`]*)\1/g), (match) => match[2]);
   for (const fn of ["cancelPanelSearch", "cancelPanelQuote", "cancelPanelConfirm"]) {
-    assert.ok(called.includes(fn), `CancelBooking.html calls ${fn}: ${JSON.stringify(called)}`);
+    assert.ok(called.includes(fn), `CancelBookingPanel.html calls ${fn}: ${JSON.stringify(called)}`);
   }
   for (const fn of called) {
     assert.ok(!fn.endsWith("_"), `google.script.run cannot call the private ${fn}`);
@@ -615,5 +615,33 @@ test("Worker failures come back as readable messages, not stack traces", () => {
     // Each refusal staff can meet says its own thing.
     const said = reasons.map((reason) => messages.get(reason));
     assert.equal(new Set(said).size, reasons.length, `${fn}: one message per reason: ${JSON.stringify(said)}`);
+  }
+});
+
+// /api/staff/cancel answers NOT_CANCELLABLE for a booking that is not CONFIRMED (on hold, in payment, its hold expired)
+// or is a block (src/lib/booking/cancel.ts). Since #151 a confirmed booking paid at the shop cancels too, so the sentence
+// must give that reason and must not say only bookings made on the website can be cancelled (#192).
+test("NOT_CANCELLABLE says the booking is not confirmed, such as a hold, and not that only web bookings cancel", () => {
+  const WEB_ONLY =
+    /made (on|through|via|from|at) the (website|web|site)|booked (on|through|via) the (website|web|site)|\b(web|website|online) (bookings?|reservations?)\b|\bonly\b[^.]*\b(web|website|online)\b/i;
+  const NOT_CONFIRMED = /\bnot (yet )?(a )?confirmed\b|\bunconfirmed\b|\bisn't confirmed\b/i;
+  const HOLD = /\bhold\b|\bheld\b/i;
+
+  const calls: { fn: string; args: unknown[] }[] = [
+    { fn: "cancelPanelQuote", args: [HIGA.id] },
+    { fn: "cancelPanelConfirm", args: [{ bookingId: HIGA.id, choice: "full", refundJpy: 3000 }] },
+    { fn: "cancelPanelConfirm", args: [{ bookingId: HIGA.id, choice: "none", refundJpy: 0 }] },
+  ];
+  for (const { fn, args } of calls) {
+    const what = `${fn}(${JSON.stringify(args)}), NOT_CANCELLABLE`;
+    const script = world({ routes: { [CANCEL]: { body: { ok: false, reason: "NOT_CANCELLABLE" } } } });
+    const answer = call(script, fn, ...args);
+    assert.equal(answer?.ok, false, `${what}: ${JSON.stringify(answer)}`);
+    assert.equal(answer.reason, "NOT_CANCELLABLE", `${what}: the Worker's reason`);
+    assertReadable(answer.message, what);
+    const message = String(answer.message);
+    assert.doesNotMatch(message, WEB_ONLY, `${what}: a paid-at-shop booking cancels too: ${message}`);
+    assert.match(message, NOT_CONFIRMED, `${what}: says the booking is not confirmed: ${message}`);
+    assert.match(message, HOLD, `${what}: names a hold as a booking that cannot be cancelled: ${message}`);
   }
 });

@@ -10,7 +10,7 @@ const BLOCK_DATE_TIME_HINT_ = "write the date and time in Japan as YYYY-MM-DD HH
 const BLOCK_ID_DRAWS_ = 20;
 
 function openBlockBike() {
-  openPanel_("BlockBike", BLOCK_PANEL_TITLE_);
+  openPanel_("BlockBikePanel", BLOCK_PANEL_TITLE_);
 }
 
 /**
@@ -54,8 +54,8 @@ function blockPanelSave(input) {
         block_id: blockId,
         model_id: bike.modelId,
         plate: bike.plate,
-        start: start.trim(),
-        end: end.trim(),
+        start: blockInstant_(startAt),
+        end: blockInstant_(endAt),
         channel: "maintenance",
         note: blockText_(reason),
       });
@@ -88,6 +88,11 @@ function blockDateTime_(value) {
   const date = new Date(Date.UTC(year, month - 1, day, hour, minute));
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
   return date.getTime() / 60000;
+}
+
+/** The instant of minutes from blockDateTime_, a Japan wall clock: UTC+9 all year. A Date, so the cell is a date-time. */
+function blockInstant_(minutes) {
+  return new Date((minutes - 9 * 60) * 60000);
 }
 
 /** The published models as `{ id, nameJa, nameEn, typeId, active, plates: [{ plate, status }] }`, or a refusal. */

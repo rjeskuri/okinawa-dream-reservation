@@ -8,9 +8,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parseProposedRows } from "../src/lib/catalog/check-rows.ts";
-import { SHEET_TABS } from "../src/lib/catalog/sheet-schema.ts";
+import { SHEET_TABS, validateCatalog } from "../src/lib/catalog/sheet-schema.ts";
 import { verifyEnvelope } from "../src/lib/crypto.ts";
-import { type AppsScriptWorld, loadAppsScript, type Options, type Route } from "./helpers/apps-script.ts";
+import { type AppsScriptWorld, loadAppsScript, type Options, type Route, sheetsApiValues } from "./helpers/apps-script.ts";
+import { validWorkbook } from "./helpers/sheet-workbook.ts";
 
 const SCRIPT_DIR = new URL("../apps-script/", import.meta.url);
 
@@ -273,7 +274,7 @@ test("Add a bike is a dashboard action that opens the AddBike dialog", () => {
     `the home lists Add a bike: ${JSON.stringify(home)}`,
   );
 
-  // One modal dialog: the shell, then AddBike.html, titled Add a bike.
+  // One modal dialog: the shell, then AddBikePanel.html, titled Add a bike.
   const opened = world(SHEET_A);
   opened.call("openAddBike");
   assert.deepEqual(
@@ -281,18 +282,18 @@ test("Add a bike is a dashboard action that opens the AddBike dialog", () => {
     [{ kind: "modal", title: "Add a bike" }],
   );
   const shell = readFileSync(new URL("PanelShell.html", SCRIPT_DIR), "utf8");
-  const panel = readFileSync(new URL("AddBike.html", SCRIPT_DIR), "utf8");
-  assert.notEqual(panel.trim(), "", "AddBike.html has content");
+  const panel = readFileSync(new URL("AddBikePanel.html", SCRIPT_DIR), "utf8");
+  assert.notEqual(panel.trim(), "", "AddBikePanel.html has content");
   const html = opened.shown[0].html;
   const at = html.indexOf(shell);
   assert.ok(at >= 0, "the dialog holds PanelShell.html");
-  assert.ok(html.indexOf(panel, at + shell.length) >= 0, "the dialog holds AddBike.html after the shell");
+  assert.ok(html.indexOf(panel, at + shell.length) >= 0, "the dialog holds AddBikePanel.html after the shell");
   assert.deepEqual(opened.fetches, [], "opening the dialog calls nothing");
   assert.deepEqual(opened.tabs.get("Vehicles")?.touches, []);
 
   // The panel reaches the three server steps: options, check and save.
   for (const fn of ["addBikeOptions", "addBikeCheck", "addBikeSave"]) {
-    assert.match(panel, new RegExp(`callServer\\s*\\(\\s*["'\`]${fn}["'\`]`), `AddBike.html calls ${fn}`);
+    assert.match(panel, new RegExp(`callServer\\s*\\(\\s*["'\`]${fn}["'\`]`), `AddBikePanel.html calls ${fn}`);
   }
 });
 
@@ -683,4 +684,63 @@ test("a draft for an unknown model or without a plate is refused before any call
   const result = plain(script.call("addBikeCheck", { mode: "existing", modelId: known, vehicle: { plate: "わ9999" } }));
   assert.equal(result?.ok, true, JSON.stringify(result));
   assert.deepEqual(paths(script), [CHECK]);
+});
+
+test("addBikeSave keeps a digit-only plate and notes that look like a date or boolean as typed, and Publish reads them back", () => {
+  // The valid fixture, so the Worker's own validateCatalog can read the whole sheet the way Publish does.
+  const cases: Draft[] = [
+    { mode: "existing", modelId: "pcx-125", vehicle: { plate: "0123", odometerKm: 8000, baseUsageDays: 3, notes: "2027-07-15" } },
+    { mode: "existing", modelId: "today-50", vehicle: { plate: "2002", notes: "TRUE" } },
+    { mode: "existing", modelId: "pcx-125", vehicle: { plate: "000", odometerKm: 0, baseUsageDays: 0, notes: "09:30" } },
+    { mode: "existing", modelId: "today-50", vehicle: { plate: "2027-07-15", odometerKm: 1500, notes: "1,500" } },
+    { mode: "existing", modelId: "pcx-125", vehicle: { plate: "わ0123", baseUsageDays: 12, notes: "Scratch on the left mirror" } },
+  ];
+  for (const draft of cases) {
+    const { plate, odometerKm, baseUsageDays, notes } = draft.vehicle;
+    const label = `plate ${JSON.stringify(plate)}, notes ${JSON.stringify(notes)}`;
+    const tabs: Record<string, unknown[][]> = { ...validWorkbook(), PublishLog: [[...SHEET_TABS.PublishLog]] };
+    let script: AppsScriptWorld | undefined;
+    let read: ReturnType<typeof validateCatalog> | undefined;
+    script = loadAppsScript({
+      properties: PROPERTIES,
+      user: USER,
+      timeZone: "Asia/Tokyo",
+      tabs,
+      routes: {
+        [CHECK]: { body: OK_CHECK },
+        // What Publish reads: every tab through the Sheets API, checked by the Worker's own validateCatalog.
+        [PUBLISH]: () => {
+          const world = script as AppsScriptWorld;
+          read = validateCatalog(Object.fromEntries([...world.tabs.keys()].map((name) => [name, sheetsApiValues(world, name)])), Date.now());
+          return { body: REPORT };
+        },
+        ...STEP_ROUTES,
+      },
+    });
+    const result = plain(script.call("addBikeSave", draft));
+    assert.equal(result?.ok, true, `${label}: ${JSON.stringify(result)}`);
+
+    // The row as the sheet holds it: text as typed, numbers as numbers, and nothing for what the draft left out.
+    const rows = script.tabs.get("Vehicles")?.rows ?? [];
+    const row = rows.length;
+    assert.equal(row, tabs.Vehicles.length + 1, `${label}: one row added`);
+    const written = sheetRow(script, "Vehicles", row);
+    assert.strictEqual(written.plate, plate, `${label}: the plate as typed`);
+    assert.strictEqual(written.notes, notes, `${label}: the notes as typed`);
+    assert.strictEqual(written.model_id, draft.modelId, label);
+    assert.strictEqual(written.status, "active", label);
+    assert.strictEqual(written.odometer_km, odometerKm ?? "", `${label}: the odometer as a number`);
+    assert.strictEqual(written.base_usage_days, baseUsageDays ?? "", `${label}: the usage days as a number`);
+
+    // Publish reads back the plate staff typed, with the numbers they meant.
+    assert.ok(read !== undefined, `${label}: Publish ran`);
+    const errors = read.statuses.filter((status) => status.tab === "Vehicles" && status.row === row && status.level === "error");
+    assert.deepEqual(errors, [], `${label}: the Worker takes the row`);
+    const vehicle = read.catalog?.vehicles.find((each) => each.plate === plate);
+    assert.deepEqual(
+      vehicle,
+      { plate, modelId: draft.modelId, status: "active", odometerKm: odometerKm ?? null, baseUsageDays: baseUsageDays ?? 0 },
+      `${label}: the vehicle Publish reads: ${JSON.stringify(read.catalog?.vehicles.map((each) => each.plate))}`,
+    );
+  }
 });

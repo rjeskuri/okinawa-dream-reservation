@@ -2,7 +2,7 @@
 // Expected rows and keys are written out by hand, never taken from the script or the Worker's headerKey.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type AppsScriptWorld, loadAppsScript } from "./helpers/apps-script.ts";
+import { type AppsScriptWorld, loadAppsScript, sheetsApiValues } from "./helpers/apps-script.ts";
 
 // Values cross out of the script's realm with another Object prototype, which deepEqual refuses. A copy is plain.
 const plain = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
@@ -153,46 +153,88 @@ test("appendRecord_ refuses a key with no column and a missing tab without writi
   assert.deepEqual(world.tabs.get("Vehicles")?.touches, []);
 });
 
-test("text that starts with = + - or @ is written as text", () => {
-  const world = loadAppsScript({ tabs: { Probe: [["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"], ["old"]] } });
+// Text staff type that Sheets would read as something else if it were typed into a cell: a number (leading zeros, a
+// sign, a decimal, a thousands comma, a percent, an exponent), a date, a date-time, a time, a boolean or a formula.
+const PARSED_BY_SHEETS = [
+  "2002",
+  "0123",
+  "007",
+  "-5",
+  "+81 98 000 0000",
+  "3.50",
+  "1,000",
+  "50%",
+  "1e3",
+  "2027-07-15",
+  "2027/07/15",
+  "2027-07-15 09:00",
+  "7/15/2027",
+  "09:30",
+  "TRUE",
+  "false",
+  "=SUM(A1:A2)",
+  "=1+1",
+];
+// Text Sheets keeps as it is in any case, which must stay so.
+const KEPT_BY_SHEETS = ["@home", "a=b", "x+1", "わ1001", "沖縄 あ 35-80", "Scratch on the left mirror", ""];
+// Values that are not text keep their type: money and counts, booleans, and a date-time meant as one.
+const VALUES: unknown[] = [12, -5, 0, 3.5, 1_000_000, true, false, new Date(Date.UTC(2027, 6, 15, 0, 30))];
+// 00:30 UTC is 09:30 in Japan: the serial of that wall clock, days since 1899-12-30, worked out by hand.
+const VALUES_SERIAL_AT = 7;
+const DATE_SERIAL = (Date.UTC(2027, 6, 15, 9, 30) - Date.UTC(1899, 11, 30)) / 86_400_000;
 
-  assert.equal(
-    world.call("appendRecord_", "Probe", {
-      a: "=SUM(A1:A2)",
-      b: "+81 98 000 0000",
-      c: "-5",
-      d: "@home",
-      // Text with the character inside, a number, a negative number, a boolean and an empty string are as they are.
-      e: "a=b",
-      f: "x+1",
-      g: 12,
-      h: -5,
-      i: true,
-      j: false,
-      k: "",
-    }),
-    3,
+test("every string appendRecord_ and setCellValue_ write is stored as the exact text typed, and values as values", () => {
+  // The fake reads each of these as Sheets does when it is written as it is, so keeping them as text means something.
+  const raw = loadAppsScript({ timeZone: "Asia/Tokyo", tabs: { Raw: [] } });
+  raw.evaluate(
+    `SpreadsheetApp.getActive().getSheetByName("Raw").getRange(1, 1, 1, ${PARSED_BY_SHEETS.length})` +
+      `.setValues([${JSON.stringify(PARSED_BY_SHEETS)}]); null`,
   );
-  assert.deepEqual(grid(world, "Probe", 11)[2], [
-    "'=SUM(A1:A2)",
-    "'+81 98 000 0000",
-    "'-5",
-    "'@home",
-    "a=b",
-    "x+1",
-    12,
-    -5,
-    true,
-    false,
-    "",
-  ]);
+  PARSED_BY_SHEETS.forEach((typed, i) => {
+    assert.notStrictEqual(raw.tabs.get("Raw")?.rows[0][i], typed, `the fake parses ${JSON.stringify(typed)} written as is`);
+  });
 
-  // The same rule holds for one cell, and plain text there is not prefixed.
-  world.call("setCellValue_", "Probe", 2, "b", "=1+1");
-  world.call("setCellValue_", "Probe", 2, "c", "@staff");
-  world.call("setCellValue_", "Probe", 2, "d", "note");
-  world.call("setCellValue_", "Probe", 2, "e", -3);
-  assert.deepEqual(grid(world, "Probe", 11)[1], ["old", "'=1+1", "'@staff", "note", -3, "", "", "", "", "", ""]);
+  const strings = [...PARSED_BY_SHEETS, ...KEPT_BY_SHEETS];
+  const stringHeaders = strings.map((_, i) => `text_${i}`);
+  const valueHeaders = VALUES.map((_, i) => `value_${i}`);
+  const headers = [...stringHeaders, ...valueHeaders];
+  const width = headers.length;
+  const world = loadAppsScript({ timeZone: "Asia/Tokyo", tabs: { Probe: [headers, ["old"]] } });
+
+  const record = Object.fromEntries([
+    ...strings.map((typed, i) => [stringHeaders[i], typed]),
+    ...VALUES.map((value, i) => [valueHeaders[i], value]),
+  ]);
+  assert.equal(world.call("appendRecord_", "Probe", record), 3);
+  const appended = grid(world, "Probe", width)[2];
+  strings.forEach((typed, i) => {
+    assert.strictEqual(appended[i], typed, `appendRecord_ stores ${JSON.stringify(typed)} as typed`);
+  });
+  VALUES.forEach((value, i) => {
+    assert.deepEqual(appended[strings.length + i], value, `appendRecord_ stores ${String(value)} as it was`);
+  });
+
+  // The Worker reads the same through the Sheets API: the text, the numbers and booleans, and the date as its serial.
+  const api = sheetsApiValues(world, "Probe")[2];
+  strings.forEach((typed, i) => {
+    assert.strictEqual(api[i] ?? "", typed, `the Sheets API reads ${JSON.stringify(typed)} back`);
+  });
+  VALUES.forEach((value, i) => {
+    const expected = i === VALUES_SERIAL_AT ? DATE_SERIAL : value;
+    assert.strictEqual(api[strings.length + i], expected, `the Sheets API reads ${String(value)} back`);
+  });
+
+  // One cell at a time, over the row a test seeded: each string as typed, and a number as a number.
+  strings.forEach((typed, i) => {
+    world.call("setCellValue_", "Probe", 2, stringHeaders[i], typed);
+    assert.strictEqual(world.call("cellValue_", "Probe", 2, stringHeaders[i]), typed, `setCellValue_ keeps ${JSON.stringify(typed)}`);
+  });
+  world.call("setCellValue_", "Probe", 2, valueHeaders[0], 42);
+  world.call("setCellValue_", "Probe", 2, valueHeaders[5], false);
+  const set = grid(world, "Probe", width)[1];
+  assert.deepEqual(set.slice(0, strings.length), strings, "every string set on row 2 is as typed");
+  assert.strictEqual(set[strings.length], 42);
+  assert.strictEqual(set[strings.length + 5], false);
 });
 
 test("cellValue_ and setCellValue_ find the cell by header", () => {

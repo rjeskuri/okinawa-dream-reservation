@@ -12,7 +12,7 @@ const CANCEL_CHOICES_ = ["tier", "full", "none"];
 const CANCEL_REASONS_ = {
   NOT_FOUND: "The website has no booking with this id. Search again and pick it from the list.",
   NOT_CANCELLABLE:
-    "The website cannot cancel this booking: it is not a confirmed booking made on the website. Nothing was changed.",
+    "The website cannot cancel this booking: it is not confirmed (it is on hold, in payment or its hold expired) or it is a block. Nothing was changed.",
   ALREADY_CANCELLED: "This booking is already cancelled, so nothing more was done. Search again to see where it stands.",
   BAD_CHOICE: "The website did not accept that refund choice or amount. Nothing was cancelled: choose the refund again.",
   QUOTE_CHANGED:
@@ -20,7 +20,7 @@ const CANCEL_REASONS_ = {
 };
 
 function openCancelBooking() {
-  openPanel_("CancelBooking", CANCEL_PANEL_TITLE_);
+  openPanel_("CancelBookingPanel", CANCEL_PANEL_TITLE_);
 }
 
 /**
