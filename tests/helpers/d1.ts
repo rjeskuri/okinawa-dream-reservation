@@ -314,6 +314,19 @@ async function reset(instance: Instance): Promise<boolean> {
     const before = await schemaOf(instance);
     if (before.text !== instance.schema) return false;
     const deletes = [...instance.tables].reverse().map((table) => ({ sql: `DELETE FROM "${table}"`, params: [], bound: false }));
+    // AUTOINCREMENT tables (outbox) keep their last id in sqlite_sequence, and a new database has none.
+    if (instance.schema.includes('"name":"sqlite_sequence"')) deletes.push({ sql: "DELETE FROM sqlite_sequence", params: [], bound: false });
+    // The connection settings a statement may change (the PRAGMAs D1 allows), back to SQLite's defaults, as a new one has.
+    const settings = [
+      "PRAGMA foreign_keys = on",
+      "PRAGMA defer_foreign_keys = off",
+      "PRAGMA case_sensitive_like = off",
+      "PRAGMA ignore_check_constraints = off",
+      "PRAGMA legacy_alter_table = off",
+      "PRAGMA recursive_triggers = off",
+      "PRAGMA reverse_unordered_selects = off",
+    ];
+    for (const sql of settings) await instance.send({ op: "statement", sql, params: [], bound: false, method: "run", args: [] });
     // D1 reports the connection's last insert rowid in every meta, so put it back to what the new one reported. Should
     // cron_runs ever go, this fails and every createTestDb starts a Miniflare again: slower, never wrong.
     const rowidBack = [

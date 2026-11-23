@@ -134,7 +134,13 @@ test("the bridge answers every probe as Miniflare's D1 proxy does", async () => 
   }
 });
 
-/** Every row of every table the migrations made, and the schema itself. */
+/** The connection settings D1 lets a statement change, each read back as a value. */
+const SETTINGS = ["foreign_keys", "defer_foreign_keys", "ignore_check_constraints", "legacy_alter_table", "recursive_triggers", "reverse_unordered_selects"];
+
+/**
+ * Every row of every table, SQLite's own (sqlite_sequence) included, the schema, the connection settings, and the id
+ * the next outbox row gets. Inserts that row, so call it last on a database.
+ */
 async function everything(db: D1Database): Promise<unknown> {
   const { results: schema, meta } = await db
     .prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY rowid")
@@ -142,18 +148,38 @@ async function everything(db: D1Database): Promise<unknown> {
   // The connection's last insert rowid shows in every meta, so a reused one must start from a new one's.
   const rows: Record<string, unknown[]> = {};
   for (const { type, name } of schema) {
-    if (type !== "table" || name.startsWith("_cf_") || name.startsWith("sqlite_")) continue;
+    if (type !== "table" || name.startsWith("_cf_")) continue;
     rows[name] = (await db.prepare(`SELECT * FROM "${name}"`).all()).results;
   }
-  return { schema, rows, lastRowId: meta.last_row_id };
+  const settings: Record<string, unknown> = {};
+  for (const setting of SETTINGS) settings[setting] = (await db.prepare(`PRAGMA ${setting}`).all()).results;
+  // case_sensitive_like cannot be read back, only seen in what LIKE answers.
+  settings.case_sensitive_like = await db.prepare("SELECT 'a' LIKE 'A' AS folds").first("folds");
+  // An AUTOINCREMENT id never reuses one sqlite_sequence remembers, so a reused database must hand out a new one's first id.
+  const next = await db
+    .prepare("INSERT INTO outbox (kind, dedupe_key, payload, status, next_attempt_at, created_at) VALUES ('email', 'next', '{}', 'pending', 0, 0)")
+    .run();
+  return { schema, rows, settings, lastRowId: meta.last_row_id, nextOutboxId: next.meta.last_row_id };
 }
 
-test("a reused database is as empty as a new one, whatever the test before did", async () => {
+test("a reused database is as empty as a new one, whatever the test before did", async (t) => {
   const fresh = await createTestDb();
-  const pristine = await everything(fresh.db);
+  const pristine = (await everything(fresh.db)) as { rows: Record<string, unknown[]>; settings: Record<string, unknown>; nextOutboxId: number };
   await fresh.dispose();
+  // Earlier tests in this file may have used the database "fresh" got, so hold it to what SQLite gives a new one too.
+  assert.deepEqual(pristine.rows.sqlite_sequence, []);
+  assert.equal(pristine.nextOutboxId, 1);
+  assert.deepEqual(pristine.settings, {
+    foreign_keys: [{ foreign_keys: 1 }],
+    defer_foreign_keys: [{ defer_foreign_keys: 0 }],
+    ignore_check_constraints: [{ ignore_check_constraints: 0 }],
+    legacy_alter_table: [{ legacy_alter_table: 0 }],
+    recursive_triggers: [{ recursive_triggers: 0 }],
+    reverse_unordered_selects: [{ reverse_unordered_selects: 0 }],
+    case_sensitive_like: 1,
+  });
 
-  // What a test may leave behind: rows in tables with foreign keys between them, a trigger, a renamed table.
+  // What a test may leave behind: rows (and the AUTOINCREMENT ids they used), connection settings, a trigger, a renamed table.
   const LEFTOVERS: { label: string; leave: (db: D1Database) => Promise<unknown> }[] = [
     {
       label: "rows",
@@ -162,6 +188,26 @@ test("a reused database is as empty as a new one, whatever the test before did",
         await seedBooking(db, {});
         await db.prepare("INSERT INTO meta (key, value, updated_at) VALUES ('k', 'v', 1)").run();
         await db.prepare("INSERT INTO cron_runs (cron, scheduled_at, ran_at, status) VALUES ('c', 1, 2, 'ok')").run();
+        // A high explicit id, as cron-frequent's dead-outbox test sets, then an automatic one after it.
+        await db
+          .prepare("INSERT INTO outbox (id, kind, dedupe_key, payload, status, next_attempt_at, created_at) VALUES (424242, 'email', 'a', '{}', 'dead', 0, 0)")
+          .run();
+        await db.prepare("INSERT INTO outbox (kind, dedupe_key, payload, status, next_attempt_at, created_at) VALUES ('sheet_booking', 'b', '{}', 'sent', 0, 0)").run();
+      },
+    },
+    {
+      label: "connection settings",
+      leave: async (db) => {
+        for (const sql of [
+          "PRAGMA foreign_keys = off",
+          "PRAGMA defer_foreign_keys = on",
+          "PRAGMA case_sensitive_like = on",
+          "PRAGMA ignore_check_constraints = on",
+          "PRAGMA legacy_alter_table = on",
+          "PRAGMA recursive_triggers = on",
+          "PRAGMA reverse_unordered_selects = on",
+        ])
+          await db.prepare(sql).run();
       },
     },
     { label: "a trigger", leave: (db) => db.prepare("CREATE TRIGGER no_meta BEFORE INSERT ON meta BEGIN SELECT RAISE(ABORT, 'no'); END").run() },
@@ -170,15 +216,17 @@ test("a reused database is as empty as a new one, whatever the test before did",
     { label: "an index", leave: (db) => db.prepare("CREATE INDEX meta_value ON meta (value)").run() },
   ];
   for (const { label, leave } of LEFTOVERS) {
-    const used = await createTestDb();
-    await leave(used.db);
-    await used.dispose();
-    const next = await createTestDb();
-    try {
-      assert.deepEqual(await everything(next.db), pristine, label);
-    } finally {
-      await next.dispose();
-    }
+    await t.test(label, async () => {
+      const used = await createTestDb();
+      await leave(used.db);
+      await used.dispose();
+      const next = await createTestDb();
+      try {
+        assert.deepEqual(await everything(next.db), pristine, label);
+      } finally {
+        await next.dispose();
+      }
+    });
   }
 });
 
