@@ -9,6 +9,11 @@
 // during a fetch sees only the applied writes, and the script's next read sees what the route wrote.
 // Drive holds the folders a test gives, by id: DriveApp.getFolderById throws for any other id, as Google does for an id
 // the user cannot see, and Folder.createFile adds to `drive`, where a test reads each file's name, type and bytes.
+// A string written with setValues, setValue or appendRow is parsed the way Sheets parses typed input (userEntered,
+// below), unless the cell's number format is plain text ("@"): a leading apostrophe is dropped and keeps the rest as
+// text, and numbers, dates, times, booleans and formulas become those. Cells a test seeds in `tabs` are stored values
+// and are never parsed. `tabs` holds each cell as Apps Script's getValues answers it, a Date for a date or time; what
+// the Worker reads through the Sheets API, serials for dates, is sheetsApiValues.
 import { createHmac } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { createContext, Script } from "node:vm";
@@ -29,7 +34,123 @@ export type FetchCall = {
   muteHttpExceptions: unknown;
 };
 
-export type FakeTab = { rows: unknown[][]; touches: string[] };
+/** `formats` holds the number format a script set on a cell, by row and column from 0; a cell never set has none. */
+export type FakeTab = { rows: unknown[][]; touches: string[]; formats: string[][] };
+
+/**
+ * A cell holding a formula, which is what Sheets makes of typed text starting with `=`, or with `+` or `-` when the
+ * rest is not a number. The fake does not evaluate formulas: the cell holds this, which equals no text and no number.
+ */
+export class FakeFormula {
+  readonly formula: string;
+  constructor(formula: string) {
+    this.formula = formula;
+  }
+}
+
+/** The number format that makes Sheets keep a written string as it is. */
+export const PLAIN_TEXT_FORMAT = "@";
+
+const DAY_MS = 86_400_000;
+const SHEET_EPOCH_WALL_MS = Date.UTC(1899, 11, 30);
+
+const isDate = (value: unknown): value is Date => Object.prototype.toString.call(value) === "[object Date]";
+
+/** The wall clock of `epoch` in `timeZone`, as epoch ms of the same wall clock in UTC. Whole seconds. */
+function wallClockMs(epoch: number, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    era: "short",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+  }).formatToParts(epoch);
+  const field = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+  const date = new Date(0);
+  date.setUTCFullYear(field("year"), field("month") - 1, field("day"));
+  date.setUTCHours(field("hour"), field("minute"), field("second"), 0);
+  return date.getTime();
+}
+
+/** The instant whose wall clock in `timeZone` is `wall` (epoch ms of that wall clock in UTC). */
+function instantOfWallClock(wall: number, timeZone: string): number {
+  const second = (epoch: number) => epoch - (((epoch % 1000) + 1000) % 1000);
+  let epoch = wall - (wallClockMs(wall, timeZone) - second(wall));
+  epoch = wall - (wallClockMs(epoch, timeZone) - second(epoch));
+  return epoch;
+}
+
+// What Sheets takes from typed input, in an en_US spreadsheet; anything else stays text. Currency, words for months and
+// durations past 24 hours are left out of this model.
+const TYPED_NUMBER = /^[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?%?$/i;
+const TYPED_BOOLEAN = /^(?:true|false)$/i;
+const TYPED_YMD = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
+const TYPED_MDY = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?: (\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
+const TYPED_TIME = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/;
+
+/** A real calendar date and clock as a Date in the spreadsheet's zone, or null. */
+function typedDate(parts: (string | undefined)[], timeZone: string): Date | null {
+  const [year, month, day, hour = 0, minute = 0, second = 0] = parts.map((part) => (part === undefined ? undefined : Number(part)));
+  if (hour! > 23 || minute! > 59 || second! > 59) return null;
+  const wall = new Date(0);
+  wall.setUTCFullYear(year!, month! - 1, day!);
+  if (wall.getUTCFullYear() !== year || wall.getUTCMonth() !== month! - 1 || wall.getUTCDate() !== day) return null;
+  wall.setUTCHours(hour!, minute!, second!, 0);
+  return new Date(instantOfWallClock(wall.getTime(), timeZone));
+}
+
+function typedDateOrTime(text: string, timeZone: string): Date | null {
+  const ymd = TYPED_YMD.exec(text);
+  if (ymd !== null) return typedDate(ymd.slice(1), timeZone);
+  const mdy = TYPED_MDY.exec(text);
+  if (mdy !== null) return typedDate([mdy[3], mdy[1], mdy[2], ...mdy.slice(4)], timeZone);
+  const time = TYPED_TIME.exec(text);
+  if (time !== null) return typedDate(["1899", "12", "30", ...time.slice(1)], timeZone);
+  return null;
+}
+
+/**
+ * What Sheets stores for a value written to a cell: a string as typed input is parsed, unless the cell's format is
+ * plain text; a Date is the same instant; any other value is itself.
+ */
+export function userEntered(value: unknown, timeZone: string, format = ""): unknown {
+  if (isDate(value)) return new Date(value.getTime());
+  if (typeof value !== "string" || format === PLAIN_TEXT_FORMAT) return value;
+  if (value.startsWith("'")) return value.slice(1);
+  if (value.startsWith("=")) return new FakeFormula(value);
+  const text = value.trim();
+  if (text === "") return value;
+  if (TYPED_BOOLEAN.test(text)) return text.toLowerCase() === "true";
+  if (TYPED_NUMBER.test(text)) {
+    const number = Number(text.replace(/[,%]/g, ""));
+    return text.endsWith("%") ? number / 100 : number;
+  }
+  if (/^[+-]./.test(text)) return new FakeFormula(value);
+  return typedDateOrTime(text, timeZone) ?? value;
+}
+
+/**
+ * The tab as the Worker reads it through the Sheets API, values.batchGet with UNFORMATTED_VALUE and SERIAL_NUMBER: a
+ * date or time is its serial, days since 1899-12-30 on the spreadsheet's wall clock; an empty cell is ''. A formula the
+ * fake cannot evaluate reads as Sheets' #ERROR!.
+ */
+export function sheetsApiValues(world: AppsScriptWorld, tabName: string): unknown[][] {
+  const tab = world.tabs.get(tabName);
+  if (tab === undefined) throw new Error(`the fake has no tab ${tabName}`);
+  const timeZone = world.timeZone();
+  return Array.from(tab.rows, (cells) =>
+    Array.from(cells ?? [], (cell) => {
+      if (cell === undefined || cell === null) return "";
+      if (isDate(cell)) return (wallClockMs(cell.getTime(), timeZone) - SHEET_EPOCH_WALL_MS) / DAY_MS;
+      if (cell instanceof FakeFormula) return "#ERROR!";
+      return cell;
+    }),
+  );
+}
 
 /** What addSeparator records in a menu's items, between the `[caption, functionName]` pairs. */
 export const MENU_SEPARATOR = "---";
@@ -209,11 +330,12 @@ function bodyText(body: unknown): string {
  * Writes the script made that Google has not applied yet, in order. A read through the Spreadsheet service applies
  * them first, so the script reads its own writes; nothing else sees them until then.
  */
-type Batch = { pending: (() => void)[]; apply(): void };
+type Batch = { pending: (() => void)[]; apply(): void; timeZone(): string };
 
-function newBatch(): Batch {
+function newBatch(timeZone: () => string): Batch {
   const batch: Batch = {
     pending: [],
+    timeZone,
     apply() {
       for (const write of batch.pending.splice(0)) write();
     },
@@ -247,11 +369,40 @@ function fakeRange(batch: Batch, tab: FakeTab, row: number, column: number, numR
       if (copied.length !== numRows || copied.some((cells) => cells.length !== numColumns)) {
         throw new Error("The data's size does not match the range's size");
       }
+      // Parsed when Google applies the write, against the formats the cells have by then.
       batch.pending.push(() => {
         copied.forEach((cells, i) => {
           const target = (tab.rows[row - 1 + i] ??= []);
           cells.forEach((cell, j) => {
-            target[column - 1 + j] = cell;
+            const format = tab.formats[row - 1 + i]?.[column - 1 + j];
+            target[column - 1 + j] = userEntered(cell, batch.timeZone(), format);
+          });
+        });
+      });
+      return range;
+    },
+    // A format changes no value already in a cell: it decides how a string written after it is read.
+    setNumberFormat(format: unknown) {
+      tab.touches.push("setNumberFormat");
+      batch.pending.push(() => {
+        for (let i = 0; i < numRows; i += 1) {
+          const target = (tab.formats[row - 1 + i] ??= []);
+          for (let j = 0; j < numColumns; j += 1) target[column - 1 + j] = String(format);
+        }
+      });
+      return range;
+    },
+    setNumberFormats(formats: ArrayLike<ArrayLike<unknown>>) {
+      tab.touches.push("setNumberFormats");
+      const copied = Array.from(formats, (cells) => Array.from(cells, String));
+      if (copied.length !== numRows || copied.some((cells) => cells.length !== numColumns)) {
+        throw new Error("The data's size does not match the range's size");
+      }
+      batch.pending.push(() => {
+        copied.forEach((cells, i) => {
+          const target = (tab.formats[row - 1 + i] ??= []);
+          cells.forEach((format, j) => {
+            target[column - 1 + j] = format;
           });
         });
       });
@@ -451,7 +602,8 @@ function fakeSheet(batch: Batch, name: string, tab: FakeTab) {
       tab.touches.push("appendRow");
       const copied = Array.from(cells);
       batch.pending.push(() => {
-        tab.rows.push(copied);
+        const formats = tab.formats[tab.rows.length];
+        tab.rows.push(copied.map((cell, j) => userEntered(cell, batch.timeZone(), formats?.[j])));
       });
       return sheet;
     },
@@ -671,11 +823,11 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
   const tabs = new Map<string, FakeTab>(
     Object.entries(options.tabs ?? {}).map(([name, rows]) => [
       name,
-      { rows: rows.map((cells) => [...cells]), touches: [] },
+      { rows: rows.map((cells) => [...cells]), touches: [], formats: [] },
     ]),
   );
   let timeZone = options.timeZone ?? "America/New_York";
-  const batch = newBatch();
+  const batch = newBatch(() => timeZone);
   let lockOwner: object | null = options.lockHeldElsewhere === true ? {} : null;
 
   const spreadsheet = {
@@ -686,7 +838,7 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
     getSheets: () => Array.from(tabs, ([name, tab]) => fakeSheet(batch, name, tab)),
     insertSheet(name: string) {
       if (tabs.has(name)) throw new Error(`A sheet with the name "${name}" already exists`);
-      const tab: FakeTab = { rows: [], touches: [] };
+      const tab: FakeTab = { rows: [], touches: [], formats: [] };
       tabs.set(name, tab);
       inserted.push(name);
       return fakeSheet(batch, name, tab);

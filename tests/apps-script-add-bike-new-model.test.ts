@@ -6,9 +6,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { checkProposedRows, parseProposedRows } from "../src/lib/catalog/check-rows.ts";
-import { SHEET_TABS } from "../src/lib/catalog/sheet-schema.ts";
+import { SHEET_TABS, validateCatalog } from "../src/lib/catalog/sheet-schema.ts";
 import { verifyEnvelope } from "../src/lib/crypto.ts";
-import { type AppsScriptWorld, type FetchCall, loadAppsScript, type Route } from "./helpers/apps-script.ts";
+import { type AppsScriptWorld, type FetchCall, loadAppsScript, type Route, sheetsApiValues } from "./helpers/apps-script.ts";
 import { validWorkbook } from "./helpers/sheet-workbook.ts";
 
 const BASE_URL = "https://reservation-one.example.dev";
@@ -1077,4 +1077,159 @@ test("check errors come back per tab and row", () => {
   assert.equal(result?.ok, false, `real check error: ${JSON.stringify(result)}`);
   assert.equal(result.check?.rows?.Prices?.some((row: { level: string }) => row.level === "error"), true, "the Prices error");
   assertUnchanged(saved, sheet, allTabs, "real check error");
+});
+
+test("a new model keeps ids, names and a plate of digits or date-like text as typed, and Publish reads them back", () => {
+  type Case = { draft: NewDraft; typeNames?: Texts };
+  const cases: Case[] = [
+    {
+      draft: {
+        mode: "new",
+        model: {
+          modelId: "007",
+          typeId: "motorcycle",
+          brand: "0123",
+          engineCc: 250,
+          seats: 2,
+          sort: 9,
+          active: true,
+          texts: { ...texts("007"), name: { ja: "0123", en: "2002", zh: "2027-07-15", ko: "TRUE" } },
+        },
+        rateClass: {
+          new: { id: "0250", group: "bike", sort: 8, extensionPerHourJpy: 900, names: { ja: "0250", en: "250", zh: "09:30", ko: "FALSE" } },
+        },
+        prices: [
+          { packageId: "day-1", priceJpy: 6000, advancePriceJpy: 5500 },
+          { packageId: "day-3", priceJpy: 15000 },
+        ],
+        vehicle: { plate: "0042", odometerKm: 120, notes: "2027/07/15" },
+      },
+    },
+    {
+      // Sheet A has no ebike row in Types, so this one also adds a Types row.
+      draft: {
+        mode: "new",
+        model: {
+          modelId: "2027",
+          typeId: "ebike",
+          brand: "1,000",
+          sort: 7,
+          active: true,
+          texts: { ...texts("2027"), name: { ja: "7/15/2027", en: "50%", zh: "-5", ko: "=1+1" } },
+        },
+        rateClass: { new: { id: "0001", group: "ebike", sort: 6, names: { ja: "0001", en: "1e3", zh: "3.50", ko: "true" } } },
+        prices: [{ packageId: "day-1", priceJpy: 2500 }],
+        type: { depositJpy: 2000, sort: 4, names: { ja: "0123", en: "2002", zh: "TRUE", ko: "09:30" } },
+        vehicle: { plate: "1234", baseUsageDays: 2, notes: "FALSE" },
+      },
+      typeNames: { ja: "0123", en: "2002", zh: "TRUE", ko: "09:30" },
+    },
+  ];
+
+  for (const { draft, typeNames } of cases) {
+    const sheet = sheetA();
+    const label = `model ${draft.model.modelId}`;
+    const cls = (draft.rateClass as { new: NewClass }).new;
+    const prices = draft.prices ?? [];
+    const { script } = fake(sheet);
+    const result = plain(script.call("addBikeSave", draft));
+    assert.equal(result?.ok, true, `${label}: save: ${JSON.stringify(result)}`);
+
+    /** The last `count` rows of a tab, keyed by header, as the sheet holds them. */
+    const added = (tab: string, count = 1) => {
+      const rows = script.tabs.get(tab)?.rows ?? [];
+      assert.equal(rows.length, sheet.tabs[tab].length + count, `${label}: ${count} ${tab} rows added`);
+      return Array.from({ length: count }, (_, i) => sheetRow(script, tab, sheet.tabs[tab].length + 1 + i));
+    };
+    const localized = (field: string, values: Texts) =>
+      Object.fromEntries(LOCALES.map(([key, suffix]) => [`${field}_${suffix}`, values[key]]));
+    const pick = (row: Record<string, unknown>, keys: string[]) => Object.fromEntries(keys.map((key) => [key, row[key]]));
+
+    // Text as typed, numbers as numbers, in every tab the save wrote.
+    const m = draft.model;
+    const modelCells = {
+      model_id: m.modelId,
+      type_id: m.typeId,
+      rate_class_id: cls.id,
+      brand: m.brand,
+      engine_cc: m.engineCc ?? "",
+      seats: m.seats ?? "",
+      sort: m.sort,
+      active: true,
+      ...localized("name", m.texts.name),
+    };
+    const [modelRow] = added("Models");
+    assert.deepEqual(pick(modelRow, Object.keys(modelCells)), modelCells, `${label}: the Models row`);
+    const classCells = {
+      rate_class_id: cls.id,
+      group: cls.group,
+      sort: cls.sort,
+      extension_per_hour_jpy: cls.extensionPerHourJpy ?? "",
+      ...localized("name", cls.names),
+    };
+    const [classRow] = added("RateClasses");
+    assert.deepEqual(pick(classRow, Object.keys(classCells)), classCells, `${label}: the RateClasses row`);
+    const priceKeys = ["rate_class_id", "package_id", "price_jpy", "advance_price_jpy"];
+    assert.deepEqual(
+      byPackage(added("Prices", prices.length)).map((row) => pick(row, priceKeys)),
+      byPackage(prices.map((p) => ({ rate_class_id: cls.id, package_id: p.packageId, price_jpy: p.priceJpy, advance_price_jpy: p.advancePriceJpy ?? "" }))),
+      `${label}: the Prices rows`,
+    );
+    const { plate, odometerKm, baseUsageDays, notes } = draft.vehicle;
+    const vehicleCells = { plate, model_id: m.modelId, status: "active", odometer_km: odometerKm ?? "", base_usage_days: baseUsageDays ?? "", notes };
+    const [vehicleRow] = added("Vehicles");
+    assert.deepEqual(pick(vehicleRow, Object.keys(vehicleCells)), vehicleCells, `${label}: the Vehicles row`);
+    if (typeNames !== undefined && draft.type !== undefined) {
+      const typeCells = { type_id: m.typeId, deposit_jpy: draft.type.depositJpy, sort: draft.type.sort, ...localized("name", typeNames) };
+      const [typeRow] = added("Types");
+      assert.deepEqual(pick(typeRow, Object.keys(typeCells)), typeCells, `${label}: the Types row`);
+    }
+
+    // Publish reads every tab through the Sheets API with the Worker's own validateCatalog, and gets what was typed.
+    const read = validateCatalog(
+      Object.fromEntries([...script.tabs.keys()].map((name) => [name, sheetsApiValues(script, name)])),
+      Date.now(),
+    );
+    const newRows = new Set(["Models", "RateClasses", "Prices", "Vehicles", "Types"]);
+    const errors = read.statuses.filter(
+      (status) => newRows.has(status.tab) && status.row > sheet.tabs[status.tab].length && status.level === "error",
+    );
+    assert.deepEqual(errors, [], `${label}: the Worker takes every new row`);
+    const model = read.catalog?.models.find((each) => each.id === m.modelId);
+    assert.ok(model !== undefined, `${label}: Publish reads model ${m.modelId}: ${JSON.stringify(read.catalog?.models.map((each) => each.id))}`);
+    assert.equal(model.brand, m.brand, `${label}: the brand read back`);
+    assert.equal(model.rateClassId, cls.id, `${label}: the class read back`);
+    assert.deepEqual(
+      [model.texts.ja.name, model.texts.en.name, model.texts["zh-cn"].name, model.texts.ko.name],
+      [m.texts.name.ja, m.texts.name.en, m.texts.name.zh, m.texts.name.ko],
+      `${label}: the names read back`,
+    );
+    const rateClass = read.catalog?.rateClasses.find((each) => each.id === cls.id);
+    assert.ok(rateClass !== undefined, `${label}: Publish reads class ${cls.id}`);
+    assert.deepEqual(
+      [rateClass.texts.ja.name, rateClass.texts.en.name, rateClass.texts["zh-cn"].name, rateClass.texts.ko.name],
+      [cls.names.ja, cls.names.en, cls.names.zh, cls.names.ko],
+      `${label}: the class names read back`,
+    );
+    assert.deepEqual(
+      read.catalog?.prices.filter((price) => price.rateClassId === cls.id).sort((a, b) => a.packageId.localeCompare(b.packageId)),
+      prices
+        .map((p) => ({ rateClassId: cls.id, packageId: p.packageId, priceJpy: p.priceJpy, advancePriceJpy: p.advancePriceJpy ?? null }))
+        .sort((a, b) => a.packageId.localeCompare(b.packageId)),
+      `${label}: the prices read back`,
+    );
+    assert.deepEqual(
+      read.catalog?.vehicles.find((each) => each.plate === plate),
+      { plate, modelId: m.modelId, status: "active", odometerKm: odometerKm ?? null, baseUsageDays: baseUsageDays ?? 0 },
+      `${label}: the vehicle read back`,
+    );
+    if (typeNames !== undefined) {
+      const type = read.catalog?.vehicleTypes.find((each) => each.id === m.typeId);
+      assert.deepEqual(
+        [type?.texts.ja.name, type?.texts.en.name, type?.texts["zh-cn"].name, type?.texts.ko.name],
+        [typeNames.ja, typeNames.en, typeNames.zh, typeNames.ko],
+        `${label}: the type names read back`,
+      );
+    }
+  }
 });
