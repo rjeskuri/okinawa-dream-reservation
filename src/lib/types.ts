@@ -5,7 +5,7 @@ import type { Locale } from "./locale.ts";
 
 export type BookingStatus = "ON_HOLD" | "PAYMENT_PENDING" | "CONFIRMED" | "CANCELLED" | "EXPIRED";
 
-export type BookingSource = "web" | "block";
+export type BookingSource = "web" | "block" | "staff";
 
 export type VehicleTypeId = "scooter" | "motorcycle" | "car" | "ebike";
 

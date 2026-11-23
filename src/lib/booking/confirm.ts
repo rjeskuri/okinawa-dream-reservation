@@ -153,17 +153,38 @@ function policySummary(tiers: CancellationTier[], locale: Locale): string {
   return [...lines, say("policies.cancellation.noMatch"), say("policies.cancellation.note")].join("\n");
 }
 
-/** Every field each template reads, from the row alone, since the webhook and the resolver have no request behind them. */
-async function confirmationItems(
+/** The columns confirmationItems mails from. */
+export type ConfirmationRow = Pick<
+  PaymentRow,
+  | "id"
+  | "ref"
+  | "vehicle_plate"
+  | "start_at"
+  | "end_at"
+  | "price_jpy"
+  | "locale"
+  | "guest_family_name"
+  | "guest_given_name"
+  | "guest_email"
+  | "guest_phone"
+  | "model_texts"
+  | "package_texts"
+>;
+
+/**
+ * What a confirmed booking queues: the guest's confirmation, the staff email and the Bookings row. Every field each
+ * template reads comes from the row and `paidJpy` alone, since the webhook and the resolver have no request behind them.
+ */
+export async function confirmationItems(
   db: D1Database,
-  row: PaymentRow,
-  payment: DepositPayment,
-  ctx: ConfirmContext,
+  row: ConfirmationRow,
+  paidJpy: number,
+  ctx: Pick<ConfirmContext, "siteUrl" | "cancelSecret" | "staffEmail">,
 ): Promise<OutboxItem[]> {
   const [config, tiers] = await Promise.all([readShopConfig(db), readCancellationTiers(db)]);
   const { id, ref, start_at: startAt, end_at: endAt } = row;
   const locale = row.locale ?? "ja";
-  const facts = { ref, startAt, endAt, priceJpy: row.price_jpy ?? 0, paidJpy: payment.amountJpy };
+  const facts = { ref, startAt, endAt, priceJpy: row.price_jpy ?? 0, paidJpy };
   const familyName = row.guest_family_name ?? "";
   const givenName = row.guest_given_name ?? "";
   return [
@@ -240,7 +261,7 @@ export async function markConfirmed(
   if (settledBy(row, payment)) return "already";
 
   if (row.status === "PAYMENT_PENDING") {
-    const items = await confirmationItems(db, row, payment, ctx);
+    const items = await confirmationItems(db, row, payment.amountJpy, ctx);
     const [update] = await db.batch([
       db.prepare(CONFIRM_SQL).bind(id, payment.id, payment.amountJpy, now),
       ...enqueueWhereStatements(db, items, now, CONFIRMED_BY_SQL, [id, payment.id]),

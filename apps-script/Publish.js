@@ -167,13 +167,16 @@ function count_(value) {
  * Work totals across rounds. Errors depend on the cursor. A step that answers a string `cursor` gets it back on its next
  * round and tells each error once, so a round that sent a cursor adds to the list. A round that sent none starts the list
  * again: a step without a cursor reports its errors on every call until staff fix them, so its last round has them all.
+ * A caller that needs more than the cell passes `outcome`, which gets the step's `errors`, its `remaining` count and its
+ * `failure`: the reason a round failed, or '' when none did.
  */
-function runStep_(run, name, path, doneField) {
+function runStep_(run, name, path, doneField, outcome = {}) {
   let done = 0;
   let errors = [];
   let remaining = 0;
   let rounds = 0;
   let failed = false;
+  let failure = "";
   let cursor = null;
   try {
     do {
@@ -186,8 +189,10 @@ function runStep_(run, name, path, doneField) {
     } while (remaining > 0 && rounds < MAX_ROUNDS_);
   } catch (error) {
     failed = true;
+    failure = String(error.message);
     run.messages.push(`${name} failed: ${error.message}`);
   }
+  Object.assign(outcome, { errors, remaining, failure });
   if (remaining > 0) run.messages.push(`${name}: ${remaining} still remain, press Publish again to finish them`);
   run.messages.push(...namedErrorLines_(name, errors));
 

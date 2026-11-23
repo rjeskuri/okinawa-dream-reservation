@@ -57,7 +57,7 @@ publish is not `active`.
 
 | Table | Holds |
 | --- | --- |
-| `bookings` | One rental of one vehicle. `web` bookings come from guests. `block` bookings come from the sheet's OTA blocks, with `external_ref` unique among them. |
+| `bookings` | One rental of one vehicle. `web` bookings come from guests. `block` bookings come from the sheet's OTA blocks, with `external_ref` unique among them. `staff` bookings are phone or walk-in reservations staff add, paid at the shop. |
 | `refunds` | Square refunds of a booking, from a guest's `cancel` or the Square `dashboard`. |
 | `outbox` | Emails and sheet updates waiting to be sent, each unique by `dedupe_key`. |
 | `webhook_events` | Square events already handled, by event id. |
@@ -72,7 +72,7 @@ The Worker's own `cron_runs` and `meta` tables are in `migrations/0001_init.sql`
 | --- | --- | --- |
 | ON_HOLD | A vehicle is held for a guest until `expires_at`. | While `expires_at` > now |
 | PAYMENT_PENDING | A charge is in flight, or its outcome is unknown. | Always |
-| CONFIRMED | The deposit is paid, or a staff block is in place. | Always |
+| CONFIRMED | The deposit is paid, the booking is paid at the shop (`staff`), or a staff block is in place. | Always |
 | CANCELLED | The booking was cancelled. | Never |
 | EXPIRED | The hold lapsed, or no payment was found for it. | Never |
 
@@ -88,6 +88,9 @@ The other paths:
 - `PAYMENT_PENDING -> ON_HOLD`: the card was declined, or the payment took another amount or currency and went back in
   full, so the hold returns with its original expiry and the guest can retry.
 - `PAYMENT_PENDING -> EXPIRED`: no payment found in Square for a booking stuck in PAYMENT_PENDING.
+- A `staff` booking starts CONFIRMED, with no hold, no expiry and no payment (`paid_jpy` 0): `createStaffBooking` in
+  `src/lib/booking/staff-booking.ts` takes its bike as a hold does, with the price a hold would lock, and blocks it until
+  the booking is cancelled.
 - `CANCELLED -> CONFIRMED`: a block's row returns to the sheet before the block's end and the overlap rule still lets it.
   Web bookings have no way back.
 

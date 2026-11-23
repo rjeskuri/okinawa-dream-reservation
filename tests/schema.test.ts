@@ -356,7 +356,8 @@ const CHILD_CASES: ConstraintCase[] = [
   column("vehicles", "status", ["sold", "ACTIVE"], ["active", "maintenance", "retired"]),
 
   column("bookings", "status", ["HOLD", "on_hold", ""], ["ON_HOLD", "PAYMENT_PENDING", "CONFIRMED", "CANCELLED", "EXPIRED"]),
-  column("bookings", "source", ["phone", "WEB"], ["web", "block"]),
+  // #149: a phone or walk-in booking paid at the shop is 'staff'; the channel it came by is not a source of its own.
+  column("bookings", "source", ["phone", "WEB", "STAFF", "walk-in"], ["web", "block", "staff"]),
   column("bookings", "model_id", ["no-such-model"], [MODEL_ID], "FOREIGN KEY"),
   column("bookings", "vehicle_plate", ["no-such-plate"], [PLATE], "FOREIGN KEY"),
   column("bookings", "paid_jpy", [-1, -5000], [0, 1]),
