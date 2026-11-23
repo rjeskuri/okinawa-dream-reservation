@@ -79,6 +79,8 @@ export type BookingRow = {
   updated_at: number;
   confirmed_at: number | null;
   cancelled_at: number | null;
+  /** The total refund a staff cancellation settled on (#145), NULL on any other booking. Left out unless named. */
+  refund_due_jpy?: number | null;
 };
 
 const HOUR_MS = 3_600_000;
