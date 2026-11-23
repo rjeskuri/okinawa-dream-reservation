@@ -156,7 +156,8 @@ export function formatDate(date: { getTime(): number }, timeZone: string, format
     mm: field("minute"),
     ss: field("second"),
   };
-  return format.replace(/'[^']*'|[A-Za-z]+/g, (token) => {
+  // A run of one letter is one field, as in SimpleDateFormat, so `yyyyMMdd-HHmm` reads as five fields.
+  return format.replace(/'[^']*'|([A-Za-z])\1*/g, (token) => {
     if (token.startsWith("'")) return token.slice(1, -1);
     if (fields[token] === undefined) throw new Error(`this fake's formatDate does not know ${token}`);
     return fields[token];
