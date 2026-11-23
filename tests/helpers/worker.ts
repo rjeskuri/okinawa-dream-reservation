@@ -185,7 +185,12 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<TestWo
   }
   return {
     async fetch(path, init) {
-      return fetcher.fetch(new URL(path, "http://localhost").href, init);
+      // Read the body before anything else can run (#175). Miniflare's fetch rewraps undici's Response as
+      // `new Response(response.body, response)`, and undici's streamRegistry cancels the stream of a fetch Response once
+      // it is garbage collected. So a GC between the answer and the read leaves "Body is unusable". A null body stays null.
+      const res = await fetcher.fetch(new URL(path, "http://localhost").href, init);
+      const body = res.body === null ? null : await res.arrayBuffer();
+      return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
     },
     async scheduled(cron, scheduledTime = Date.now()) {
       // Miniflare resolves with `{ outcome: "exception" }` when the handler fails, so raise it here.

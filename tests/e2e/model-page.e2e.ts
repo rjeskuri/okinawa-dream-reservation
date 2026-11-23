@@ -6,6 +6,9 @@
 // and is never followed. The Worker reads the real clock, so dates are computed from today in JST.
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { replaceCatalog } from "../../src/lib/db/catalog-store.ts";
 import { LOCALES, type Locale } from "../../src/lib/locale.ts";
 import { addDaysToDate, epochToJst, formatHHmm, jstToday, parseHHmm } from "../../src/lib/time.ts";
@@ -34,6 +37,10 @@ const FORM_TYPE = "application/x-www-form-urlencoded";
 /** What a browser sends with a form posted from the site. */
 const SAME_SITE = { "Content-Type": FORM_TYPE, Origin: "http://localhost" };
 const PAYLOAD = `"><script>alert(1)</script>`;
+
+// `gc()` without `--expose-gc` on the command line, so the suite runs the same under `npm test` and `test:e2e`.
+setFlagsFromString("--expose-gc");
+const gc = runInNewContext("gc") as () => void;
 
 let worker: TestWorker;
 
@@ -1178,6 +1185,37 @@ test("concurrent posts never oversell over HTTP", async () => {
   });
   await seedBooking(worker.db, { ...stay, vehicle_plate: "vino-3", status: "ON_HOLD", expires_at: now - MINUTE_MS });
   await race("ja", VINO, { date, time, package: "p-a-3d" }, ["vino-3", "vino-4"]);
+});
+
+/**
+ * A full garbage collection, then time for FinalizationRegistry callbacks, which run as tasks of their own. This is
+ * what a slow, loaded runner can do between a response arriving and its body being read (#175).
+ */
+async function collectGarbage(): Promise<void> {
+  for (let round = 0; round < 3; round++) {
+    gc();
+    await sleep(20);
+  }
+}
+
+test("responses stay readable when garbage is collected before their bodies are read", async () => {
+  await publish(catalogWith());
+  const form = await loadForm("en", PCX.id);
+  const search = { date: inDays(25), time: "10:00", package: "p-z-1d" };
+  const posts = await Promise.all(Array.from({ length: 15 }, () => submit(form, search)));
+  const path = modelPath("en", PCX.id);
+  const page = await worker.fetch(path, { redirect: "manual" });
+
+  await collectGarbage();
+  const bodies = await Promise.all([...posts, page].map((res) => res.text()));
+
+  assert.equal(page.status, 200, path);
+  assert.equal(bookingFormIn(bodies.at(-1) as string, "en", path).action, form.action, "the page read after GC");
+  const won = posts.flatMap((res, index) => {
+    assert.equal(res.status, 303, `post ${index}: status`);
+    return checkoutId(redirectOf(res, `post ${index}`), "en") ?? [];
+  });
+  assert.equal(won.length, 2, "redirects to checkout");
 });
 
 /** Why each post is refused. Each locale runs these against one of the two models. */
