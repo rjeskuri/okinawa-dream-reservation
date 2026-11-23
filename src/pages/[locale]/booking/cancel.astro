@@ -7,7 +7,8 @@ import { common } from "../../../i18n/strings/common.ts";
 import { email } from "../../../i18n/strings/email.ts";
 import { t } from "../../../i18n/t.ts";
 import Base from "../../../layouts/Base.astro";
-import { cancelBooking, quoteCancellation, verifyCancelToken } from "../../../lib/booking/cancel.ts";
+import { cancelBooking, isPaidAtShop, quoteCancellation, verifyCancelToken } from "../../../lib/booking/cancel.ts";
+import { getBooking } from "../../../lib/booking/holds.ts";
 import { isLocale } from "../../../lib/locale.ts";
 import { REFUND_WORDING } from "../../../lib/mail/templates.ts";
 import { epochToJst } from "../../../lib/time.ts";
@@ -38,10 +39,15 @@ const answer = posted
 // The cancellation's emails and Bookings row, committed with it, go out after this page.
 if (posted && answer.ok) drainSoon(Astro.locals.cfContext, env);
 
-// A real link only ever names a confirmed web booking, so anything else reads as no booking at all.
+// A real link only ever names a confirmed web or paid-at-shop booking, so anything else reads as no booking at all.
 if (!answer.ok && answer.reason !== "ALREADY_CANCELLED" && answer.reason !== "STARTED") {
   return new Response(null, { status: 404 });
 }
+
+// A paid-at-shop booking (#151) took nothing online, so its page has no refund to show, only that there is none. The
+// cancellation's answer does not name the booking, so after a POST its source is read back.
+const booking = !answer.ok ? null : "booking" in answer ? answer.booking : await getBooking(env.DB, bookingId);
+const paidAtShop = booking !== null && isPaidAtShop(booking);
 
 const heading = t(locale, cancel, "cancel.heading");
 const amount = (jpy: number) => t(locale, email, "email.amount").replace("{amount}", jpy.toLocaleString("en-US"));
@@ -63,13 +69,20 @@ const pickup = (startAt: number) => {
           <dd>{answer.booking.ref}</dd>
           <dt>{t(locale, email, "email.label.pickup")}</dt>
           <dd>{pickup(answer.booking.startAt)}</dd>
-          <dt>{t(locale, cancel, "cancel.label.daysBefore")}</dt>
-          <dd>{answer.daysBefore}</dd>
-          <dt>{t(locale, cancel, "cancel.label.percent")}</dt>
-          <dd>{answer.refundPercent}%</dd>
-          <dt>{t(locale, email, "email.label.refund")}</dt>
-          <dd>{amount(answer.refundJpy)}</dd>
+          {
+            !paidAtShop && (
+              <>
+                <dt>{t(locale, cancel, "cancel.label.daysBefore")}</dt>
+                <dd>{answer.daysBefore}</dd>
+                <dt>{t(locale, cancel, "cancel.label.percent")}</dt>
+                <dd>{answer.refundPercent}%</dd>
+                <dt>{t(locale, email, "email.label.refund")}</dt>
+                <dd>{amount(answer.refundJpy)}</dd>
+              </>
+            )
+          }
         </dl>
+        {paidAtShop && <p>{t(locale, cancel, "cancel.paidAtShop")}</p>}
         <form method="post">
           <button type="submit">{t(locale, cancel, "cancel.submit")}</button>
         </form>
@@ -80,11 +93,17 @@ const pickup = (startAt: number) => {
     answer.ok && "refundStatus" in answer && (
       <>
         <p>{t(locale, cancel, "cancel.done")}</p>
-        <dl>
-          <dt>{t(locale, email, "email.label.refund")}</dt>
-          <dd>{amount(answer.refundJpy)}</dd>
-        </dl>
-        <p>{t(locale, email, `email.refund.${REFUND_WORDING[answer.refundStatus]}`)}</p>
+        {paidAtShop ? (
+          <p>{t(locale, email, "email.cancellation.paidAtShop")}</p>
+        ) : (
+          <>
+            <dl>
+              <dt>{t(locale, email, "email.label.refund")}</dt>
+              <dd>{amount(answer.refundJpy)}</dd>
+            </dl>
+            <p>{t(locale, email, `email.refund.${REFUND_WORDING[answer.refundStatus]}`)}</p>
+          </>
+        )}
       </>
     )
   }
