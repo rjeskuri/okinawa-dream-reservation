@@ -1,0 +1,311 @@
+<style>
+  .reservation-hint { margin: 4px 0 0; color: #5f6368; }
+  .reservation-list { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+  .reservation-list dt { font-weight: bold; }
+  .reservation-list dd { margin: 0; white-space: pre-wrap; }
+  .reservation-collect { margin: 12px 0; padding: 8px 12px; border: 1px solid #188038; border-radius: 4px; background: #e6f4ea; font-weight: bold; }
+  [aria-invalid="true"] { border: 2px solid #d93025; }
+</style>
+<h1>Add a reservation</h1>
+
+<section data-step="guest">
+  <h2>1. Guest</h2>
+  <label for="reservation-family">Family name</label>
+  <input id="reservation-family" type="text" autocomplete="off">
+  <label for="reservation-given">Given name</label>
+  <input id="reservation-given" type="text" autocomplete="off">
+  <label for="reservation-email">Email, optional</label>
+  <input id="reservation-email" type="email" autocomplete="off">
+  <p class="reservation-hint">With no email the guest gets no confirmation email.</p>
+  <label for="reservation-phone">Phone</label>
+  <input id="reservation-phone" type="tel" autocomplete="off">
+  <label for="reservation-locale">Language of the guest's emails</label>
+  <select id="reservation-locale">
+    <option value="ja">日本語 / Japanese</option>
+    <option value="en">English</option>
+    <option value="zh-cn">中文 / Chinese</option>
+    <option value="ko">한국어 / Korean</option>
+  </select>
+</section>
+
+<section data-step="model" hidden>
+  <h2>2. Model</h2>
+  <p id="reservation-loading">Loading the catalog…</p>
+  <label for="reservation-model">Model</label>
+  <select id="reservation-model"></select>
+  <p class="reservation-hint">The website picks a free bike of the model when the reservation is created.</p>
+</section>
+
+<section data-step="package" hidden>
+  <h2>3. Package</h2>
+  <label for="reservation-package">Package and price</label>
+  <select id="reservation-package"></select>
+</section>
+
+<section data-step="pickup" hidden>
+  <h2>4. Pickup, in Japan time</h2>
+  <label for="reservation-date">Date</label>
+  <input id="reservation-date" type="date">
+  <label for="reservation-time">Time</label>
+  <select id="reservation-time"></select>
+</section>
+
+<section data-step="review" data-next="Create reservation" hidden>
+  <h2>5. Check and create</h2>
+  <dl id="reservation-review" class="reservation-list"></dl>
+  <p id="reservation-email-note" class="reservation-hint"></p>
+  <p class="reservation-hint">It is booked as paid at the shop, with no online payment.</p>
+</section>
+
+<section data-step="result" hidden>
+  <h2>Booked</h2>
+  <dl id="reservation-result" class="reservation-list"></dl>
+  <p id="reservation-collect" class="reservation-collect"></p>
+  <button id="reservation-new" type="button" class="primary">New reservation</button>
+</section>
+
+<script>
+  // Add a reservation: the guest, the model, the package with its price, the pickup date and time, a review, then the
+  // booking the website made. The website picks the bike. A form keeps the one id it drew for every try, so pressing
+  // Create reservation again after a failure cannot book twice; New reservation draws the next form's id. Text from the
+  // catalog and the server goes on the page with textContent only.
+
+  const reservationJstOffsetMs = 9 * 60 * 60 * 1000;
+  const reservationRetry = "Press Create reservation again to retry: this form keeps its id, so it cannot book twice.";
+  const reservationGuestInputs = {
+    familyName: "reservation-family",
+    givenName: "reservation-given",
+    email: "reservation-email",
+    phone: "reservation-phone",
+  };
+
+  let reservationOptions = { models: [], packages: [], prices: [], slots: [], config: {} };
+  let reservationLoadError = "";
+  let reservationId = "";
+
+  function reservationValue(id) {
+    return document.getElementById(id).value;
+  }
+
+  function yen(amount) {
+    return `¥${Number(amount).toLocaleString("en-US")}`;
+  }
+
+  /** Epoch ms as YYYY-MM-DD HH:mm in Japan, which keeps one offset all year. */
+  function jstText(ms) {
+    if (!Number.isFinite(ms)) return "";
+    return new Date(ms + reservationJstOffsetMs).toISOString().slice(0, 16).replace("T", " ");
+  }
+
+  function jstToday() {
+    return jstText(Date.now()).slice(0, 10);
+  }
+
+  function minutesOf(hhmm) {
+    const [hours, minutes] = String(hhmm).split(":").map(Number);
+    return hours * 60 + minutes;
+  }
+
+  function byId(list, id) {
+    return list.find((entry) => entry.id === id) || null;
+  }
+
+  function priceOf(modelId, packageId) {
+    return reservationOptions.prices.find((price) => price.modelId === modelId && price.packageId === packageId) || null;
+  }
+
+  function nameOf(entry) {
+    return entry ? `${entry.nameEn} / ${entry.nameJa}` : "";
+  }
+
+  /** Fills a select after its prompt, keeping the choice when it is still offered. */
+  function fillSelect(id, entries, prompt) {
+    const select = document.getElementById(id);
+    const kept = select.value;
+    select.replaceChildren(new Option(prompt, ""), ...entries.map(([value, text]) => new Option(text, value)));
+    select.value = entries.some(([value]) => value === kept) ? kept : "";
+  }
+
+  function fillList(id, rows) {
+    const list = document.getElementById(id);
+    list.replaceChildren();
+    for (const [term, value] of rows) {
+      const dt = document.createElement("dt");
+      dt.textContent = term;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      list.append(dt, dd);
+    }
+  }
+
+  function fillPackages() {
+    const modelId = reservationValue("reservation-model");
+    const entries = [];
+    for (const pkg of reservationOptions.packages) {
+      const price = priceOf(modelId, pkg.id);
+      if (price === null) continue;
+      const advance = price.advancePriceJpy == null ? "" : `, ${yen(price.advancePriceJpy)} booked before the pickup day`;
+      entries.push([pkg.id, `${nameOf(pkg)}: ${yen(price.priceJpy)}${advance}`]);
+    }
+    fillSelect("reservation-package", entries, "Choose a package");
+  }
+
+  /** The slots an hours package comes back from inside shop hours, as the website rules, and every slot for a day package. */
+  function fillTimes() {
+    const pkg = byId(reservationOptions.packages, reservationValue("reservation-package"));
+    const { shopOpen, shopClose } = reservationOptions.config || {};
+    const slots = reservationOptions.slots.filter((slot) => {
+      if (!pkg || pkg.hours == null || !shopOpen || !shopClose) return true;
+      const back = (minutesOf(slot) + pkg.hours * 60) % (24 * 60);
+      return back >= minutesOf(shopOpen) && back <= minutesOf(shopClose);
+    });
+    fillSelect("reservation-time", slots.map((slot) => [slot, slot]), "Choose a time");
+  }
+
+  function readForm() {
+    const guest = {};
+    for (const [field, id] of Object.entries(reservationGuestInputs)) guest[field] = reservationValue(id).trim();
+    return {
+      id: reservationId,
+      modelId: reservationValue("reservation-model"),
+      packageId: reservationValue("reservation-package"),
+      date: reservationValue("reservation-date"),
+      time: reservationValue("reservation-time"),
+      locale: reservationValue("reservation-locale"),
+      guest,
+    };
+  }
+
+  function markGuest(fields) {
+    for (const [field, id] of Object.entries(reservationGuestInputs)) {
+      document.getElementById(id).setAttribute("aria-invalid", String(fields.includes(field)));
+    }
+  }
+
+  function showReview() {
+    const form = readForm();
+    const model = byId(reservationOptions.models, form.modelId);
+    const price = priceOf(form.modelId, form.packageId);
+    const advance = price && price.advancePriceJpy != null && form.date > jstToday();
+    const locale = document.getElementById("reservation-locale");
+    fillList("reservation-review", [
+      ["Guest", `${form.guest.familyName} ${form.guest.givenName}`],
+      ["Email", form.guest.email || "(none)"],
+      ["Phone", form.guest.phone],
+      ["Language", locale.options[locale.selectedIndex].text],
+      ["Model", nameOf(model)],
+      ["Package", nameOf(byId(reservationOptions.packages, form.packageId))],
+      ["Pickup", `${form.date} ${form.time}`],
+      ["Price", price ? yen(advance ? price.advancePriceJpy : price.priceJpy) : ""],
+      ["Deposit to collect at the shop", model ? yen(model.depositJpy) : ""],
+    ]);
+    document.getElementById("reservation-email-note").textContent =
+      form.guest.email === ""
+        ? "No email was given, so the guest gets no confirmation email."
+        : `The guest gets the confirmation email at ${form.guest.email}.`;
+  }
+
+  function showResult(booking) {
+    fillList("reservation-result", [
+      ["Ref", booking.ref],
+      ["Plate", booking.plate],
+      ["Model", nameOf(byId(reservationOptions.models, booking.modelId)) || booking.modelId],
+      ["Package", nameOf(byId(reservationOptions.packages, booking.packageId)) || booking.packageId],
+      ["Pickup", jstText(booking.startAt)],
+      ["Return", jstText(booking.endAt)],
+      ["Price", yen(booking.priceJpy)],
+    ]);
+    document.getElementById("reservation-collect").textContent = `Collect the deposit of ${yen(booking.depositJpy)} at the shop.`;
+  }
+
+  /** This form's id: drawn once, then kept for every try until New reservation. */
+  function reservationIdReady() {
+    if (reservationId !== "") return Promise.resolve(reservationId);
+    return callServer("reservationPanelNewId").then((id) => {
+      if (typeof id !== "string" || id === "") throw new Error("The form got no id. Close the panel and open it again.");
+      reservationId = id;
+      return id;
+    });
+  }
+
+  function newReservation() {
+    reservationId = "";
+    for (const id of Object.values(reservationGuestInputs)) document.getElementById(id).value = "";
+    for (const id of ["reservation-model", "reservation-package", "reservation-date", "reservation-time"]) {
+      document.getElementById(id).value = "";
+    }
+    document.getElementById("reservation-locale").value = "ja";
+    markGuest([]);
+    showStep(0);
+    reservationIdReady().catch(showError);
+  }
+
+  onNext("guest", () => {
+    const { guest } = readForm();
+    if (guest.familyName === "" || guest.givenName === "") throw new Error("Enter the guest's family name and given name.");
+    if (guest.phone === "") throw new Error("Enter the guest's phone number.");
+    markGuest([]);
+  });
+
+  onNext("model", () => {
+    if (reservationOptions.models.length === 0) {
+      throw new Error(reservationLoadError || "No model can be booked: none is active with an active bike and a price.");
+    }
+    if (reservationValue("reservation-model") === "") throw new Error("Choose a model.");
+    fillPackages();
+  });
+
+  onNext("package", () => {
+    if (reservationValue("reservation-package") === "") throw new Error("Choose a package.");
+    fillTimes();
+  });
+
+  onNext("pickup", () => {
+    if (reservationValue("reservation-date") === "") throw new Error("Choose the pickup date.");
+    if (reservationValue("reservation-time") === "") throw new Error("Choose the pickup time.");
+    showReview();
+  });
+
+  onNext("review", () =>
+    reservationIdReady()
+      .then(() => callServer("reservationPanelCreate", readForm()))
+      .catch((error) => ({ ok: false, message: (error && error.message) || String(error) }))
+      .then((answer) => {
+        if (answer && answer.ok === true) {
+          showResult(answer.booking);
+          return "result";
+        }
+        const message = (answer && answer.message) || "Nothing was booked.";
+        // No reason: the request may not have reached the website, so the same form tries again under its id.
+        if (!answer || typeof answer.reason !== "string") throw new Error(`${message} ${reservationRetry}`);
+        if (answer.reason !== "INVALID_GUEST") throw new Error(message);
+        // The guest's fields are four steps back: go there with them marked.
+        markGuest(Array.isArray(answer.fields) ? answer.fields : []);
+        showStep("guest");
+        showError(message);
+        return false;
+      }),
+  );
+
+  document.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("reservation-new").addEventListener("click", newReservation);
+    reservationIdReady().catch(showError);
+    callServer("reservationPanelOptions")
+      .then((answer) => {
+        if (!answer || answer.ok !== true) throw new Error((answer && answer.message) || "The catalog could not be read.");
+        reservationOptions = answer;
+        fillSelect("reservation-model", answer.models.map((model) => [model.id, nameOf(model)]), "Choose a model");
+        const date = document.getElementById("reservation-date");
+        date.min = jstToday();
+        const days = answer.config && answer.config.maxDaysAhead;
+        if (Number.isFinite(days)) date.max = jstText(Date.now() + days * 24 * 60 * 60 * 1000).slice(0, 10);
+      })
+      .catch((error) => {
+        reservationLoadError = error.message;
+        showError(error);
+      })
+      .finally(() => {
+        document.getElementById("reservation-loading").hidden = true;
+      });
+  });
+</script>

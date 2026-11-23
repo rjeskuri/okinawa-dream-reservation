@@ -13,6 +13,7 @@ const PANEL_HEIGHT_ = 640;
  */
 const DASHBOARD_ACTIONS_ = [
   { label: "Add a bike", fn: "openAddBike" },
+  { label: "Add a reservation", fn: "openAddReservation" },
   { label: "Block a bike", fn: "openBlockBike" },
 ];
 
