@@ -6,6 +6,9 @@ every tab, what each column accepts, and what `publish_status` tells you after a
 
 Every value in the examples is a placeholder, not a real price, deposit or plate.
 
+To add a bike, cancel a booking, add a phone or walk-in reservation, or block a bike without typing in these tabs, use
+the Dashboard: [docs/dashboard.md](dashboard.md) says how.
+
 ## Tabs at a glance
 
 | Tab | Who edits it | Read by |
@@ -15,6 +18,7 @@ Every value in the examples is a placeholder, not a real price, deposit or plate
 | Bookings | The Worker, except `override_plate` | Staff, and the assignments step of Publish. |
 | Reconciliation | The Worker | Staff. |
 | PublishLog | The Apps Script | Staff. |
+| Dashboard | Set up tabs creates it; staff may add buttons | Staff: how to open the [dashboard](dashboard.md). |
 
 ## Rules for every tab
 
