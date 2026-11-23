@@ -27,4 +27,7 @@ jobs:
       - name: Install
         run: npm ci
       - name: Verify
+        # A manual run draws every randomized case (PROPERTY_RUNS=full); a pull request run draws the bounded count.
+        env:
+          PROPERTY_RUNS: ${{ github.event_name == 'workflow_dispatch' && 'full' || '' }}
         run: scripts/verify.sh

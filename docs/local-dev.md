@@ -144,6 +144,11 @@ The `curl` answers `ok`.
 - `npm run test:e2e` runs the built Worker in Miniflare (`tests/e2e/*.e2e.ts`). It builds first if `dist` is older than
   `src`, `migrations`, `astro.config.mjs` or `wrangler.jsonc`.
 - `scripts/verify.sh` runs lint, `npm test`, `npm run build` and `npm run test:e2e`. CI and the stop hook run it.
+- Both suites run 4 files at a time (`--test-concurrency=4`).
+- Randomized tests draw a bounded number of cases unless `PROPERTY_RUNS` says otherwise: `full` draws every case, a
+  number draws that many. A failing case prints `PROPERTY_SEED=<seed> PROPERTY_RUNS=1`; set both to replay that case
+  alone. A pull request's CI run draws the bounded count; a manual "Run workflow" of CI
+  (`workflow_dispatch`) draws the full count.
 
 ## How fakes work
 

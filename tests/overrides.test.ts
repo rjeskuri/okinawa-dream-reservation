@@ -34,6 +34,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHold } from "../src/lib/booking/holds.ts";
 import { drainOutbox } from "../src/lib/outbox.ts";
+import { forAll } from "../src/lib/property.ts";
 import { createTestDb } from "./helpers/d1.ts";
 import { seedBooking, seedCatalogMeta, seedConfig, seedModel, seedPackage, seedPrice, seedVehicle } from "./helpers/seed.ts";
 import type { BookingRow, VehicleRow } from "./helpers/seed.ts";
@@ -1596,24 +1597,13 @@ test("twenty moves on a long tab are queued within the D1 statements of one invo
 
 // --- Every rule at once --------------------------------------------------------------------------------------------
 
-/** mulberry32: a small seeded generator, so a failure replays exactly. */
-function seededRandom(seed: number): () => number {
-  let state = seed;
-  return () => {
-    state = (state + 0x6d2b79f5) | 0;
-    let mixed = Math.imul(state ^ (state >>> 15), 1 | state);
-    mixed = (mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed)) ^ mixed;
-    return ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 type Bike = { plate: string; modelId: string; status: string };
 type Rental = { id: string; modelId: string; plate: string; startAt: number; endAt: number; status: string; expiresAt: number };
 
 test("no overlapping blocking bookings after a random sequence of overrides", async () => {
-  for (const seed of [22, 2030, 555]) {
+  // Three sequences in a full run (PROPERTY_RUNS=full), one by default; a failure names the seed that replays it.
+  await forAll({ env: process.env, runs: { bounded: 1, full: 3 }, seed: 22 }, async ({ seed, random }) => {
     await withShop(async (db) => {
-      const random = seededRandom(seed);
       const pick = (n: number): number => Math.floor(random() * n);
 
       const bikes: Bike[] = [];
@@ -1723,5 +1713,5 @@ test("no overlapping blocking bookings after a random sequence of overrides", as
       // The sequence reached every outcome, or the checks above proved little.
       assert.ok(seen.moved > 0 && seen.refused > 0 && seen.noOps > 0, `seed ${seed}: ${JSON.stringify(seen)}`);
     });
-  }
+  });
 });

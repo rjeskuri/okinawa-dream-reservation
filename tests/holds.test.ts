@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { assignFreeVehicleSql, createHold, getBooking } from "../src/lib/booking/holds.ts";
 import { isLocale } from "../src/lib/locale.ts";
+import { forAll } from "../src/lib/property.ts";
 import type { Locale } from "../src/lib/locale.ts";
 import type { Booking, BookingSource, BookingStatus } from "../src/lib/types.ts";
 import { createTestDb } from "./helpers/d1.ts";
@@ -290,17 +291,6 @@ const RANDOM_FLEETS: Bike[][] = [
   ],
 ];
 
-/** mulberry32: a small seeded generator, so a failure replays exactly. */
-function seededRandom(seed: number): () => number {
-  let state = seed;
-  return () => {
-    state = (state + 0x6d2b79f5) | 0;
-    let mixed = Math.imul(state ^ (state >>> 15), 1 | state);
-    mixed = (mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed)) ^ mixed;
-    return ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 /** Every pair of bookings on one bike that block at `now` and sit closer than `bufMs`, over the whole table. */
 async function conflictingPairs(db: D1Database, now: number, bufMs: number): Promise<{ a: string; b: string }[]> {
   const blocking = (alias: string) =>
@@ -316,9 +306,9 @@ async function conflictingPairs(db: D1Database, now: number, bufMs: number): Pro
 }
 
 test("no overlapping blocking bookings after a random sequence", async () => {
-  for (const seed of [20, 2026, 777]) {
+  // Three sequences in a full run (PROPERTY_RUNS=full), one by default; a failure names the seed that replays it.
+  await forAll({ env: process.env, runs: { bounded: 1, full: 3 }, seed: 20 }, async ({ seed, random }) => {
     await withShop(async (db) => {
-      const random = seededRandom(seed);
       const pick = (n: number): number => Math.floor(random() * n);
       const bufMs = 60 * MINUTE_MS;
 
@@ -428,7 +418,7 @@ test("no overlapping blocking bookings after a random sequence", async () => {
       const found = await conflictingPairs(db, now, bufMs);
       assert.deepEqual(found.map(({ a, b }) => [a, b].sort()), [[first.id, second.id].sort()]);
     });
-  }
+  });
 });
 
 /** [plate, base_usage_days, odometer_km], seeded in this order so that insertion order decides nothing. */
