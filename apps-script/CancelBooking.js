@@ -20,7 +20,7 @@ const CANCEL_REASONS_ = {
 };
 
 function openCancelBooking() {
-  openPanel_("CancelBooking", CANCEL_PANEL_TITLE_);
+  openPanel_("CancelBookingPanel", CANCEL_PANEL_TITLE_);
 }
 
 /**

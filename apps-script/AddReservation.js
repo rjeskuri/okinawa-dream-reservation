@@ -36,7 +36,7 @@ const RESERVATION_REASONS_ = {
 };
 
 function openAddReservation() {
-  openPanel_("AddReservation", RESERVATION_PANEL_TITLE_);
+  openPanel_("AddReservationPanel", RESERVATION_PANEL_TITLE_);
 }
 
 /**

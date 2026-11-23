@@ -10,7 +10,7 @@ const BLOCK_DATE_TIME_HINT_ = "write the date and time in Japan as YYYY-MM-DD HH
 const BLOCK_ID_DRAWS_ = 20;
 
 function openBlockBike() {
-  openPanel_("BlockBike", BLOCK_PANEL_TITLE_);
+  openPanel_("BlockBikePanel", BLOCK_PANEL_TITLE_);
 }
 
 /**
