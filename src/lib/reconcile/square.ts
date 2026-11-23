@@ -65,7 +65,7 @@ const RETAINED_SCOPE_SQL =
  * payment, whenever it was confirmed. ?3 the payment ids and ?4 the reference ids go as one JSON parameter each, so a
  * listing of any size stays within D1's 100 bound parameters.
  */
-const BOOKINGS_SQL = `SELECT id, ref, status, start_at, deposit_jpy, payment_id, paid_jpy, cancelled_at,
+const BOOKINGS_SQL = `SELECT id, ref, status, start_at, deposit_jpy, payment_id, paid_jpy, cancelled_at, refund_due_jpy,
     (${PAYMENT_SCOPE_SQL}) AS payment_scope, (${RETAINED_SCOPE_SQL}) AS retained_scope
   FROM bookings
   WHERE (${PAYMENT_SCOPE_SQL}) OR (${RETAINED_SCOPE_SQL})
@@ -96,6 +96,8 @@ type BookingRow = {
   payment_id: string | null;
   paid_jpy: number;
   cancelled_at: number | null;
+  /** The total refund a staff cancellation settled on (#145); NULL on a guest's. */
+  refund_due_jpy: number | null;
   /** 1 in the payment check's scope, else 0 or null. */
   payment_scope: number | null;
   /** 1 in the retained check's scope, else 0 or null. */
@@ -299,7 +301,8 @@ function refundIssues(
 
 /**
  * Each booking in the payment scope against its payment and, in the retained scope, what the shop keeps: paid less the
- * tier's refund at cancelled_at, against paid less what has gone back, counted after this run's fixes.
+ * refund staff settled on (refund_due_jpy), or for a guest's cancellation the tier's refund at cancelled_at, against
+ * paid less what has gone back, counted after this run's fixes.
  */
 function bookingIssues(
   bookings: BookingRow[],
@@ -331,12 +334,26 @@ function bookingIssues(
       ...(fixes.recorded.get(booking.id) ?? []),
     ]);
     const actual = paid - refunded;
+    const kept = `with ${yen(refunded)} refunded the shop keeps ${yen(actual)} of ${yen(paid)}`;
+    const due = booking.refund_due_jpy;
+    if (due !== null) {
+      // Staff chose the refund, so the tiers then or now do not count.
+      if (paid - due === actual) continue;
+      issues.push({
+        type: "retained_mismatch",
+        bookingRef,
+        paymentId,
+        expectedJpy: paid - due,
+        actualJpy: actual,
+        detail: `Cancelled by staff with ${due > 0 ? `a refund of ${yen(due)}` : "no refund"}; ${kept}.`,
+      });
+      continue;
+    }
     // A cancellation always writes cancelled_at; without one the tier cannot be told, and that is reported too.
     const tier =
       booking.cancelled_at === null ? null : refundForCancellation(tiers, paid, booking.start_at, booking.cancelled_at);
     const expected = tier === null ? undefined : paid - tier.refundJpy;
     if (expected === actual) continue;
-    const kept = `with ${yen(refunded)} refunded the shop keeps ${yen(actual)} of ${yen(paid)}`;
     issues.push({
       type: "retained_mismatch",
       bookingRef,
