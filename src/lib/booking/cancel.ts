@@ -1,5 +1,6 @@
-// What a guest gets back for cancelling, the signed link that lets them, and the cancellation itself. Tiers count JST
-// calendar days, and online cancellation closes at pickup. A cancellation lands whole in one batch and calls Square only
+// What a guest gets back for cancelling, the signed link that lets them, and the cancellation itself, and the same for
+// staff cancelling from the Dashboard with a refund they choose (#145). Tiers count JST calendar days, and online
+// cancellation closes at pickup; staff can cancel after it. A cancellation lands whole in one batch and calls Square only
 // afterwards, so a refund row left in RETRY is what a crash leaves behind, and retryRefunds picks it up from there.
 import { email } from "../../i18n/strings/email.ts";
 import { t } from "../../i18n/t.ts";
@@ -24,9 +25,32 @@ export type CancelDeps = { db: D1Database; square: SquareClient; now: number; st
 
 export type RefundDeps = Omit<CancelDeps, "siteUrl">;
 
+export type CancelRefundStatus = "NONE" | "PENDING" | "COMPLETED" | "RETRY" | "REJECTED";
+
 export type CancelResult =
-  | { ok: true; refundJpy: number; refundStatus: "NONE" | "PENDING" | "COMPLETED" | "RETRY" | "REJECTED" }
+  | { ok: true; refundJpy: number; refundStatus: CancelRefundStatus }
   | { ok: false; reason: CancellationReason };
+
+/** What staff give back when they cancel from the Dashboard: what the tiers give, all that is left, or nothing. */
+export type StaffRefundChoice = "tier" | "full" | "none";
+
+export type StaffCancellationQuote =
+  | {
+      ok: true;
+      booking: Booking;
+      daysBefore: number;
+      refundPercent: number;
+      refundedJpy: number;
+      amounts: Record<StaffRefundChoice, number>;
+    }
+  | { ok: false; reason: CancellationReason };
+
+/** `refundJpy` is the amount the panel showed for `choice`. `requestedBy` is for the caller's log and is not stored. */
+export type StaffCancelRequest = { choice: StaffRefundChoice; refundJpy: number; requestedBy: string };
+
+export type StaffCancelResult =
+  | { ok: true; choice: StaffRefundChoice; refundJpy: number; refundStatus: CancelRefundStatus }
+  | { ok: false; reason: CancellationReason | "QUOTE_CHANGED" | "BAD_CHOICE"; quote?: StaffCancellationQuote };
 
 export type RetryResult = { retried: number; completed: number; stillPending: number };
 
@@ -61,6 +85,7 @@ type BookingRow = {
   updated_at: number;
   confirmed_at: number | null;
   cancelled_at: number | null;
+  refund_due_jpy: number | null;
 };
 
 /** A refund to send to Square, as the refunds row and its booking hold it. */
@@ -73,7 +98,12 @@ type Settlement = { status: RefundRowStatus; squareRefundId: string | null; refu
 
 const TOKEN_LENGTH = 32;
 
-/** Fixed, because Square compares the whole request under one key and a retry has to send the same one. */
+const STAFF_REFUND_CHOICES: readonly StaffRefundChoice[] = ["tier", "full", "none"];
+
+/**
+ * Fixed, because Square compares the whole request under one key and a retry has to send the same one. Staff refunds
+ * send it too: retryRefunds cannot tell a staff refund from a guest's, and must resend each exactly as first sent.
+ */
 const REFUND_REASON = "Guest cancellation";
 
 const NO_ANSWER: Settlement = { status: "RETRY", squareRefundId: null, refusal: null };
@@ -89,12 +119,20 @@ const REFUNDED_SQL =
  * The guard, and with it the decision: this statement picks the one winner, at any number of callers, because D1 runs one
  * statement at a time. It also holds everything the amount was worked out from, so a booking that moved between the quote
  * and here stays as it is and refunds nothing. The quote already held start_at against `now`, which is fixed for the call,
- * so a start_at that has not moved is a pickup that has not been reached.
+ * so a start_at that has not moved is a pickup that has not been reached. Staff may cancel past pickup, and for them the
+ * held start_at keeps the tier the amount was quoted at.
  */
+const CANCEL_GUARD_SQL = `WHERE id = ?1 AND status = 'CONFIRMED' AND source = 'web' AND start_at = ?3 AND paid_jpy = ?4
+    AND (${REFUNDED_SQL}) = ?5`;
+
 const CANCEL_SQL = `UPDATE bookings
   SET status = 'CANCELLED', cancelled_at = ?2, cancel_reason = 'guest', updated_at = ?2
-  WHERE id = ?1 AND status = 'CONFIRMED' AND source = 'web' AND start_at = ?3 AND paid_jpy = ?4
-    AND (${REFUNDED_SQL}) = ?5`;
+  ${CANCEL_GUARD_SQL}`;
+
+/** CANCEL_SQL for staff, recording ?6 the total refund they settled on. */
+const STAFF_CANCEL_SQL = `UPDATE bookings
+  SET status = 'CANCELLED', cancelled_at = ?2, cancel_reason = 'staff', refund_due_jpy = ?6, updated_at = ?2
+  ${CANCEL_GUARD_SQL}`;
 
 /**
  * Whether CANCEL_SQL in this same batch is the one that moved the booking, for everything after it to go by: a batch is
@@ -181,18 +219,25 @@ export function refundForCancellation(
   startAt: number,
   now: number,
 ): CancellationRefund {
-  const daysBefore = daysBetweenDates(jstToday(now), jstToday(startAt));
+  return refundAtDays(tiers, paidJpy, daysBetweenDates(jstToday(now), jstToday(startAt)));
+}
+
+function refundAtDays(tiers: CancellationTier[], paidJpy: number, daysBefore: number): CancellationRefund {
   const byDaysDesc = tiers.toSorted((a, b) => b.minDaysBefore - a.minDaysBefore);
   const refundPercent = byDaysDesc.find((tier) => tier.minDaysBefore <= daysBefore)?.refundPercent ?? 0;
   // Multiplying first keeps the product a whole number; paid * (percent / 100) lands just under some whole yen.
   return { daysBefore, refundPercent, refundJpy: Math.floor((paidJpy * refundPercent) / 100) };
 }
 
-/** The quote and what it took off, which the guard of a cancellation has to hold still. */
+/**
+ * The quote and what it took off, which the guard of a cancellation has to hold still. A guest's quote closes at pickup.
+ * Staff may cancel a no-show, at the tier for 0 days before, so for them daysBefore stops at 0.
+ */
 async function priceCancellation(
   db: D1Database,
   bookingId: string,
   now: number,
+  byStaff = false,
 ): Promise<{ quote: CancellationQuote; refundedJpy: number }> {
   const refuse = (reason: CancellationReason) => ({ quote: { ok: false as const, reason }, refundedJpy: 0 });
 
@@ -203,10 +248,11 @@ async function priceCancellation(
   if (booking.source !== "web") return refuse("NOT_CANCELLABLE");
   if (booking.status === "CANCELLED") return refuse("ALREADY_CANCELLED");
   if (booking.status !== "CONFIRMED") return refuse("NOT_CANCELLABLE");
-  if (now >= booking.startAt) return refuse("STARTED");
+  if (!byStaff && now >= booking.startAt) return refuse("STARTED");
 
   const tiers = await readCancellationTiers(db);
-  const tier = refundForCancellation(tiers, booking.paidJpy, booking.startAt, now);
+  const guestTier = refundForCancellation(tiers, booking.paidJpy, booking.startAt, now);
+  const tier = byStaff ? refundAtDays(tiers, booking.paidJpy, Math.max(0, guestTier.daysBefore)) : guestTier;
   const refundedJpy = (await db.prepare(REFUNDED_SQL).bind(bookingId).first<number>("total")) ?? 0;
   const refundJpy = Math.max(0, tier.refundJpy - refundedJpy);
   return { quote: { ok: true, booking, ...tier, refundJpy }, refundedJpy };
@@ -218,6 +264,22 @@ async function priceCancellation(
  */
 export async function quoteCancellation(db: D1Database, bookingId: string, now: number): Promise<CancellationQuote> {
   return (await priceCancellation(db, bookingId, now)).quote;
+}
+
+/**
+ * Reads only. What staff can give back on cancelling a CONFIRMED web booking, before or after pickup: the guest's tier
+ * refund, all that was paid, or nothing, each less what the booking has already had back and never below 0.
+ */
+export async function quoteStaffCancellation(
+  db: D1Database,
+  bookingId: string,
+  now: number,
+): Promise<StaffCancellationQuote> {
+  const { quote, refundedJpy } = await priceCancellation(db, bookingId, now, true);
+  if (!quote.ok) return quote;
+  const { booking, daysBefore, refundPercent, refundJpy } = quote;
+  const amounts = { tier: refundJpy, full: Math.max(0, booking.paidJpy - refundedJpy), none: 0 };
+  return { ok: true, booking, daysBefore, refundPercent, refundedJpy, amounts };
 }
 
 /** A package can leave the catalog while its bookings stay, and mail prints a missing value literally. */
@@ -343,15 +405,17 @@ async function attemptRefund(
 }
 
 /**
- * One try at cancelling, quoting at this moment, or null when the guard refused it. One batch writes the cancellation, the
- * refund row and the outbox items, and Square hears about it only after that batch landed, from the one call that won.
+ * Writes a cancellation of `booking` that refunds `refundJpy`, behind `cancel`, its guarded UPDATE, and answers how the
+ * refund went, or null when the guard refused it. One batch writes the cancellation, the refund row and the outbox items,
+ * and Square hears about it only after that batch landed, from the one call that won.
  */
-async function tryCancel(deps: CancelDeps, bookingId: string): Promise<CancelResult | null> {
+async function writeCancellation(
+  deps: CancelDeps,
+  booking: Booking,
+  refundJpy: number,
+  cancel: D1PreparedStatement,
+): Promise<CancelRefundStatus | null> {
   const { db, now, staffEmail } = deps;
-  const { quote, refundedJpy } = await priceCancellation(db, bookingId, now);
-  if (!quote.ok) return quote;
-
-  const { booking, refundJpy } = quote;
   const names = await db
     .prepare(NAMES_SQL)
     .bind(booking.modelId, booking.packageId)
@@ -370,7 +434,7 @@ async function tryCancel(deps: CancelDeps, bookingId: string): Promise<CancelRes
           amountJpy: refundJpy,
         };
   const [cancelled] = await db.batch([
-    db.prepare(CANCEL_SQL).bind(booking.id, now, booking.startAt, booking.paidJpy, refundedJpy),
+    cancel,
     ...(refund === null
       ? []
       : [db.prepare(INSERT_REFUND_SQL).bind(refund.id, refundJpy, refund.idempotencyKey, now, ...won)]),
@@ -379,9 +443,21 @@ async function tryCancel(deps: CancelDeps, bookingId: string): Promise<CancelRes
 
   if (cancelled.meta.changes === 0) return null;
 
-  if (refund === null) return { ok: true, refundJpy, refundStatus: "NONE" };
+  if (refund === null) return "NONE";
   const status = await attemptRefund(deps, refund);
-  return { ok: true, refundJpy, refundStatus: status === "FAILED" ? "REJECTED" : status };
+  return status === "FAILED" ? "REJECTED" : status;
+}
+
+/** One try at a guest's cancellation, quoting at this moment, or null when the guard refused it. */
+async function tryCancel(deps: CancelDeps, bookingId: string): Promise<CancelResult | null> {
+  const { db, now } = deps;
+  const { quote, refundedJpy } = await priceCancellation(db, bookingId, now);
+  if (!quote.ok) return quote;
+
+  const { booking, refundJpy } = quote;
+  const cancel = db.prepare(CANCEL_SQL).bind(booking.id, now, booking.startAt, booking.paidJpy, refundedJpy);
+  const refundStatus = await writeCancellation(deps, booking, refundJpy, cancel);
+  return refundStatus === null ? null : { ok: true, refundJpy, refundStatus };
 }
 
 /**
@@ -391,6 +467,48 @@ async function tryCancel(deps: CancelDeps, bookingId: string): Promise<CancelRes
  */
 export async function cancelBooking(deps: CancelDeps, bookingId: string): Promise<CancelResult> {
   const result = (await tryCancel(deps, bookingId)) ?? (await tryCancel(deps, bookingId));
+  return result ?? { ok: false, reason: "ALREADY_CANCELLED" };
+}
+
+/**
+ * One try at a staff cancellation, quoting at this moment, or null when the guard refused it. An amount that is not what
+ * the choice gives now writes nothing and answers the fresh quote.
+ */
+async function tryStaffCancel(
+  deps: CancelDeps,
+  bookingId: string,
+  { choice, refundJpy }: StaffCancelRequest,
+): Promise<StaffCancelResult | null> {
+  const { db, now } = deps;
+  const quote = await quoteStaffCancellation(db, bookingId, now);
+  if (!quote.ok) return quote;
+  if (quote.amounts[choice] !== refundJpy) return { ok: false, reason: "QUOTE_CHANGED", quote };
+
+  const { booking, refundedJpy } = quote;
+  const cancel = db
+    .prepare(STAFF_CANCEL_SQL)
+    .bind(booking.id, now, booking.startAt, booking.paidJpy, refundedJpy, refundedJpy + refundJpy);
+  const refundStatus = await writeCancellation(deps, booking, refundJpy, cancel);
+  return refundStatus === null ? null : { ok: true, choice, refundJpy, refundStatus };
+}
+
+/**
+ * Cancels a web booking for staff, from the Dashboard, at any time while it is CONFIRMED, refunding the amount they chose
+ * from a quote: `refundJpy` has to be what `choice` gives now. It lands as a guest's cancellation does, under the same
+ * guard and refund key, with cancel_reason 'staff' and refund_due_jpy the total it settles on. A refused guard earns one
+ * more try, as in cancelBooking, which answers ALREADY_CANCELLED to a call that lost the race.
+ */
+export async function cancelByStaff(
+  deps: CancelDeps,
+  bookingId: string,
+  request: StaffCancelRequest,
+): Promise<StaffCancelResult> {
+  const { choice, refundJpy } = request;
+  // The caller's input is checked before anything is read, and a choice is looked up only once it is one of the three.
+  if (!(STAFF_REFUND_CHOICES as readonly unknown[]).includes(choice)) return { ok: false, reason: "BAD_CHOICE" };
+  if (!Number.isSafeInteger(refundJpy) || refundJpy < 0) return { ok: false, reason: "BAD_CHOICE" };
+
+  const result = (await tryStaffCancel(deps, bookingId, request)) ?? (await tryStaffCancel(deps, bookingId, request));
   return result ?? { ok: false, reason: "ALREADY_CANCELLED" };
 }
 
