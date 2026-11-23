@@ -163,6 +163,11 @@
   <p>The website checked the rows as Publish would. Save writes them to the sheet and publishes.</p>
   <ul id="bike-fatal" class="bike-rows"></ul>
   <ul id="bike-check" class="bike-rows"></ul>
+  <div id="bike-partial" hidden>
+    <p class="bike-warn">The save stopped after writing these rows. Delete them before you save again, or keep them,
+      add the rest in the tabs, and use Publish to website.</p>
+    <ul id="bike-partial-rows" class="bike-rows"></ul>
+  </div>
 </section>
 
 <section data-step="result">
@@ -537,6 +542,20 @@
     field("bike-publish").replaceChildren(...saved.publish.messages.map((message) => listItem(message)));
   }
 
+  /** The rows a save that failed partway had written. For a model already in Models, its row only gained photos. */
+  function showPartial(written, draft) {
+    field("bike-partial-rows").replaceChildren(
+      ...written.map((entry) =>
+        listItem(
+          entry.tab === "Models" && draft.mode === "existing"
+            ? `Models row ${entry.row}: this save's photos added to its photos cell`
+            : `${entry.tab} row ${entry.row}`,
+        ),
+      ),
+    );
+    field("bike-partial").hidden = written.length === 0;
+  }
+
   onNext("start", () => {
     showMode();
   });
@@ -582,6 +601,7 @@
 
   onNext("check", () => {
     if (checkBlocks(bikeChecked)) throw new Error("Fix the errors above in the earlier steps, then check again.");
+    showPartial([], bikeDraft);
     return callServer("addBikeSave", bikeDraft).then((saved) => {
       if (saved.check) {
         if (!saved.check.ok) throw new Error(saved.check.message);
@@ -589,7 +609,10 @@
         showCheck(saved.check);
         throw new Error("The check found a problem, so nothing was saved.");
       }
-      if (!saved.ok) throw new Error(saved.message);
+      if (!saved.ok) {
+        showPartial(saved.written || [], bikeDraft);
+        throw new Error(saved.message);
+      }
       showResult(saved);
     });
   });

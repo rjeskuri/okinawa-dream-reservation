@@ -7,10 +7,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { createContext, Script } from "node:vm";
 import { parseProposedRows } from "../src/lib/catalog/check-rows.ts";
 import { SHEET_TABS, validateCatalog } from "../src/lib/catalog/sheet-schema.ts";
 import { verifyEnvelope } from "../src/lib/crypto.ts";
 import { type AppsScriptWorld, loadAppsScript, type Options, type Route, sheetsApiValues } from "./helpers/apps-script.ts";
+import { type FakeDocument, type FakeElement, FakeEvent, FakeText, isShown, parsePage, settle, visibleText } from "./helpers/checkout-client.ts";
 import { validWorkbook } from "./helpers/sheet-workbook.ts";
 
 const SCRIPT_DIR = new URL("../apps-script/", import.meta.url);
@@ -742,5 +744,353 @@ test("addBikeSave keeps a digit-only plate and notes that look like a date or bo
       { plate, modelId: draft.modelId, status: "active", odometerKm: odometerKm ?? null, baseUsageDays: baseUsageDays ?? 0 },
       `${label}: the vehicle Publish reads: ${JSON.stringify(read.catalog?.vehicles.map((each) => each.plate))}`,
     );
+  }
+});
+
+// ---- A save that fails partway (#191) ----
+
+test("a write that throws after the first row answers the rows already written, each with its tab and row number", () => {
+  // Each sheet's Vehicles lacks one header the vehicle row needs, so the photos land in Models and the Vehicles write
+  // throws. The Models row is counted by hand: the header row, then each record, a blank one included.
+  const cases: {
+    label: string;
+    models: (Cells | null)[];
+    vehicles: Cells[];
+    missing: string;
+    draft: Draft & { photos: string[] };
+    row: number;
+    status: string;
+    photosBefore: string;
+  }[] = [
+    {
+      label: "Rebel on sheet A, no notes column",
+      models: [
+        modelCells(PCX, "pcx-1.jpg, pcx-2.jpg"),
+        null,
+        modelCells(REBEL, "rebel-1.jpg", { publish_status: "ok" }),
+        modelCells(NBOX, ""),
+      ],
+      vehicles: [{ plate: "わ1001", model_id: "pcx-125", status: "active" }],
+      missing: "notes",
+      draft: { mode: "existing", modelId: "rebel-250", photos: ["rebel-4.jpg"], vehicle: { plate: "わ9100", notes: "left mirror" } },
+      row: 4,
+      status: "ok",
+      photosBefore: "rebel-1.jpg",
+    },
+    {
+      label: "Today on sheet B, no odometer_km column",
+      models: [modelCells(CUB, "cub.jpg"), modelCells(TODAY, "")],
+      vehicles: [
+        { plate: "わ7001", model_id: "cub-110", status: "active" },
+        { plate: "わ7002", model_id: "today-50", status: "active" },
+      ],
+      missing: "odometer_km",
+      draft: {
+        mode: "existing",
+        modelId: "today-50",
+        photos: ["today-50-1.webp", "today-50-2.png"],
+        vehicle: { plate: "わ7010", odometerKm: 300 },
+      },
+      row: 3,
+      status: "",
+      photosBefore: "",
+    },
+    {
+      label: "N-BOX on sheet A, no base_usage_days column",
+      models: [
+        modelCells(PCX, "pcx-1.jpg"),
+        null,
+        null,
+        modelCells(REBEL, "rebel-1.jpg"),
+        modelCells(NBOX, "nbox-1.jpg", { publish_status: "warning: summary_en is blank" }),
+      ],
+      vehicles: [{ plate: "沖縄 あ 35-80", model_id: "nbox-660", status: "active" }],
+      missing: "base_usage_days",
+      draft: { mode: "existing", modelId: "nbox-660", photos: ["nbox-660-1.jpg"], vehicle: { plate: "沖縄 あ 35-81", baseUsageDays: 2 } },
+      row: 6,
+      status: "warning: summary_en is blank",
+      photosBefore: "nbox-1.jpg",
+    },
+  ];
+  for (const { label, models, vehicles, missing, draft, row, status, photosBefore } of cases) {
+    const headers = VEHICLE_HEADERS.filter((header) => header.trim().toLowerCase() !== missing);
+    const tabs = {
+      Models: tab(MODEL_HEADERS, models),
+      Vehicles: tab(headers, vehicles),
+      PublishLog: [[...SHEET_TABS.PublishLog]],
+    };
+    const script = loadAppsScript({
+      properties: PROPERTIES,
+      user: USER,
+      tabs,
+      routes: { [CHECK]: { body: OK_CHECK }, [PUBLISH]: { body: REPORT }, ...STEP_ROUTES },
+    });
+    let result: any;
+    assert.doesNotThrow(() => {
+      result = plain(script.call("addBikeSave", draft));
+    }, label);
+
+    assert.equal(result?.ok, false, `${label}: ${JSON.stringify(result)}`);
+    assertReadable(result.message, label);
+    assert.ok(String(result.message).includes(missing), `${label}: the message names what failed: ${result.message}`);
+    assert.deepEqual(result.written, [{ tab: "Models", row, status }], `${label}: the row written before the throw`);
+
+    // The answer is the sheet's truth: the photos went into that row, and Vehicles is as it was.
+    const added = draft.photos.join(", ");
+    const written = sheetRow(script, "Models", row);
+    assert.equal(written.model_id, draft.modelId, `${label}: row ${row} is the model's`);
+    assert.equal(String(written.photos), photosBefore === "" ? added : `${photosBefore}, ${added}`, `${label}: the photos of row ${row}`);
+    assert.deepEqual(script.tabs.get("Vehicles")?.rows, tabs.Vehicles, `${label}: no Vehicles row`);
+    assert.deepEqual(paths(script).filter((path) => PUBLISH_PATHS.includes(path)), [], `${label}: no Publish request`);
+    assert.deepEqual(logRows(script), [], `${label}: no PublishLog row`);
+    assert.equal(script.lock.held(), false, `${label}: the lock is released`);
+  }
+});
+
+// The panel itself: the shell and AddBikePanel.html as openAddBike shows them, their scripts run in node:vm on the fake
+// DOM of tests/helpers/checkout-client.ts, with a fake google.script.run that answers each server function in the shape
+// AddBike.js answers. Staff go through the steps of a bike of an existing model, then press Save on the check step. The
+// adapters below fill in the few browser features that DOM lacks: select.options, Element.after, :checked and Option.
+
+type SaveAnswer = { ok: false; message: string; written?: { tab: string; row: number; status: string }[] };
+type ServerCall = { name: string; arg: unknown };
+
+const PANEL_OPTIONS = {
+  ok: true,
+  models: [
+    { id: "pcx-125", nameJa: "PCX", nameEn: "PCX125", typeId: "scooter", rateClassId: "bike-125", photos: [] },
+    { id: "nbox-660", nameJa: "N-BOX", nameEn: "N-BOX", typeId: "car", rateClassId: "car-k", photos: ["nbox-1.jpg"] },
+  ],
+  plates: ["わ1001"],
+  types: [
+    { id: "scooter", depositJpy: 5000, hasRow: true },
+    { id: "motorcycle", depositJpy: 10000, hasRow: true },
+    { id: "car", depositJpy: 20000, hasRow: true },
+    { id: "ebike", depositJpy: null, hasRow: false },
+  ],
+  rateClasses: [
+    { id: "bike-125", group: "bike", nameJa: "125cc", prices: [] },
+    { id: "car-k", group: "car", nameJa: "軽", prices: [] },
+  ],
+  packages: [],
+};
+
+const BLOCK_TAGS = new Set([
+  ...["body", "div", "section", "p", "ul", "ol", "li", "h1", "h2", "h3", "h4", "pre", "br", "dl", "dt", "dd"],
+  ...["table", "thead", "tbody", "tr", "td", "th", "fieldset", "legend", "label"],
+]);
+
+/** The lines a reader sees under `root`: block elements and newlines break lines; hidden elements and controls show none. */
+function visibleLines(root: FakeElement, skip: FakeElement | null = null): string[] {
+  let text = "";
+  const walk = (node: FakeElement | FakeText): void => {
+    if (node instanceof FakeText) {
+      text += node.data;
+      return;
+    }
+    if (node === skip || node.hidden || node.style.display === "none") return;
+    if (["script", "style", "template", "select", "option", "input", "textarea"].includes(node.localName)) return;
+    const block = BLOCK_TAGS.has(node.localName);
+    if (block) text += "\n";
+    for (const child of node.childNodes) walk(child as FakeElement | FakeText);
+    if (block) text += "\n";
+  };
+  walk(root);
+  return text
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line !== "");
+}
+
+type Panel = { document: FakeDocument; calls: ServerCall[]; step(): string; next(): Promise<void>; set(id: string, value: string): void };
+
+async function openBikePanel(save: SaveAnswer): Promise<Panel> {
+  const opened = world(SHEET_A);
+  opened.call("openAddBike");
+  const document = parsePage(`<html><body>${opened.shown[0].html}</body></html>`);
+
+  for (const select of document.querySelectorAll("select")) {
+    Object.defineProperty(select, "options", { get: () => select.querySelectorAll("option") });
+  }
+  for (const element of document.querySelectorAll("*")) {
+    Object.defineProperty(element, "after", {
+      value: (...nodes: FakeElement[]) => {
+        const parent = element.parentNode as FakeElement;
+        const following = parent.childNodes[parent.childNodes.indexOf(element) + 1] ?? null;
+        for (const node of nodes) parent.insertBefore(node, following);
+      },
+    });
+  }
+  const query = document.querySelector.bind(document);
+  (document as unknown as { querySelector(selector: string): FakeElement | null }).querySelector = (selector: string) => {
+    const checked = /^(.*):checked$/.exec(selector);
+    if (checked === null) return query(selector);
+    return document.querySelectorAll(checked[1]).find((input) => input.hasAttribute("checked")) ?? null;
+  };
+  function Option(text: unknown, value?: unknown): FakeElement {
+    const option = document.createElement("option");
+    option.textContent = String(text);
+    if (value !== undefined) option.setAttribute("value", String(value));
+    return option;
+  }
+
+  const calls: ServerCall[] = [];
+  const server: Record<string, (arg: unknown) => unknown> = {
+    addBikeOptions: () => PANEL_OPTIONS,
+    addBikeCheck: () => ({ ok: true, fatal: [], rows: { Vehicles: [{ level: "ok", messages: [] }] } }),
+    addBikeSave: () => save,
+  };
+  type Handler = ((value: unknown) => void) | undefined;
+  const runner = (success: Handler, failure: Handler): unknown =>
+    new Proxy(
+      {},
+      {
+        get: (_, key) => {
+          if (key === "withSuccessHandler") return (handler: Handler) => runner(handler, failure);
+          if (key === "withFailureHandler") return (handler: Handler) => runner(success, handler);
+          if (typeof key !== "string") return undefined;
+          return (arg?: unknown) => {
+            calls.push({ name: key, arg: plain(arg) });
+            setImmediate(() => {
+              const fn = server[key];
+              if (fn === undefined) failure?.(new Error(`Script function not found: ${key}`));
+              else success?.(plain(fn(plain(arg))));
+            });
+          };
+        },
+      },
+    );
+
+  const google = { script: { run: runner(undefined, undefined) } };
+  const context = createContext({ document, window: document.window, google, Option, console });
+  for (const script of document.querySelectorAll("script")) {
+    new Script(script.textContent, { filename: "AddBike dialog" }).runInContext(context);
+  }
+  document.dispatchEvent(new FakeEvent("DOMContentLoaded"));
+  await settle();
+
+  return {
+    document,
+    calls,
+    step: () => document.querySelectorAll("[data-step]").find((section) => isShown(section))?.dataset.step ?? "",
+    async next() {
+      const button = document.querySelectorAll(".panel-nav button").find((each) => each.classList.contains("primary"));
+      assert.ok(button !== undefined && isShown(button) && !button.disabled, "a Next button to press");
+      button.click();
+      await settle();
+    },
+    set(id: string, value: string) {
+      const control = document.getElementById(id);
+      assert.ok(control !== null, `the panel has #${id}`);
+      control.value = value;
+    },
+  };
+}
+
+/** Through the steps of a bike of an existing model, to the check step with a clean check. */
+async function reachCheck(panel: Panel, modelId: string, plate: string): Promise<void> {
+  const error = () => visibleText(panel.document.getElementById("panel-error"));
+  for (let i = 0; i < 8 && panel.step() !== "check"; i += 1) {
+    if (panel.step() === "model") panel.set("bike-model", modelId);
+    if (panel.step() === "vehicle") panel.set("bike-plate", plate);
+    await panel.next();
+    assert.equal(error(), "", `no error on the way to the check, at ${panel.step()}`);
+  }
+  assert.equal(panel.step(), "check", "the panel reaches the check step");
+  assert.ok(
+    panel.calls.some(({ name }) => name === "addBikeCheck"),
+    `the panel checked: ${JSON.stringify(panel.calls.map(({ name }) => name))}`,
+  );
+}
+
+const SAVE_FAILED = "Could not write the row, so nothing was published:";
+
+test("a save that fails partway shows its message and every row it wrote, by tab and row number; one that wrote nothing shows the message alone", async () => {
+  const cases: { label: string; modelId: string; plate: string; save: SaveAnswer }[] = [
+    {
+      label: "photos into Models, then the Vehicles write threw",
+      modelId: "pcx-125",
+      plate: "わ9100",
+      save: { ok: false, message: `${SAVE_FAILED} Vehicles: the header notes is missing`, written: [{ tab: "Models", row: 17, status: "" }] },
+    },
+    {
+      label: "a new model's Types, RateClasses and two Prices rows, then Models threw",
+      modelId: "nbox-660",
+      plate: "沖縄 あ 35-81",
+      save: {
+        ok: false,
+        message: `${SAVE_FAILED} Models: the header brand is missing`,
+        written: [
+          { tab: "Types", row: 6, status: "" },
+          { tab: "RateClasses", row: 23, status: "" },
+          { tab: "Prices", row: 41, status: "" },
+          { tab: "Prices", row: 42, status: "" },
+        ],
+      },
+    },
+    {
+      label: "every row written, then the flush failed",
+      modelId: "pcx-125",
+      plate: "わ0123",
+      save: {
+        ok: false,
+        message: `${SAVE_FAILED} Service Spreadsheets timed out while accessing document`,
+        written: [
+          { tab: "RateClasses", row: 8, status: "" },
+          { tab: "Prices", row: 115, status: "" },
+          { tab: "Models", row: 33, status: "ok" },
+          { tab: "Vehicles", row: 210, status: "" },
+        ],
+      },
+    },
+    {
+      label: "the first write threw",
+      modelId: "nbox-660",
+      plate: "わ7010",
+      save: { ok: false, message: `${SAVE_FAILED} Types: the header deposit_jpy is missing`, written: [] },
+    },
+    {
+      label: "refused before any write",
+      modelId: "pcx-125",
+      plate: "わ9001",
+      save: { ok: false, message: "A Publish is running, so nothing was saved. Try again when it has finished." },
+    },
+  ];
+  for (const { label, modelId, plate, save } of cases) {
+    const panel = await openBikePanel(save);
+    await reachCheck(panel, modelId, plate);
+    const body = panel.document.body as FakeElement;
+    const errorBox = panel.document.getElementById("panel-error") as FakeElement;
+    const before = visibleLines(body);
+    const beforeOutsideError = visibleLines(body, errorBox);
+
+    await panel.next();
+
+    const saves = panel.calls.filter(({ name }) => name === "addBikeSave");
+    assert.equal(saves.length, 1, `${label}: Save called addBikeSave once`);
+    assert.equal((saves[0].arg as Draft).vehicle.plate, plate, `${label}: with the draft`);
+    assert.equal((saves[0].arg as Draft).modelId, modelId, `${label}: with the draft`);
+
+    // The message, as the server wrote it.
+    const shown = visibleText(body);
+    assert.ok(shown.includes(save.message), `${label}: the message shows: ${shown}`);
+
+    const written = save.written ?? [];
+    if (written.length === 0) {
+      // As today: the message in the error box, and nothing else on the panel changed.
+      assert.equal(visibleText(errorBox), save.message, `${label}: the error box holds the message`);
+      assert.deepEqual(visibleLines(body, errorBox), beforeOutsideError, `${label}: the message alone`);
+      continue;
+    }
+
+    // Each written row on a line that was not there before Save, with its tab and its row number.
+    const added = visibleLines(body).filter((line) => !before.includes(line));
+    for (const { tab: tabName, row } of written) {
+      const word = new RegExp(`(?<![A-Za-z_])${tabName}(?![A-Za-z_])`);
+      assert.ok(
+        added.some((line) => word.test(line) && hasNumber(line, row)),
+        `${label}: ${tabName} row ${row} shows after Save: ${JSON.stringify(added)}`,
+      );
+    }
   }
 });
