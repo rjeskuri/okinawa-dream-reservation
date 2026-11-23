@@ -7,6 +7,8 @@
 // but by no one else, until SpreadsheetApp.flush(), a read through the Spreadsheet service, or the end of the execution
 // applies it. `tabs` is what the Sheets API sees, which is what the Worker reads: a route reading or writing `tabs`
 // during a fetch sees only the applied writes, and the script's next read sees what the route wrote.
+// Drive holds the folders a test gives, by id: DriveApp.getFolderById throws for any other id, as Google does for an id
+// the user cannot see, and Folder.createFile adds to `drive`, where a test reads each file's name, type and bytes.
 import { createHmac } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { createContext, Script } from "node:vm";
@@ -62,6 +64,20 @@ export type Options = {
   web?: WebState;
   /** Utilities.getUuid answers these in order, then uuid-1, uuid-2 and so on. */
   uuids?: string[];
+  /** Drive folders by id, each with the names of the files already in it, a name given twice being two files. */
+  folders?: Record<string, string[]>;
+  /** Folders the user can open but not add to: createFile there throws, as Drive does without edit access. */
+  readOnlyFolders?: string[];
+};
+
+/** A file in a fake Drive folder. `data` holds its bytes, unsigned. */
+export type DriveFileRecord = { id: string; name: string; mimeType: string; data: Buffer };
+
+export type FakeDrive = {
+  /** Each folder's files: the ones the test gave, then the ones the script created, in order. */
+  folders: Map<string, DriveFileRecord[]>;
+  /** Every file Folder.createFile made, in order, with the folder it went into. */
+  created: (DriveFileRecord & { folderId: string })[];
 };
 
 export type CacheEntry = { value: string; expiresAt: number };
@@ -117,6 +133,7 @@ export type AppsScriptWorld = {
   inserted: string[];
   timeZone(): string;
   lock: { held(): boolean; timeouts: number[] };
+  drive: FakeDrive;
 };
 
 /** The bytes as Apps Script returns them: signed, from -128 to 127. */
@@ -457,6 +474,189 @@ function fakeSheet(batch: Batch, name: string, tab: FakeTab) {
   return sheet;
 }
 
+/** Bytes as Apps Script hands them to a script: a plain array of signed values from -128 to 127. */
+function toSignedBytes(data: Buffer): number[] {
+  return Array.from(new Int8Array(data.buffer, data.byteOffset, data.length));
+}
+
+/** A Byte[] or a string as Utilities.newBlob takes it, as unsigned bytes, or null for anything else. */
+function blobData(data: unknown): Buffer | null {
+  if (typeof data === "string") return Buffer.from(data, "utf8");
+  if (Array.isArray(data) || ArrayBuffer.isView(data)) {
+    const values = Array.from(data as ArrayLike<unknown>);
+    if (!values.every((value) => typeof value === "number" && Number.isInteger(value))) return null;
+    return Buffer.from(Uint8Array.from(values as number[], (value) => value & 0xff));
+  }
+  return null;
+}
+
+// Strict base64 with its padding, which FileReader.readAsDataURL and btoa both produce. Apps Script answers
+// "Could not decode string." for text it cannot read, and this fake does the same rather than guess at the bytes.
+// A flat character class and the length, not a grouped pattern, which overflows V8's regex stack on a photo's megabytes.
+const BASE64_CHARACTERS = /^[A-Za-z0-9+/]*={0,2}$/;
+const isBase64 = (text: string) => text.length % 4 === 0 && BASE64_CHARACTERS.test(text);
+
+type BlobState = { data: Buffer; contentType: string | null; name: string | null };
+
+type FakeBlob = {
+  getBytes(): number[];
+  getContentType(): string | null;
+  getName(): string | null;
+  getDataAsString(): string;
+  setName(name: unknown): FakeBlob;
+  setContentType(contentType: unknown): FakeBlob;
+  copyBlob(): FakeBlob;
+};
+
+/** Utilities.newBlob and the blobs it makes. The map tells Folder.createFile a real Blob from anything else. */
+function fakeBlobs(blobs: WeakMap<object, BlobState>) {
+  const make = (state: BlobState): FakeBlob => {
+    const blob: FakeBlob = {
+      getBytes: () => toSignedBytes(state.data),
+      getContentType: () => state.contentType,
+      getName: () => state.name,
+      getDataAsString: () => state.data.toString("utf8"),
+      setName(name) {
+        state.name = String(name);
+        return blob;
+      },
+      setContentType(contentType) {
+        state.contentType = String(contentType);
+        return blob;
+      },
+      copyBlob: () => make({ ...state, data: Buffer.from(state.data) }),
+    };
+    blobs.set(blob, state);
+    return blob;
+  };
+  return {
+    make,
+    newBlob(data: unknown, contentType?: unknown, name?: unknown): FakeBlob {
+      const bytes = blobData(data);
+      if (bytes === null) throw new Error("The parameters don't match the method signature for Utilities.newBlob.");
+      return make({
+        data: bytes,
+        contentType: contentType === undefined || contentType === null ? null : String(contentType),
+        name: name === undefined || name === null ? null : String(name),
+      });
+    },
+    base64Decode(encoded: unknown): number[] {
+      if (typeof encoded !== "string") {
+        throw new Error("The parameters don't match the method signature for Utilities.base64Decode.");
+      }
+      if (!isBase64(encoded)) throw new Error("Could not decode string.");
+      return toSignedBytes(Buffer.from(encoded, "base64"));
+    },
+  };
+}
+
+// The MimeType enum's members that name an image or a document type a panel might compare with. It has no WebP member.
+const MIME_TYPES = {
+  JPEG: "image/jpeg",
+  PNG: "image/png",
+  GIF: "image/gif",
+  BMP: "image/bmp",
+  SVG: "image/svg+xml",
+  PDF: "application/pdf",
+  PLAIN_TEXT: "text/plain",
+  HTML: "text/html",
+};
+
+const NO_FOLDER =
+  "No item with the given ID could be found. Possibly because you have not edited this item or you do not have permission to access it.";
+
+function fakeDrive(options: Options, blobs: ReturnType<typeof fakeBlobs>, blobState: WeakMap<object, BlobState>) {
+  let fileCount = 0;
+  const newFile = (name: string, mimeType: string, data: Buffer): DriveFileRecord => {
+    fileCount += 1;
+    return { id: `drive-file-${fileCount}`, name, mimeType, data };
+  };
+  const types = new Map([
+    ["jpg", "image/jpeg"],
+    ["jpeg", "image/jpeg"],
+    ["png", "image/png"],
+    ["webp", "image/webp"],
+  ]);
+  const extensionType = (name: string) =>
+    types.get(name.slice(name.lastIndexOf(".") + 1).toLowerCase()) ?? "application/octet-stream";
+
+  const drive: FakeDrive = {
+    folders: new Map(
+      Object.entries(options.folders ?? {}).map(([id, names]) => [
+        id,
+        names.map((name) => newFile(name, extensionType(name), Buffer.alloc(0))),
+      ]),
+    ),
+    created: [],
+  };
+  const readOnly = new Set(options.readOnlyFolders ?? []);
+
+  const fileOf = (file: DriveFileRecord) => ({
+    getId: () => file.id,
+    getName: () => file.name,
+    getMimeType: () => file.mimeType,
+    getSize: () => file.data.length,
+    getBlob: () => blobs.make({ data: Buffer.from(file.data), contentType: file.mimeType, name: file.name }),
+  });
+
+  /** A FileIterator over the files as they were when it was made, as Drive's iterators are. */
+  const iterator = (files: DriveFileRecord[]) => {
+    const list = [...files];
+    let at = 0;
+    return {
+      hasNext: () => at < list.length,
+      next() {
+        if (at >= list.length) throw new Error("Cannot retrieve the next object: iterator has reached the end.");
+        at += 1;
+        return fileOf(list[at - 1]);
+      },
+      getContinuationToken: () => `continue-${at}`,
+    };
+  };
+
+  const folderOf = (id: string, files: DriveFileRecord[]) => ({
+    getId: () => id,
+    getName: () => `Folder ${id}`,
+    getFiles: () => iterator(files),
+    getFilesByName(name: unknown) {
+      if (typeof name !== "string") {
+        throw new Error("The parameters don't match the method signature for DriveApp.Folder.getFilesByName.");
+      }
+      return iterator(files.filter((file) => file.name === name));
+    },
+    /** createFile(blob), or createFile(name, content, mimeType?) with text content, as Drive takes them. */
+    createFile(...args: unknown[]) {
+      let file: DriveFileRecord;
+      const [first, content, mimeType] = args;
+      const state = typeof first === "object" && first !== null ? blobState.get(first) : undefined;
+      if (args.length === 1 && state !== undefined) {
+        file = newFile(state.name ?? "Untitled", state.contentType ?? "application/octet-stream", Buffer.from(state.data));
+      } else if (typeof first === "string" && typeof content === "string" && args.length <= 3) {
+        file = newFile(first, mimeType === undefined ? "text/plain" : String(mimeType), Buffer.from(content, "utf8"));
+      } else {
+        throw new Error("The parameters don't match the method signature for DriveApp.Folder.createFile.");
+      }
+      if (readOnly.has(id)) throw new Error("Access denied: DriveApp.");
+      files.push(file);
+      drive.created.push({ ...file, folderId: id });
+      return fileOf(file);
+    },
+  });
+
+  const DriveApp = {
+    getFolderById(id: unknown) {
+      if (typeof id !== "string" || id.trim() === "") throw new Error("Invalid argument: id");
+      const files = drive.folders.get(id);
+      if (files === undefined) throw new Error(NO_FOLDER);
+      return folderOf(id, files);
+    },
+    createFile() {
+      throw new Error("this fake keeps no My Drive: create the file in its folder, with getFolderById(id).createFile(blob)");
+    },
+  };
+  return { drive, DriveApp };
+}
+
 export function loadAppsScript(options: Options = {}): AppsScriptWorld {
   const scripts = scriptFiles();
   const fetches: FetchCall[] = [];
@@ -568,8 +768,14 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
     },
   };
 
+  const blobState = new WeakMap<object, BlobState>();
+  const blobs = fakeBlobs(blobState);
+  const { drive, DriveApp } = fakeDrive(options, blobs, blobState);
+
   const Utilities = {
     Charset: { US_ASCII: "US_ASCII", UTF_8: "UTF_8" },
+    base64Decode: blobs.base64Decode,
+    newBlob: blobs.newBlob,
     computeHmacSha256Signature(value: string, key: string, charset?: unknown) {
       return options.signatureBytes === undefined ? hmacSignature(value, key, charset) : [...options.signatureBytes];
     },
@@ -615,6 +821,8 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
     },
     UrlFetchApp,
     Utilities,
+    DriveApp,
+    MimeType: MIME_TYPES,
     MailApp: fakeMailApp(web),
     CacheService: { getScriptCache: () => cache, getDocumentCache: () => cache, getUserCache: () => cache },
     ContentService: {
@@ -679,6 +887,7 @@ export function loadAppsScript(options: Options = {}): AppsScriptWorld {
     inserted,
     timeZone: () => timeZone,
     lock: { held: () => lockOwner !== null, timeouts },
+    drive,
   };
 }
 
