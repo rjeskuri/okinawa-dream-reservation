@@ -274,7 +274,7 @@ test("Add a bike is a dashboard action that opens the AddBike dialog", () => {
     `the home lists Add a bike: ${JSON.stringify(home)}`,
   );
 
-  // One modal dialog: the shell, then AddBike.html, titled Add a bike.
+  // One modal dialog: the shell, then AddBikePanel.html, titled Add a bike.
   const opened = world(SHEET_A);
   opened.call("openAddBike");
   assert.deepEqual(
@@ -282,18 +282,18 @@ test("Add a bike is a dashboard action that opens the AddBike dialog", () => {
     [{ kind: "modal", title: "Add a bike" }],
   );
   const shell = readFileSync(new URL("PanelShell.html", SCRIPT_DIR), "utf8");
-  const panel = readFileSync(new URL("AddBike.html", SCRIPT_DIR), "utf8");
-  assert.notEqual(panel.trim(), "", "AddBike.html has content");
+  const panel = readFileSync(new URL("AddBikePanel.html", SCRIPT_DIR), "utf8");
+  assert.notEqual(panel.trim(), "", "AddBikePanel.html has content");
   const html = opened.shown[0].html;
   const at = html.indexOf(shell);
   assert.ok(at >= 0, "the dialog holds PanelShell.html");
-  assert.ok(html.indexOf(panel, at + shell.length) >= 0, "the dialog holds AddBike.html after the shell");
+  assert.ok(html.indexOf(panel, at + shell.length) >= 0, "the dialog holds AddBikePanel.html after the shell");
   assert.deepEqual(opened.fetches, [], "opening the dialog calls nothing");
   assert.deepEqual(opened.tabs.get("Vehicles")?.touches, []);
 
   // The panel reaches the three server steps: options, check and save.
   for (const fn of ["addBikeOptions", "addBikeCheck", "addBikeSave"]) {
-    assert.match(panel, new RegExp(`callServer\\s*\\(\\s*["'\`]${fn}["'\`]`), `AddBike.html calls ${fn}`);
+    assert.match(panel, new RegExp(`callServer\\s*\\(\\s*["'\`]${fn}["'\`]`), `AddBikePanel.html calls ${fn}`);
   }
 });
 

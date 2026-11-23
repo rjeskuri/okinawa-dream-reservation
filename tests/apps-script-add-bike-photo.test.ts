@@ -754,12 +754,12 @@ test("an upload that cannot be read answers a message and never throws", () => {
 });
 
 test("the panel's photo step reads the file as base64 and sends it to addBikeUploadPhoto", () => {
-  const html = readFileSync(new URL("AddBike.html", SCRIPT_DIR), "utf8")
+  const html = readFileSync(new URL("AddBikePanel.html", SCRIPT_DIR), "utf8")
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/(^|[^:\\])\/\/[^\n]*/g, "$1");
   const called = Array.from(html.matchAll(/\bcallServer\s*\(\s*(["'`])([^"'`]*)\1/g), (match) => match[2]);
-  assert.ok(called.includes("addBikeUploadPhoto"), `AddBike.html calls addBikeUploadPhoto: ${JSON.stringify(called)}`);
-  assert.match(html, /type\s*=\s*["'`]file["'`]/i, "AddBike.html has a file input");
-  assert.match(html, /\bFileReader\b/, "AddBike.html reads the file with FileReader");
+  assert.ok(called.includes("addBikeUploadPhoto"), `AddBikePanel.html calls addBikeUploadPhoto: ${JSON.stringify(called)}`);
+  assert.match(html, /type\s*=\s*["'`]file["'`]/i, "AddBikePanel.html has a file input");
+  assert.match(html, /\bFileReader\b/, "AddBikePanel.html reads the file with FileReader");
 });
