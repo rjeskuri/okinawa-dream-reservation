@@ -32,9 +32,14 @@ function columnOrThrow_(tabName, columns, header) {
   return column;
 }
 
-/** A string Sheets would take for a formula or a number is written with a leading apostrophe, so it stays text. */
+/**
+ * What a row helper hands to setValues. setValues parses a string as typed input, so `2002`, `0123`, `2027-07-15`,
+ * `09:30`, `TRUE` or `=1` would become a number, date, time, boolean or formula. Every non-empty string is written with
+ * a leading apostrophe, which Sheets drops and which keeps the rest as the exact text; the cell's format is not changed.
+ * A number, boolean or Date is written as it is, so a value meant as one must reach the helpers as that type.
+ */
 function storedValue_(value) {
-  return typeof value === "string" && /^[=+\-@]/.test(value) ? `'${value}` : value;
+  return typeof value === "string" && value !== "" ? `'${value}` : value;
 }
 
 function isBlankCell_(value) {
