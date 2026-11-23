@@ -6,19 +6,135 @@
   .bike-level-error { color: #a50e0e; font-weight: bold; }
   .bike-level-warning { color: #b06000; font-weight: bold; }
   .bike-level-ok { color: #137333; font-weight: bold; }
+  .bike-choice { display: flex; gap: 8px; align-items: center; margin: 6px 0; font-weight: normal; }
+  .bike-choice input { width: auto; }
+  .bike-prices { width: 100%; border-collapse: collapse; }
+  .bike-prices th, .bike-prices td { padding: 4px; text-align: left; vertical-align: middle; }
+  fieldset { margin: 10px 0; border: 1px solid #dadce0; border-radius: 4px; }
 </style>
 <h1>Add a bike</h1>
 
+<section data-step="start">
+  <h2>1. New or existing</h2>
+  <p id="bike-loading">Loading the sheet…</p>
+  <label class="bike-choice"><input type="radio" name="bike-mode" value="existing" checked> A bike of a model already in Models</label>
+  <label class="bike-choice"><input type="radio" name="bike-mode" value="new"> A bike of a new model</label>
+</section>
+
 <section data-step="model">
-  <h2>1. Model</h2>
-  <p id="bike-loading">Loading the models…</p>
-  <label for="bike-model">Model</label>
-  <select id="bike-model"></select>
-  <p id="bike-model-info" class="bike-hint"></p>
+  <h2>2. Model</h2>
+  <div id="bike-existing">
+    <label for="bike-model">Model</label>
+    <select id="bike-model"></select>
+    <p id="bike-model-info" class="bike-hint"></p>
+  </div>
+  <div id="bike-new" hidden>
+    <label for="bike-model-id">Model id, such as pcx-125</label>
+    <input id="bike-model-id" type="text" autocomplete="off">
+    <p id="bike-model-used" class="bike-warn" hidden>This model id is already in Models.</p>
+    <label for="bike-type">Type</label>
+    <select id="bike-type"></select>
+    <label for="bike-brand">Brand</label>
+    <input id="bike-brand" type="text" autocomplete="off">
+    <div id="bike-engine">
+      <label for="bike-engine-cc">Engine (cc)</label>
+      <input id="bike-engine-cc" type="number" min="1" step="1">
+    </div>
+    <p id="bike-engine-none" class="bike-hint" hidden>An e-bike has no engine, so engine_cc stays blank.</p>
+    <label for="bike-seats">Seats, optional</label>
+    <input id="bike-seats" type="number" min="1" step="1">
+    <label for="bike-license">License class, optional</label>
+    <select id="bike-license">
+      <option value="">Default for the type and engine</option>
+      <option value="moped">moped</option>
+      <option value="small">small</option>
+      <option value="standard">standard</option>
+      <option value="large">large</option>
+      <option value="car">car</option>
+      <option value="none">none</option>
+    </select>
+    <label for="bike-model-sort">Sort, optional (blank goes last)</label>
+    <input id="bike-model-sort" type="number" min="0" step="1">
+  </div>
+</section>
+
+<section data-step="rate-class">
+  <h2>3. Rate class</h2>
+  <p id="bike-class-group" class="bike-hint"></p>
+  <label for="bike-class">Rate class</label>
+  <select id="bike-class"></select>
+  <div id="bike-class-new" hidden>
+    <label for="bike-class-id">New rate class id, such as bike-155</label>
+    <input id="bike-class-id" type="text" autocomplete="off">
+    <label for="bike-class-sort">Sort, optional (blank goes last)</label>
+    <input id="bike-class-sort" type="number" min="0" step="1">
+    <label for="bike-class-extension">Extension per hour (JPY), optional</label>
+    <input id="bike-class-extension" type="number" min="0" step="1">
+    <fieldset>
+      <legend>Name of the class</legend>
+      <label for="bike-class-name-ja">Japanese</label><input id="bike-class-name-ja" type="text">
+      <label for="bike-class-name-en">English</label><input id="bike-class-name-en" type="text">
+      <label for="bike-class-name-zh">Chinese</label><input id="bike-class-name-zh" type="text">
+      <label for="bike-class-name-ko">Korean</label><input id="bike-class-name-ko" type="text">
+    </fieldset>
+  </div>
+</section>
+
+<section data-step="prices">
+  <h2>4. Prices</h2>
+  <p id="bike-prices-note" class="bike-hint"></p>
+  <table class="bike-prices">
+    <thead><tr><th>Package</th><th>Price (JPY)</th><th>Advance price (JPY), optional</th></tr></thead>
+    <tbody id="bike-prices"></tbody>
+  </table>
+</section>
+
+<section data-step="deposit">
+  <h2>5. Deposit</h2>
+  <p id="bike-deposit-note" class="bike-hint"></p>
+  <div id="bike-type-new" hidden>
+    <label for="bike-deposit">Deposit (JPY)</label>
+    <input id="bike-deposit" type="number" min="0" step="1">
+    <label for="bike-type-sort">Sort, optional (blank goes last)</label>
+    <input id="bike-type-sort" type="number" min="0" step="1">
+    <fieldset>
+      <legend>Name of the type</legend>
+      <label for="bike-type-name-ja">Japanese</label><input id="bike-type-name-ja" type="text">
+      <label for="bike-type-name-en">English</label><input id="bike-type-name-en" type="text">
+      <label for="bike-type-name-zh">Chinese</label><input id="bike-type-name-zh" type="text">
+      <label for="bike-type-name-ko">Korean</label><input id="bike-type-name-ko" type="text">
+    </fieldset>
+  </div>
+</section>
+
+<section data-step="translations">
+  <h2>6. Translations</h2>
+  <p class="bike-hint">Guests read these as typed. Summary and description may stay blank, with a warning.</p>
+  <fieldset>
+    <legend>Name</legend>
+    <label for="bike-name-ja">Japanese</label><input id="bike-name-ja" type="text">
+    <label for="bike-name-en">English</label><input id="bike-name-en" type="text">
+    <label for="bike-name-zh">Chinese</label><input id="bike-name-zh" type="text">
+    <label for="bike-name-ko">Korean</label><input id="bike-name-ko" type="text">
+  </fieldset>
+  <fieldset>
+    <legend>Summary</legend>
+    <label for="bike-summary-ja">Japanese</label><textarea id="bike-summary-ja" rows="2"></textarea>
+    <label for="bike-summary-en">English</label><textarea id="bike-summary-en" rows="2"></textarea>
+    <label for="bike-summary-zh">Chinese</label><textarea id="bike-summary-zh" rows="2"></textarea>
+    <label for="bike-summary-ko">Korean</label><textarea id="bike-summary-ko" rows="2"></textarea>
+  </fieldset>
+  <fieldset>
+    <legend>Description</legend>
+    <label for="bike-description-ja">Japanese</label><textarea id="bike-description-ja" rows="3"></textarea>
+    <label for="bike-description-en">English</label><textarea id="bike-description-en" rows="3"></textarea>
+    <label for="bike-description-zh">Chinese</label><textarea id="bike-description-zh" rows="3"></textarea>
+    <label for="bike-description-ko">Korean</label><textarea id="bike-description-ko" rows="3"></textarea>
+  </fieldset>
 </section>
 
 <section data-step="vehicle">
-  <h2>2. Vehicle</h2>
+  <h2>7. Vehicle</h2>
   <label for="bike-plate">Plate</label>
   <input id="bike-plate" type="text" autocomplete="off">
   <p id="bike-plate-used" class="bike-warn" hidden>This plate is already in Vehicles.</p>
@@ -31,69 +147,271 @@
 </section>
 
 <section data-step="check" data-next="Save and publish">
-  <h2>3. Check</h2>
-  <p>The website checked the row as Publish would. Save writes it to Vehicles and publishes.</p>
+  <h2>8. Check</h2>
+  <p>The website checked the rows as Publish would. Save writes them to the sheet and publishes.</p>
   <ul id="bike-fatal" class="bike-rows"></ul>
   <ul id="bike-check" class="bike-rows"></ul>
 </section>
 
 <section data-step="result">
-  <h2>4. Result</h2>
+  <h2>9. Result</h2>
   <ul id="bike-written" class="bike-rows"></ul>
   <h2>Publish</h2>
   <ul id="bike-publish" class="bike-rows"></ul>
 </section>
 
 <script>
-  // Add a bike: choose a model already in the sheet, enter the vehicle, check the row with the website, then save it
-  // and publish. Text from the sheet goes on the page with textContent only.
+  // Add a bike: a model already in the sheet, or a new model with its type, rate class, prices, deposit and
+  // translations. The rows are checked with the website, then saved and published. A class already in the sheet keeps
+  // its prices and a type already in the sheet keeps its deposit: both show read-only (owner decision 4). Text from
+  // the sheet goes on the page with textContent only.
 
-  let bikeOptions = { models: [], plates: [] };
+  const BIKE_LOCALES = ["ja", "en", "zh", "ko"];
+  const BIKE_NEW_CLASS = "\u0000new";
+
+  let bikeOptions = { models: [], plates: [], types: [], rateClasses: [], packages: [] };
   let bikeDraft = null;
   let bikeChecked = null;
 
+  function field(id) {
+    return document.getElementById(id);
+  }
+
+  function bikeMode() {
+    return document.querySelector('input[name="bike-mode"]:checked').value;
+  }
+
   function bikeModel() {
-    const id = document.getElementById("bike-model").value;
+    const id = field("bike-model").value;
     return bikeOptions.models.find((model) => model.id === id) || null;
+  }
+
+  function bikeType() {
+    const id = field("bike-type").value;
+    return bikeOptions.types.find((type) => type.id === id) || null;
+  }
+
+  /** The RateClasses group a type's models belong in: ebike to ebike, car to car, the rest to bike. */
+  function groupOf(typeId) {
+    return typeId === "ebike" || typeId === "car" ? typeId : "bike";
+  }
+
+  function isNewClass() {
+    return field("bike-class").value === BIKE_NEW_CLASS;
+  }
+
+  function bikeClass() {
+    const id = field("bike-class").value;
+    return bikeOptions.rateClasses.find((cls) => cls.id === id) || null;
+  }
+
+  function packageName(packageId) {
+    const found = bikeOptions.packages.find((pkg) => pkg.id === packageId);
+    return found ? `${found.nameJa} (${packageId})` : packageId;
+  }
+
+  function yen(value) {
+    return value === null || value === undefined ? "none" : `${Number(value).toLocaleString("en-US")} JPY`;
   }
 
   function showModelInfo() {
     const model = bikeModel();
-    document.getElementById("bike-model-info").textContent = model
+    field("bike-model-info").textContent = model
       ? `${model.nameEn} / ${model.nameJa}. Type ${model.typeId}, rate class ${model.rateClassId}, ${model.photos.length} photos.`
       : "";
   }
 
+  function showMode() {
+    const isNew = bikeMode() === "new";
+    field("bike-existing").hidden = isNew;
+    field("bike-new").hidden = !isNew;
+  }
+
+  function showEngine() {
+    const ebike = field("bike-type").value === "ebike";
+    field("bike-engine").hidden = ebike;
+    field("bike-engine-none").hidden = !ebike;
+  }
+
+  function showModelUsed() {
+    const id = field("bike-model-id").value.trim();
+    field("bike-model-used").hidden = !bikeOptions.models.some((model) => model.id === id);
+  }
+
   function showPlateUsed() {
-    const plate = document.getElementById("bike-plate").value.trim();
-    document.getElementById("bike-plate-used").hidden = !bikeOptions.plates.includes(plate);
+    const plate = field("bike-plate").value.trim();
+    field("bike-plate-used").hidden = !bikeOptions.plates.includes(plate);
+  }
+
+  /** Only the classes whose group fits the chosen type, and a new class of that group. */
+  function fillClasses() {
+    const group = groupOf(field("bike-type").value);
+    const select = field("bike-class");
+    const chosen = select.value;
+    select.replaceChildren(new Option("Choose a rate class", ""));
+    for (const cls of bikeOptions.rateClasses.filter((each) => each.group === group)) {
+      select.append(new Option(`${cls.id}: ${cls.nameJa}`, cls.id));
+    }
+    select.append(new Option(`A new ${group} class`, BIKE_NEW_CLASS));
+    select.value = Array.from(select.options).some((option) => option.value === chosen) ? chosen : "";
+    field("bike-class-group").textContent = `A ${field("bike-type").value} goes in a rate class of group ${group}.`;
+    showClass();
+  }
+
+  function showClass() {
+    field("bike-class-new").hidden = !isNewClass();
+  }
+
+  /** A new class takes a price per package; a class in the sheet shows its prices read-only. */
+  function showPrices() {
+    const body = field("bike-prices");
+    body.replaceChildren();
+    if (isNewClass()) {
+      field("bike-prices-note").textContent =
+        "Enter a price for each package this class offers. A package left blank is not offered.";
+      for (const pkg of bikeOptions.packages) {
+        const row = document.createElement("tr");
+        const name = document.createElement("td");
+        name.textContent = packageName(pkg.id);
+        row.append(name);
+        for (const kind of ["price", "advance"]) {
+          const cell = document.createElement("td");
+          const input = document.createElement("input");
+          input.type = "number";
+          input.min = "0";
+          input.step = "1";
+          input.dataset.packageId = pkg.id;
+          input.dataset.kind = kind;
+          input.setAttribute("aria-label", `${kind === "price" ? "Price" : "Advance price"} for ${pkg.id}`);
+          cell.append(input);
+          row.append(cell);
+        }
+        body.append(row);
+      }
+      return;
+    }
+    const cls = bikeClass();
+    field("bike-prices-note").textContent =
+      `${cls.id} already has its prices, which every model in the class shares. They are read-only here: change them in Prices.`;
+    for (const price of cls.prices) {
+      const row = document.createElement("tr");
+      for (const text of [packageName(price.packageId), yen(price.priceJpy), yen(price.advancePriceJpy)]) {
+        const cell = document.createElement("td");
+        cell.textContent = text;
+        row.append(cell);
+      }
+      body.append(row);
+    }
+  }
+
+  /** A type with no row takes a deposit; a type in the sheet shows its deposit read-only. */
+  function showDeposit() {
+    const type = bikeType();
+    field("bike-type-new").hidden = type.hasRow;
+    field("bike-deposit-note").textContent = type.hasRow
+      ? `The deposit for ${type.id} is ${yen(type.depositJpy)}. It is read-only here: change it in Types.`
+      : `Types has no row for ${type.id} yet. Enter its deposit and name, and Save adds the row.`;
   }
 
   function showOptions(options) {
     if (!options.ok) throw new Error(options.message);
     bikeOptions = options;
-    const select = document.getElementById("bike-model");
+    const select = field("bike-model");
     select.append(new Option("Choose a model", ""));
     for (const model of options.models) {
       select.append(new Option(`${model.id}: ${model.nameEn} / ${model.nameJa}`, model.id));
     }
+    const types = field("bike-type");
+    for (const type of options.types) {
+      types.append(new Option(type.hasRow ? `${type.id} (deposit ${yen(type.depositJpy)})` : `${type.id} (no Types row yet)`, type.id));
+    }
     showModelInfo();
+    showEngine();
+    fillClasses();
   }
 
   function numberField(id) {
-    const text = document.getElementById(id).value.trim();
+    const text = field(id).value.trim();
     return text === "" ? undefined : Number(text);
   }
 
-  function readDraft() {
-    const vehicle = { plate: document.getElementById("bike-plate").value.trim() };
+  function textField(id) {
+    return field(id).value.trim();
+  }
+
+  function names(prefix) {
+    return Object.fromEntries(BIKE_LOCALES.map((locale) => [locale, textField(`${prefix}-${locale}`)]));
+  }
+
+  function readVehicle() {
+    const vehicle = { plate: textField("bike-plate") };
     const odometerKm = numberField("bike-odometer");
     const baseUsageDays = numberField("bike-usage");
-    const notes = document.getElementById("bike-notes").value.trim();
+    const notes = textField("bike-notes");
     if (odometerKm !== undefined) vehicle.odometerKm = odometerKm;
     if (baseUsageDays !== undefined) vehicle.baseUsageDays = baseUsageDays;
     if (notes !== "") vehicle.notes = notes;
-    return { mode: "existing", modelId: document.getElementById("bike-model").value, vehicle };
+    return vehicle;
+  }
+
+  function readPrices() {
+    const prices = [];
+    for (const row of field("bike-prices").querySelectorAll("tr")) {
+      const input = row.querySelector('input[data-kind="price"]');
+      const advance = row.querySelector('input[data-kind="advance"]');
+      if (!input || !advance) continue;
+      const packageId = input.dataset.packageId;
+      const price = input.value.trim();
+      const advanceText = advance.value.trim();
+      if (price === "" && advanceText === "") continue;
+      const entry = { packageId, priceJpy: price === "" ? "" : Number(price) };
+      if (advanceText !== "") entry.advancePriceJpy = Number(advanceText);
+      prices.push(entry);
+    }
+    return prices;
+  }
+
+  function readNewDraft() {
+    const typeId = field("bike-type").value;
+    const model = {
+      modelId: textField("bike-model-id"),
+      typeId,
+      brand: textField("bike-brand"),
+      active: true,
+      texts: { name: names("bike-name"), summary: names("bike-summary"), description: names("bike-description") },
+    };
+    const engineCc = numberField("bike-engine-cc");
+    const seats = numberField("bike-seats");
+    const sort = numberField("bike-model-sort");
+    if (typeId !== "ebike" && engineCc !== undefined) model.engineCc = engineCc;
+    if (seats !== undefined) model.seats = seats;
+    if (field("bike-license").value !== "") model.licenseClass = field("bike-license").value;
+    if (sort !== undefined) model.sort = sort;
+
+    const draft = { mode: "new", model, vehicle: readVehicle() };
+    if (isNewClass()) {
+      const added = { id: textField("bike-class-id"), group: groupOf(typeId), names: names("bike-class-name") };
+      const classSort = numberField("bike-class-sort");
+      const extension = numberField("bike-class-extension");
+      if (classSort !== undefined) added.sort = classSort;
+      if (extension !== undefined) added.extensionPerHourJpy = extension;
+      draft.rateClass = { new: added };
+      draft.prices = readPrices();
+    } else {
+      draft.rateClass = { id: field("bike-class").value };
+    }
+    if (!bikeType().hasRow) {
+      const type = { depositJpy: numberField("bike-deposit"), names: names("bike-type-name") };
+      const typeSort = numberField("bike-type-sort");
+      if (typeSort !== undefined) type.sort = typeSort;
+      draft.type = type;
+    }
+    return draft;
+  }
+
+  function readDraft() {
+    if (bikeMode() === "new") return readNewDraft();
+    return { mode: "existing", modelId: field("bike-model").value, vehicle: readVehicle() };
   }
 
   function listItem(text, className) {
@@ -108,8 +426,8 @@
   }
 
   function showCheck(check) {
-    const fatal = document.getElementById("bike-fatal");
-    const rows = document.getElementById("bike-check");
+    const fatal = field("bike-fatal");
+    const rows = field("bike-check");
     fatal.replaceChildren(...check.fatal.map((reason) => listItem(reason, "bike-level-error")));
     rows.replaceChildren();
     for (const [tab, checks] of Object.entries(check.rows)) {
@@ -128,15 +446,40 @@
   }
 
   function showResult(saved) {
-    const written = document.getElementById("bike-written");
+    const written = field("bike-written");
     written.replaceChildren(
       ...saved.written.map((entry) => listItem(`${entry.tab} row ${entry.row}: publish_status ${entry.status || "(blank)"}`)),
     );
-    document.getElementById("bike-publish").replaceChildren(...saved.publish.messages.map((message) => listItem(message)));
+    field("bike-publish").replaceChildren(...saved.publish.messages.map((message) => listItem(message)));
   }
 
+  onNext("start", () => {
+    showMode();
+  });
+
   onNext("model", () => {
-    if (!bikeModel()) throw new Error("Choose a model.");
+    if (bikeMode() === "existing") {
+      if (!bikeModel()) throw new Error("Choose a model.");
+      return "vehicle";
+    }
+    if (textField("bike-model-id") === "") throw new Error("Enter the model id.");
+    if (!bikeType()) throw new Error("Choose the type.");
+    fillClasses();
+  });
+
+  onNext("rate-class", () => {
+    if (field("bike-class").value === "") throw new Error("Choose a rate class, or a new one.");
+    if (isNewClass() && textField("bike-class-id") === "") throw new Error("Enter the new rate class id.");
+    showPrices();
+  });
+
+  onNext("prices", () => {
+    if (isNewClass() && readPrices().length === 0) throw new Error("Enter a price for at least one package.");
+    showDeposit();
+  });
+
+  onNext("deposit", () => {
+    if (!bikeType().hasRow && numberField("bike-deposit") === undefined) throw new Error("Enter the deposit.");
   });
 
   onNext("vehicle", () => {
@@ -165,13 +508,20 @@
   });
 
   document.addEventListener("DOMContentLoaded", () => {
-    document.getElementById("bike-model").addEventListener("change", showModelInfo);
-    document.getElementById("bike-plate").addEventListener("input", showPlateUsed);
+    field("bike-model").addEventListener("change", showModelInfo);
+    field("bike-model-id").addEventListener("input", showModelUsed);
+    field("bike-type").addEventListener("change", () => {
+      showEngine();
+      fillClasses();
+    });
+    field("bike-class").addEventListener("change", showClass);
+    field("bike-plate").addEventListener("input", showPlateUsed);
+    for (const radio of document.querySelectorAll('input[name="bike-mode"]')) radio.addEventListener("change", showMode);
     callServer("addBikeOptions")
       .then(showOptions)
       .catch(showError)
       .finally(() => {
-        document.getElementById("bike-loading").hidden = true;
+        field("bike-loading").hidden = true;
       });
   });
 </script>

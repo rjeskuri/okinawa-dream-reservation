@@ -119,6 +119,11 @@ export function parseStaffQuery(payload: unknown): StaffQueryCheck {
   return { ok: true, query };
 }
 
+/** A guest's name as the Dashboard shows it: family name first, then given name, one space apart; either may be missing. */
+export function staffGuestName(familyName: string | null, givenName: string | null): string {
+  return [familyName, givenName].filter((name) => name !== null && name !== "").join(" ");
+}
+
 /** Whether `needle`, folded, is the booking's ref or is inside its guest's name in either order. */
 function matches(row: Row, needle: string): boolean {
   if (fold(row.ref) === needle) return true;
@@ -142,7 +147,7 @@ function summary(row: Row): StaffBookingSummary {
     plate: row.vehicle_plate,
     startAt: row.start_at,
     endAt: row.end_at,
-    guestName: [row.guest_family_name, row.guest_given_name].filter((name) => name !== null && name !== "").join(" "),
+    guestName: staffGuestName(row.guest_family_name, row.guest_given_name),
     guestEmail: row.guest_email,
     guestPhone: row.guest_phone,
     priceJpy: row.price_jpy,
