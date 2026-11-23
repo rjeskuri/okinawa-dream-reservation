@@ -26,7 +26,10 @@ type GuestBooking = Booking & {
   shopClose: string;
   guest: { familyName: string; givenName: string };
 };
-type GuestConfirmation = GuestBooking & { cancelUrl: string; policySummary: string };
+/** `paidAtShop` (#150): the deposit is paid at the shop and nothing online. Only `true` counts. */
+type PaidAtShop = { paidAtShop?: boolean };
+type GuestConfirmation = GuestBooking &
+  PaidAtShop & { cancelUrl: string; policySummary: string; depositJpy?: number };
 type StaffBooking = Booking & {
   modelNameJa: string;
   packageNameJa: string;
@@ -140,21 +143,23 @@ function money(say: Say, jpy: number): string {
   return say("email.amount", { amount: jpy.toLocaleString("en-US") });
 }
 
-function bookingRows(say: Say, booking: Booking, modelName: string, packageName: string): Row[] {
-  return [
+function bookingRows(say: Say, booking: Booking, modelName: string, packageName: string, paid = true): Row[] {
+  const rows: Row[] = [
     [say("email.label.ref"), booking.ref],
     [say("email.label.model"), modelName],
     [say("email.label.package"), packageName],
     [say("email.label.pickup"), jst(booking.startAt)],
     [say("email.label.return"), jst(booking.endAt)],
     [say("email.label.price"), money(say, booking.priceJpy)],
-    [say("email.label.paid"), money(say, booking.paidJpy)],
   ];
+  if (paid) rows.push([say("email.label.paid"), money(say, booking.paidJpy)]);
+  return rows;
 }
 
-function guestRows(say: Say, booking: GuestBooking): Row[] {
+/** `paid: false` leaves out the Deposit paid row, for a booking paid at the shop. */
+function guestRows(say: Say, booking: GuestBooking, paid = true): Row[] {
   return [
-    ...bookingRows(say, booking, booking.modelName, booking.packageName),
+    ...bookingRows(say, booking, booking.modelName, booking.packageName, paid),
     [say("email.label.hours"), `${booking.shopOpen}-${booking.shopClose}`],
   ];
 }
@@ -171,26 +176,38 @@ function staffRows(say: Say, booking: StaffBooking): Row[] {
 }
 
 function guestConfirmation(say: Say, booking: GuestConfirmation): Message {
+  const atShop = booking.paidAtShop === true;
+  const rows: Row[] = atShop
+    ? [
+        ...guestRows(say, booking, false),
+        [say("email.label.paidAtShop"), money(say, booking.depositJpy ?? 0)],
+        [say("email.label.policy"), say("email.confirmation.policyPaidAtShop")],
+      ]
+    : [...guestRows(say, booking), [say("email.label.policy"), booking.policySummary]];
   return {
     subject: say("email.confirmation.subject", { ref: booking.ref }),
     blocks: [
       paragraph(say("email.greeting", booking.guest)),
       paragraph(say("email.confirmation.intro")),
-      table([...guestRows(say, booking), [say("email.label.policy"), booking.policySummary]]),
+      ...(atShop ? [paragraph(say("email.confirmation.introPaidAtShop"))] : []),
+      table(rows),
       { kind: "link", label: say("email.confirmation.cancelLink"), href: booking.cancelUrl },
       paragraph(say("email.closing")),
     ],
   };
 }
 
-function guestCancellation(say: Say, booking: GuestBooking & Refund): Message {
+function guestCancellation(say: Say, booking: GuestBooking & Refund & PaidAtShop): Message {
+  const atShop = booking.paidAtShop === true;
   return {
     subject: say("email.cancellation.subject", { ref: booking.ref }),
     blocks: [
       paragraph(say("email.greeting", booking.guest)),
       paragraph(say("email.cancellation.intro")),
-      table([...guestRows(say, booking), [say("email.label.refund"), money(say, booking.refundJpy)]]),
-      paragraph(say(`email.refund.${REFUND_WORDING[booking.refundStatus]}`)),
+      atShop
+        ? table(guestRows(say, booking, false))
+        : table([...guestRows(say, booking), [say("email.label.refund"), money(say, booking.refundJpy)]]),
+      paragraph(say(atShop ? "email.cancellation.paidAtShop" : `email.refund.${REFUND_WORDING[booking.refundStatus]}`)),
       paragraph(say("email.closing")),
     ],
   };
@@ -261,7 +278,7 @@ function compose(say: Say, { template, data }: EmailPayload): Message {
     case "guest_confirmation":
       return guestConfirmation(say, data as GuestConfirmation);
     case "guest_cancellation":
-      return guestCancellation(say, data as GuestBooking & Refund);
+      return guestCancellation(say, data as GuestBooking & Refund & PaidAtShop);
     case "staff_new_booking":
       return staffNewBooking(say, data as StaffBooking);
     case "staff_cancellation":

@@ -2,4 +2,6 @@
 // It holds no assertions, and it can go once harness-red runs *.e2e.ts.
 // #103 moves /api/publish's body reader into a shared helper, and the route has to behave as before: the file stays green
 // throughout, and its tests of the 413's words and of a body that is not UTF-8 pin what a shared reader could change.
+// #135 adds a hold on a package whose Prices row went bad, which pays the last published price.
+// #136 adds a hold on a model whose Models row went bad, which the site keeps, and which assigns a bike.
 import "./publish.e2e.ts";

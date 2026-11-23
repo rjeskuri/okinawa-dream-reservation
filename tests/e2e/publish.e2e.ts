@@ -717,3 +717,122 @@ test("a fatal sheet answers ok false and writes nothing back", async () => {
     assert.deepEqual(await readCatalog(worker.db), before);
   });
 });
+
+// #135: a bad Prices row keeps the price the site has, so a guest can still book the package, and pays the kept price.
+
+/** The JST date `days` from today, worked out here from the clock and the offset, not by the code under test. */
+function jstDateIn(days: number): string {
+  return new Date(Date.now() + JST_OFFSET_MS + days * DAY_MS).toISOString().slice(0, 10);
+}
+
+/** A guest's post of the model page's booking form: the route reads model, package, date and time. */
+function book(worker: TestWorker, hold: { model: string; package: string; date: string; time: string }) {
+  return worker.fetch("/en/book", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: "http://localhost" },
+    body: new URLSearchParams(hold).toString(),
+    redirect: "manual",
+  });
+}
+
+test("a hold on a package whose Prices row went bad charges the last published price", async () => {
+  // bike-125/day-1 is published at 5,200 with an advance price of 4,800, and bike-125/day-3 at 13,800 with none. Both
+  // rows then go bad. pcx-125 rides bike-125, and a guest booking weeks ahead pays the advance price where there is one.
+  const workbook = validWorkbook();
+  setCell(workbook, "Prices", "bike-125/day-1", "advance_price_jpy", 4800);
+  const google = fakeGoogle(workbook);
+  await withWorker(google, {}, async (worker) => {
+    /** Holds pcx-125 on `packageId` from 10:00 on `date`, and checks the booking the hold made. */
+    const assertHold = async (packageId: string, date: string, priceJpy: number, version: number) => {
+      const label = `${packageId} on ${date}, catalog version ${version}`;
+      const answer = await book(worker, { model: "pcx-125", package: packageId, date, time: "10:00" });
+      await answer.text();
+      assert.equal(answer.status, 303, label);
+      const location = new URL(answer.headers.get("location") ?? "", "http://localhost/");
+      assert.match(location.pathname, /^\/en\/checkout\/[^/]+\/?$/, `${label}: went to ${location.pathname}`);
+      const id = location.pathname.split("/")[3];
+      const booking = await worker.db
+        .prepare("SELECT status, package_id, price_jpy, catalog_version FROM bookings WHERE id = ?1")
+        .bind(id)
+        .first();
+      const expected = { status: "ON_HOLD", package_id: packageId, price_jpy: priceJpy, catalog_version: version };
+      assert.deepEqual(booking, expected, label);
+    };
+
+    // pcx-125 has one active bike, so each hold has dates of its own, clear of CLOSED_DATES 30 to 32 days ahead.
+    assert.equal((await signedPost(worker)).status, 200);
+    await assertHold("day-1", jstDateIn(10), 4800, 1);
+    await assertHold("day-3", jstDateIn(50), 13_800, 1);
+
+    setCell(workbook, "Prices", "bike-125/day-1", "price_jpy", -5);
+    setCell(workbook, "Prices", "bike-125/day-3", "price_jpy", "abc");
+    const res = await signedPost(worker);
+    assert.equal(res.status, 200);
+    const report = (await res.json()) as { ok: boolean; version: number; counts: { error: number } };
+    assert.equal(report.ok, true);
+    assert.equal(report.version, 2);
+    assert.equal(report.counts.error, 2);
+
+    await assertHold("day-1", jstDateIn(20), 4800, 2);
+    await assertHold("day-3", jstDateIn(40), 13_800, 2);
+
+    const { cells } = statusWrite(google.batchUpdates[1], "Prices");
+    const cellOf = (key: string) => String(cells[workbook.Prices.findIndex((row) => `${row[0]}/${row[1]}` === key) - 1]);
+    assert.match(cellOf("bike-125/day-1"), /^error\b/i);
+    for (const kept of ["5,200", "4,800"]) assert.ok(cellOf("bike-125/day-1").includes(kept), cellOf("bike-125/day-1"));
+    assert.ok(cellOf("bike-125/day-3").includes("13,800"), cellOf("bike-125/day-3"));
+  });
+});
+
+// #136: a bad Models row keeps the model the site has, so a guest can still book it, and a bike is assigned. A good
+// Vehicles row of the kept model publishes, so its second bike, in maintenance until now, takes the second hold.
+
+test("a hold on a kept model succeeds and assigns a bike", async () => {
+  const workbook = validWorkbook();
+  const google = fakeGoogle(workbook);
+  await withWorker(google, {}, async (worker) => {
+    assert.equal((await signedPost(worker)).status, 200);
+
+    setCell(workbook, "Models", "pcx-125", "engine_cc", "big");
+    setCell(workbook, "Models", "pcx-125", "name_en", "PCX Renamed");
+    setCell(workbook, "Vehicles", "わ1003", "status", "active");
+    const res = await signedPost(worker);
+    assert.equal(res.status, 200);
+    const report = (await res.json()) as { ok: boolean; version: number; counts: { error: number } };
+    assert.equal(report.ok, true);
+    assert.equal(report.version, 2);
+    assert.equal(report.counts.error, 1, "only the pcx-125 row");
+
+    // Both of pcx-125's bikes on one date: わ1002, active all along, and わ1003, made active by its good row.
+    const date = jstDateIn(12);
+    const plates: string[] = [];
+    for (const attempt of [1, 2]) {
+      const label = `hold ${attempt} on ${date}`;
+      const answer = await book(worker, { model: "pcx-125", package: "day-1", date, time: "10:00" });
+      await answer.text();
+      assert.equal(answer.status, 303, label);
+      const location = new URL(answer.headers.get("location") ?? "", "http://localhost/");
+      assert.match(location.pathname, /^\/en\/checkout\/[^/]+\/?$/, `${label}: went to ${location.pathname}`);
+      const booking = await worker.db
+        .prepare("SELECT status, model_id, vehicle_plate, price_jpy, catalog_version FROM bookings WHERE id = ?1")
+        .bind(location.pathname.split("/")[3])
+        .first<{ status: string; model_id: string; vehicle_plate: string; price_jpy: number; catalog_version: number }>();
+      assert.ok(booking, label);
+      const { vehicle_plate, ...rest } = booking;
+      assert.deepEqual(rest, { status: "ON_HOLD", model_id: "pcx-125", price_jpy: 5200, catalog_version: 2 }, label);
+      plates.push(vehicle_plate);
+    }
+    assert.deepEqual(plates.sort(), ["わ1002", "わ1003"]);
+
+    // The site keeps the stored model, its name included.
+    const stored = await readCatalog(worker.db);
+    const pcx = stored?.models.find(({ id }) => id === "pcx-125");
+    assert.equal(pcx?.active, true);
+    assert.equal(pcx?.texts.en.name, "PCX");
+
+    const { cells } = statusWrite(google.batchUpdates[1], "Models");
+    const cell = String(cells[workbook.Models.findIndex((row) => row[0] === "pcx-125") - 1]);
+    assert.match(cell, /^error\b/i);
+    assert.match(cell, /\blast published\b/i, cell);
+  });
+});

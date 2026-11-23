@@ -15,8 +15,9 @@ permissions:
 
 jobs:
   verify:
+    # GitHub's runners while the repository is public (free); back to [self-hosted, linux, harness-mac] when private (#179).
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

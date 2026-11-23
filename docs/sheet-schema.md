@@ -68,6 +68,14 @@ rewrites it on each Publish and ignores whatever is in it, so do not type there.
 
 A row can have several messages.
 
+A Prices, Models or Vehicles row with an error of its own is the exception: the site keeps what it already has for that
+row, so the package stays bookable and the model or bike stays on the site. The row is still an error, and its message
+ends with what the site keeps, for example `error: price_jpy -5 must be a whole number of at least 1; the site keeps the
+last published price 4,000` or `error: engine_cc "big" must be a whole number of at least 1; the site keeps the last
+published model pcx-125`. A row with nothing published to keep is skipped, and its message says so: the package is not
+bookable, or the model or vehicle is not on the site. See [Prices](#prices), [Models](#models) and
+[Vehicles](#vehicles).
+
 A bad row also skips the rows that depend on it, and each of those gets its own error. Fix the first row and the others
 clear on the next Publish.
 
@@ -76,7 +84,7 @@ clear on the next Publish.
 | Types | The models of that type, and their vehicles. |
 | RateClasses | The models of that class, their vehicles, and the prices of that class. |
 | Packages | The prices of that package. |
-| Models | The vehicles of that model. |
+| Models | The vehicles of that model, unless the site keeps the model: then they publish as usual. |
 
 Some problems stop the whole Publish. Nothing changes on the site, nothing is written to the sheet, and the reasons
 appear in the alert the Publish menu shows:
@@ -173,6 +181,17 @@ is a zero or text. The price is fixed when the guest's hold is made, so a publis
 
 Example: `ebike`, `day-1`, `4500`, `4000`: ¥4,000 when booked by the day before, ¥4,500 on the day.
 
+A row with an error in `price_jpy` or `advance_price_jpy`, a blank `price_jpy` too, keeps the last published price: the
+site goes on using the `price_jpy` and `advance_price_jpy` it already has for that rate class and package, both as they
+were, never mixed with the row's new values. The row stays an error until it is fixed, and its message names what the
+site uses, for example `the site keeps the last published price 5,200 and advance price 4,800`. The next Publish with a
+good row replaces the kept price with the sheet's. A row that never published has no price to keep: it is skipped and
+its message says the package is not bookable for that rate class.
+
+The rule covers only a row's own errors. A row whose rate class or package is skipped loses its price, as the table
+under [publish_status](#publish_status) says. Deleting a row, or clearing all its cells, removes its price. A repeat of
+an earlier row's rate class and package is an error that changes nothing: the first row decides the price.
+
 ## Models
 
 | Column | Required | Accepts |
@@ -206,11 +225,24 @@ An override on a scooter or motorcycle replaces the default. `moped` is allowed 
 On a car the class stays `car` and on an e-bike `none`: another of the six classes gets a warning and is ignored.
 `none` on any type but `ebike` is an error, a car included, and so is anything outside the six on any type.
 
-An e-bike leaves `engine_cc` blank. A number there, even a valid one, is an error and the model is skipped with its
-vehicles: staff most likely picked the wrong `type_id`.
+An e-bike leaves `engine_cc` blank. A number there, even a valid one, is an error and the row is skipped, as the next
+paragraphs say: staff most likely picked the wrong `type_id`.
 
 Example: `cub-110`, `motorcycle`, `bike-125`, `Honda`, `1`, `110`, `moped`, `3`, `TRUE`, then the texts, then
 `cub-1.jpg`.
+
+A row with an error of its own keeps the last published model, when the site has that `model_id` as active and the
+model's published type and rate class both still publish. The site goes on showing the model exactly as it was, every
+column, its texts and photos too, never mixed with the row's new values. Its vehicles are not affected, and its good
+Vehicles rows publish as usual. The row stays an error until it is fixed, and its message adds `the site keeps the last
+published model` and the `model_id`. The next Publish with a good row replaces the kept model with the sheet's. A row
+the site does not have as an active model, a new one or one set to FALSE earlier, keeps nothing: it is skipped, its
+vehicles with it, and its message says the model is not on the site.
+
+The rule covers only a row's own errors. A `type_id` or `rate_class_id` with no valid row in Types or RateClasses, a
+typo there too, skips the model and its vehicles as the table under [publish_status](#publish_status) says, and so does
+a published type or rate class that this Publish skips. Deleting a row, or clearing all its cells, takes the model off
+the site. A repeat of an earlier row's `model_id` is an error that changes nothing: the first row decides the model.
 
 ## Vehicles
 
@@ -224,6 +256,19 @@ Example: `cub-110`, `motorcycle`, `bike-125`, `Honda`, `1`, `110`, `moped`, `3`,
 | `notes` | No | Text. Not published. |
 
 Example: `わ1234`, `pcx-125`, `active`, `8000`, `30`, `Scratch on the left mirror`.
+
+A row with an error of its own keeps the last published vehicle, when the site has that plate as not retired and the
+vehicle's published model publishes or is kept in this Publish. The site goes on using the vehicle exactly as it was,
+its model, status and counters included, never mixed with the row's new values, so its bookings stand. This is the
+tradeoff the owner accepted: a typo in a `status` meant to retire a bike leaves it bookable until the row is fixed. The
+row stays an error, and its message adds `the site keeps the last published vehicle` and the plate. The next Publish
+with a good row replaces the kept vehicle with the sheet's. A plate the site does not have, or has as retired, keeps
+nothing: the row is skipped and its message says the vehicle is not on the site.
+
+The rule covers only a row's own errors, on a `model_id` that publishes or whose Models row has an error of its own. A
+`model_id` with no row in Models, a typo too, or whose model is skipped with its type or rate class, skips the vehicle,
+and the site retires the one it has. So does a published model that this Publish neither publishes nor keeps. Deleting a row, or clearing all its cells, retires the vehicle. A repeat of an earlier row's plate is
+an error that changes nothing: the first row decides the vehicle.
 
 ## Options
 
@@ -340,7 +385,7 @@ those rows. Each move is queued for the Worker's own update of the tab, which wr
 | Column | Holds |
 | --- | --- |
 | `booking_ref`, `booking_id` | The booking's reference and internal id |
-| `status`, `source` | The booking's status, and `web` or `block` |
+| `status`, `source` | The booking's status, and `web`, `block` or `staff` |
 | `model_id`, `plate` | The model and the assigned vehicle |
 | `override_plate` | **Staff:** the plate to move the booking to |
 | `override_status` | The result of the last override |

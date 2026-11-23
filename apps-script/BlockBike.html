@@ -1,0 +1,184 @@
+<style>
+  .block-hint { margin: 4px 0 0; color: #5f6368; }
+  .block-review { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+  .block-review dt { font-weight: bold; }
+  .block-review dd { margin: 0; white-space: pre-wrap; }
+  .block-result { margin: 0 0 12px; padding: 8px 12px; border-radius: 4px; white-space: pre-wrap; }
+  .block-result.ok { border: 1px solid #188038; background: #e6f4ea; }
+  .block-result.error { border: 1px solid #d93025; background: #fce8e6; }
+  .block-result.pending { border: 1px solid #f9ab00; background: #fef7e0; }
+</style>
+<h1>Block a bike</h1>
+
+<section data-step="bike">
+  <h2>1. Which bike</h2>
+  <label for="block-model">Model</label>
+  <select id="block-model"></select>
+  <label for="block-plate">Plate</label>
+  <select id="block-plate"></select>
+  <p class="block-hint">Pick a plate to block that bike, or leave it on "Any bike" to take one bike of the model.</p>
+</section>
+
+<section data-step="when" hidden>
+  <h2>2. When, in Japan time</h2>
+  <label for="block-start">Start</label>
+  <input id="block-start" type="datetime-local" step="60">
+  <label for="block-end">End</label>
+  <input id="block-end" type="datetime-local" step="60">
+</section>
+
+<section data-step="reason" hidden>
+  <h2>3. Reason</h2>
+  <label for="block-reason">Reason, kept in the note column</label>
+  <textarea id="block-reason" rows="4" placeholder="Brake pads, oil change, inspection…"></textarea>
+</section>
+
+<section data-step="review" data-next="Save and sync" hidden>
+  <h2>4. Check and save</h2>
+  <dl id="block-review" class="block-review"></dl>
+  <p class="block-hint">Save adds one row to the Blocks tab and syncs it with the website.</p>
+</section>
+
+<section data-step="result" hidden>
+  <h2>Result</h2>
+  <p id="block-result" class="block-result"></p>
+  <p class="block-hint">To cancel a block, delete its row on the Blocks tab and press Publish.</p>
+</section>
+
+<script>
+  // Block a bike: model or plate, start and end, reason, review, then the result of the save and sync. Text from the
+  // catalog and the server goes on the page with textContent only.
+
+  let blockModels = [];
+
+  function blockOption(value, text) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    return option;
+  }
+
+  function blockModelName(model) {
+    const name = model.nameEn || model.nameJa || model.id;
+    return `${name} (${model.id})${model.active ? "" : ", not on the site"}`;
+  }
+
+  function blockPlateText(plate) {
+    return plate.status === "active" ? plate.plate : `${plate.plate} (${plate.status})`;
+  }
+
+  function fillModels() {
+    const select = document.getElementById("block-model");
+    select.replaceChildren(blockOption("", "Choose a model, or a plate below"));
+    for (const model of blockModels) select.append(blockOption(model.id, blockModelName(model)));
+  }
+
+  /** The plates of the chosen model, or of every model when none is chosen yet. */
+  function fillPlates() {
+    const modelId = document.getElementById("block-model").value;
+    const select = document.getElementById("block-plate");
+    const kept = select.value;
+    select.replaceChildren(blockOption("", "Any bike of the model"));
+    for (const model of blockModels) {
+      if (modelId !== "" && model.id !== modelId) continue;
+      if (model.plates.length === 0) continue;
+      const group = document.createElement("optgroup");
+      group.label = blockModelName(model);
+      for (const plate of model.plates) group.append(blockOption(plate.plate, blockPlateText(plate)));
+      select.append(group);
+    }
+    select.value = Array.from(select.options).some((option) => option.value === kept) ? kept : "";
+  }
+
+  /** A plate decides the model, so picking one sets the model to its own. */
+  function plateChosen() {
+    const plate = document.getElementById("block-plate").value;
+    const owner = blockModels.find((model) => model.plates.some((each) => each.plate === plate));
+    if (plate === "" || owner === undefined) return;
+    document.getElementById("block-model").value = owner.id;
+    fillPlates();
+    document.getElementById("block-plate").value = plate;
+  }
+
+  /** datetime-local answers YYYY-MM-DDTHH:mm, the server takes YYYY-MM-DD HH:mm. */
+  function blockDateTime(id) {
+    return document.getElementById(id).value.replace("T", " ").slice(0, 16);
+  }
+
+  function blockInput() {
+    return {
+      modelId: document.getElementById("block-model").value,
+      plate: document.getElementById("block-plate").value,
+      start: blockDateTime("block-start"),
+      end: blockDateTime("block-end"),
+      reason: document.getElementById("block-reason").value,
+    };
+  }
+
+  function showReview() {
+    const input = blockInput();
+    const list = document.getElementById("block-review");
+    list.replaceChildren();
+    const rows = [
+      ["Model", input.modelId],
+      ["Plate", input.plate || "Any bike of the model"],
+      ["Start", input.start],
+      ["End", input.end],
+      ["Reason", input.reason.trim() || "(none)"],
+    ];
+    for (const [term, value] of rows) {
+      const dt = document.createElement("dt");
+      dt.textContent = term;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      list.append(dt, dd);
+    }
+  }
+
+  function showResult(answer) {
+    const box = document.getElementById("block-result");
+    box.textContent = answer.message;
+    box.className = "block-result";
+    box.classList.add(answer.synced === false ? "pending" : answer.level === "error" ? "error" : "ok");
+  }
+
+  onNext("bike", () => {
+    if (document.getElementById("block-model").value === "" && document.getElementById("block-plate").value === "") {
+      throw new Error("Choose a model or a plate.");
+    }
+    return true;
+  });
+
+  onNext("when", () => {
+    const { start, end } = blockInput();
+    if (start === "" || end === "") throw new Error("Set both the start and the end.");
+    if (end <= start) throw new Error("The end must be after the start.");
+    return true;
+  });
+
+  onNext("reason", () => {
+    showReview();
+    return true;
+  });
+
+  onNext("review", () =>
+    callServer("blockPanelSave", blockInput()).then((answer) => {
+      if (!answer || answer.ok !== true) throw new Error((answer && answer.message) || "Nothing was saved.");
+      showResult(answer);
+      return "result";
+    }),
+  );
+
+  document.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("block-model").addEventListener("change", fillPlates);
+    document.getElementById("block-plate").addEventListener("change", plateChosen);
+    callServer("blockPanelOptions")
+      .then((answer) => {
+        if (!answer || answer.ok !== true) throw new Error((answer && answer.message) || "The bikes could not be read.");
+        blockModels = answer.models;
+        fillModels();
+        fillPlates();
+      })
+      .catch(showError);
+  });
+</script>

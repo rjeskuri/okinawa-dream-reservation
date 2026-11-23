@@ -1,10 +1,15 @@
 // One Publish: reads the catalog tabs, checks them, replaces the catalog in D1 and writes each row's status back to the
-// sheet, in that order. A bad row is left out and reported, and a fatal sheet stops before anything changes. It makes
-// one batchGet, one D1 batch and one batchUpdate, because this runs with 10 ms of CPU. docs/sheet-schema.md is the
-// staff's view of the statuses. Nothing here reads `env`.
-import { replaceCatalog, type AffectedBooking } from "../db/catalog-store.ts";
+// sheet, in that order. A bad row is left out and reported, and a fatal sheet stops before anything changes, but a bad
+// Prices, Models or Vehicles row keeps what the site has for it (#135, #136). It makes one batchGet, one D1 batch and
+// one batchUpdate, plus a D1 read when such a row is bad and a second check of the sheet when a model is kept, because
+// this runs with 10 ms of CPU. docs/sheet-schema.md is the staff's view of the statuses. Nothing here reads `env`.
+import { readModels, readPrices, readVehicles, replaceCatalog, type AffectedBooking } from "../db/catalog-store.ts";
 import type { SheetsClient } from "../google/sheets.ts";
-import { CATALOG_TABS, headerKey, STATUS, validateCatalog, type RowStatus } from "./sheet-schema.ts";
+import type { Catalog, Model, Price, Vehicle } from "../types.ts";
+import {
+  CATALOG_TABS, headerKey, STATUS, validateCatalog, type RowStatus, type SkippedModelKey, type SkippedPriceKey,
+  type SkippedVehicleKey,
+} from "./sheet-schema.ts";
 
 type PublishDeps = { db: D1Database; sheets: SheetsClient; now: number };
 
@@ -89,6 +94,58 @@ function statusWrites(workbook: Record<string, unknown[][]>, rows: RowResult[]) 
   });
 }
 
+const yen = (jpy: number): string => jpy.toLocaleString("en-US");
+
+/**
+ * What the site does for each Prices row skipped for an error of its own, by sheet row: it keeps the stored price and
+ * advance price unchanged (#135), or, with none stored, the package cannot be booked on that rate class.
+ */
+function keptPriceNotes(skipped: SkippedPriceKey[], kept: Price[]): Map<number, string> {
+  const keptByKey = new Map(kept.map((price) => [`${price.rateClassId}/${price.packageId}`, price]));
+  return new Map(
+    skipped.map(({ rateClassId, packageId, row }) => {
+      const price = keptByKey.get(`${rateClassId}/${packageId}`);
+      if (price === undefined) return [row, "there is no published price to keep, so this package is not bookable"];
+      const advance = price.advancePriceJpy === null ? "" : ` and advance price ${yen(price.advancePriceJpy)}`;
+      return [row, `the site keeps the last published price ${yen(price.priceJpy)}${advance}`];
+    }),
+  );
+}
+
+/**
+ * The stored models kept for Models rows skipped for an error of their own (#136): each one the site has as active,
+ * whose stored type and rate class both publish, so the kept row needs nothing that this publish leaves out.
+ */
+function keptModelsOf(stored: Model[], catalog: Catalog): Model[] {
+  const typeIds = new Set(catalog.vehicleTypes.map(({ id }) => id));
+  const rateClassIds = new Set(catalog.rateClasses.map(({ id }) => id));
+  return stored.filter((model) => model.active && typeIds.has(model.typeId) && rateClassIds.has(model.rateClassId));
+}
+
+/** The stored vehicles kept for Vehicles rows skipped for an error of their own: not retired, on a published model. */
+function keptVehiclesOf(stored: Vehicle[], modelIds: Set<string>): Vehicle[] {
+  return stored.filter(({ status, modelId }) => status !== "retired" && modelIds.has(modelId));
+}
+
+/** What the site does for each Models and Vehicles row skipped for an error of its own, by `Tab row`. */
+function keptRowNotes(
+  models: { skipped: SkippedModelKey[]; kept: Model[] },
+  vehicles: { skipped: SkippedVehicleKey[]; kept: Vehicle[] },
+): Map<string, string> {
+  const keptModels = new Set(models.kept.map(({ id }) => id));
+  const keptPlates = new Set(vehicles.kept.map(({ plate }) => plate));
+  const note = (what: string, key: string, kept: boolean): string =>
+    kept ? `the site keeps the last published ${what} ${key}` : `${what} ${key} is not on the site`;
+  return new Map<string, string>([
+    ...models.skipped.map(({ modelId, row }): [string, string] => [
+      `Models ${row}`, note("model", modelId, keptModels.has(modelId)),
+    ]),
+    ...vehicles.skipped.map(({ plate, row }): [string, string] => [
+      `Vehicles ${row}`, note("vehicle", plate, keptPlates.has(plate)),
+    ]),
+  ]);
+}
+
 /**
  * Rejects with a PublishError on a failure, because a report answers 200. The writes are built before the commit, so
  * only the write itself can fail after `store`, and a failure anywhere else leaves the catalog alone.
@@ -96,14 +153,48 @@ function statusWrites(workbook: Record<string, unknown[][]>, rows: RowResult[]) 
 export async function publishCatalog({ db, sheets, now }: PublishDeps): Promise<PublishReport> {
   const workbook = await step("read", () => sheets.batchGet([...CATALOG_TABS]));
 
-  const { catalog, statuses, fatal } = validateCatalog(workbook, now);
-  if (catalog === null || fatal.length > 0) {
-    return { ok: false, counts: { ok: 0, warning: 0, error: 0 }, fatal, affectedBookings: [] };
+  const first = validateCatalog(workbook, now);
+  if (first.catalog === null || first.fatal.length > 0) {
+    return { ok: false, counts: { ok: 0, warning: 0, error: 0 }, fatal: first.fatal, affectedBookings: [] };
   }
-  const rows = rowResults(statuses);
+  const { skippedPriceKeys, skippedModelKeys, skippedVehicleKeys } = first;
+  const modelIds = skippedModelKeys.map(({ modelId }) => modelId);
+  const plates = skippedVehicleKeys.map(({ plate }) => plate);
+  // A D1 failure in these reads has changed nothing, as at `store`.
+  const [keptPrices, storedModels, storedVehicles] = await Promise.all([
+    skippedPriceKeys.length === 0 ? [] : step("store", () => readPrices(db, skippedPriceKeys)),
+    modelIds.length === 0 ? [] : step("store", () => readModels(db, modelIds)),
+    plates.length === 0 ? [] : step("store", () => readVehicles(db, plates)),
+  ]);
+  const keptModels = keptModelsOf(storedModels, first.catalog);
+  const keptModelIds = new Set(keptModels.map(({ id }) => id));
+  // A kept model's good Vehicles rows publish as they would on a published model, so the sheet is checked again knowing
+  // it. Only those rows read differently: the skipped keys stay the same, and so the catalog stays not null.
+  const second = keptModelIds.size === 0 ? first : validateCatalog(workbook, now, keptModelIds);
+  const catalog = second.catalog ?? first.catalog;
+  const { statuses } = second;
+
+  const publishedModelIds = new Set([...catalog.models.map(({ id }) => id), ...keptModelIds]);
+  const keptVehicles = keptVehiclesOf(storedVehicles, publishedModelIds);
+
+  const priceNotes = keptPriceNotes(skippedPriceKeys, keptPrices);
+  const rowNotes = keptRowNotes(
+    { skipped: skippedModelKeys, kept: keptModels },
+    { skipped: skippedVehicleKeys, kept: keptVehicles },
+  );
+  const rows = rowResults(statuses).map((row) => {
+    const note = row.tab === "Prices" ? priceNotes.get(row.row) : rowNotes.get(`${row.tab} ${row.row}`);
+    return note === undefined ? row : { ...row, cell: `${row.cell}; ${note}` };
+  });
   const writes = statusWrites(workbook, rows);
 
-  const stored = await step("store", () => replaceCatalog(db, catalog, { now, source: "sheet" }));
+  const published = {
+    ...catalog,
+    models: [...catalog.models, ...keptModels],
+    vehicles: [...catalog.vehicles, ...keptVehicles],
+    prices: [...catalog.prices, ...keptPrices],
+  };
+  const stored = await step("store", () => replaceCatalog(db, published, { now, source: "sheet" }));
   await step("write-back", () => sheets.batchUpdate(writes));
 
   const { version, affectedBookings } = stored;

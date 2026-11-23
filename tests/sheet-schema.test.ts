@@ -2150,3 +2150,252 @@ test("advance_price_jpy must be whole yen no higher than price_jpy", async (t) =
     });
   }
 });
+
+// #135: validateCatalog lists the keys of the Prices rows skipped for an error of their own, on a rate class and a package
+// that both publish, and owned by that row, so the publish keeps their stored prices. A row skipped because its rate class
+// or package is, or a repeat of a key an earlier row owns, is not listed: the pattern of validateBlocks' skippedBlockIds.
+
+type PriceKey = { rateClassId: string; packageId: string };
+
+/** "class/package" of each listed key, sorted. The cast reaches the field on the types of today and of after the change. */
+function skippedPriceKeys(workbook: Workbook): string[] {
+  const result = validateCatalog(workbook, CATALOG_NOW) as ReturnType<typeof validateCatalog> & {
+    skippedPriceKeys?: PriceKey[];
+  };
+  assert.deepEqual(result.fatal, []);
+  assert.ok(Array.isArray(result.skippedPriceKeys), "validateCatalog returns skippedPriceKeys");
+  return result.skippedPriceKeys.map(({ rateClassId, packageId }) => `${rateClassId}/${packageId}`).sort();
+}
+
+test("validateCatalog lists the skipped price keys", async (t) => {
+  await t.test("a clean sheet lists none", () => {
+    assert.deepEqual(skippedPriceKeys(validWorkbook()), []);
+  });
+
+  // [row, column, bad value]: an error in the row's own price cells, in rows of every rate class and package.
+  const OWN: [key: string, column: string, value: unknown][] = [
+    ["scooter-50/hours-6", "price_jpy", -5],
+    ["scooter-50/day-3", "price_jpy", "abc"],
+    ["bike-125/day-1", "price_jpy", 0],
+    ["bike-125/hours-6", "price_jpy", ""],
+    ["bike-400/day-3", "advance_price_jpy", 30_000],
+    ["car-k/day-1", "advance_price_jpy", "free"],
+    ["car-k/day-3", "advance_price_jpy", 0],
+  ];
+  for (const [key, column, value] of OWN) {
+    await t.test(`${key}: ${column} ${JSON.stringify(value)} lists its key`, () => {
+      const workbook = validWorkbook();
+      setCell(workbook, "Prices", key, column, value);
+      assert.deepEqual(skippedPriceKeys(workbook), [key]);
+    });
+  }
+
+  await t.test("every bad row in one sheet lists its own key, once", () => {
+    const workbook = validWorkbook();
+    for (const [key, column, value] of OWN) setCell(workbook, "Prices", key, column, value);
+    // A row with two errors of its own is one key.
+    setCell(workbook, "Prices", "bike-400/day-3", "price_jpy", "lots");
+    assert.deepEqual(skippedPriceKeys(workbook), OWN.map(([key]) => key).sort());
+  });
+
+  await t.test("a reference to no kept rate class or package lists nothing", () => {
+    const cases: Record<string, unknown>[] = [
+      { rate_class_id: "bike-999", package_id: "day-1", price_jpy: -5 },
+      { rate_class_id: "bike-125", package_id: "week-2", price_jpy: -5 },
+      { rate_class_id: "", package_id: "day-1", price_jpy: -5 },
+      { rate_class_id: "car-k", package_id: "", price_jpy: "abc" },
+    ];
+    for (const cells of cases) {
+      const workbook = validWorkbook();
+      appendRow(workbook, "Prices", cells);
+      assert.deepEqual(skippedPriceKeys(workbook), [], JSON.stringify(cells));
+    }
+  });
+
+  await t.test("a skipped rate class or package takes its rows' keys with it", () => {
+    const rateClass = validWorkbook();
+    setCell(rateClass, "RateClasses", "bike-400", "group", "boat");
+    setCell(rateClass, "Prices", "bike-400/day-1", "price_jpy", -5);
+    setCell(rateClass, "Prices", "bike-125/day-1", "price_jpy", -5);
+    assert.deepEqual(skippedPriceKeys(rateClass), ["bike-125/day-1"]);
+
+    const pack = validWorkbook();
+    setCell(pack, "Packages", "day-3", "days", "three");
+    setCell(pack, "Prices", "bike-125/day-3", "price_jpy", -5);
+    setCell(pack, "Prices", "car-k/day-1", "advance_price_jpy", 9000);
+    assert.deepEqual(skippedPriceKeys(pack), ["car-k/day-1"]);
+  });
+
+  await t.test("the first row of a key owns it: a repeat lists nothing of its own", () => {
+    // [the first row's price_jpy, the repeat's, what is listed]
+    const cases: [first: unknown, repeat: unknown, listed: string[]][] = [
+      [5200, -5, []],
+      [5200, 9999, []],
+      [-5, 9999, ["bike-125/day-1"]],
+      [-5, "abc", ["bike-125/day-1"]],
+    ];
+    for (const [first, repeat, listed] of cases) {
+      const workbook = validWorkbook();
+      setCell(workbook, "Prices", "bike-125/day-1", "price_jpy", first);
+      appendRow(workbook, "Prices", { rate_class_id: "bike-125", package_id: "day-1", price_jpy: repeat });
+      assert.deepEqual(skippedPriceKeys(workbook), listed, `${JSON.stringify(first)} then ${JSON.stringify(repeat)}`);
+    }
+  });
+
+  await t.test("a listed row is still an error and still left out of the catalog", () => {
+    const workbook = validWorkbook();
+    const row = sheetRow(workbook, "Prices", "car-k/day-3");
+    setCell(workbook, "Prices", "car-k/day-3", "price_jpy", -5);
+    const { catalog, statuses } = validateCatalog(workbook, CATALOG_NOW);
+    assert.deepEqual(skippedPriceKeys(workbook), ["car-k/day-3"]);
+    assertError(statuses, "Prices", row, ["price_jpy"]);
+    assert.deepEqual(canonical(catalog), canonical(withoutDropped(expectedCatalog(), { prices: ["car-k/day-3"] })));
+  });
+});
+
+// #136: validateCatalog lists the Models and Vehicles rows skipped for an error of their own and owned by that row, with
+// their sheet rows, as it lists Prices rows for #135, so the publish can keep the stored model or vehicle. A row skipped
+// only because a Types or RateClasses row (for a model) or its Models row (for a vehicle) is, or a repeat of an id an
+// earlier row owns, is not listed. Whether the site has anything to keep is the publish's to decide, so a listed row is
+// still an error and still left out of the catalog validateCatalog returns.
+
+type ModelKey = { modelId: string; row: number };
+type VehicleKey = { plate: string; row: number };
+
+/** "id@row" of each listed model and vehicle, sorted. The cast reaches the fields on the types of today and of after. */
+function skippedRowKeys(workbook: Workbook): { models: string[]; vehicles: string[] } {
+  const result = validateCatalog(workbook, CATALOG_NOW) as ReturnType<typeof validateCatalog> & {
+    skippedModelKeys?: ModelKey[];
+    skippedVehicleKeys?: VehicleKey[];
+  };
+  assert.deepEqual(result.fatal, []);
+  assert.ok(Array.isArray(result.skippedModelKeys), "validateCatalog returns skippedModelKeys");
+  assert.ok(Array.isArray(result.skippedVehicleKeys), "validateCatalog returns skippedVehicleKeys");
+  return {
+    models: result.skippedModelKeys.map(({ modelId, row }) => `${modelId}@${row}`).sort(),
+    vehicles: result.skippedVehicleKeys.map(({ plate, row }) => `${plate}@${row}`).sort(),
+  };
+}
+
+/** "key@row" of each key in `tab` of `workbook`, sorted, as skippedRowKeys spells them. */
+function rowKeys(workbook: Workbook, tab: string, keys: string[]): string[] {
+  return keys.map((key) => `${key}@${sheetRow(workbook, tab, key)}`).sort();
+}
+
+test("validateCatalog lists the skipped model and vehicle keys", async (t) => {
+  await t.test("a clean sheet lists none", () => {
+    assert.deepEqual(skippedRowKeys(validWorkbook()), { models: [], vehicles: [] });
+  });
+
+  // [model, column, bad value]: an error in the row's own cells, one in each model, inactive cub-110 included.
+  const OWN_MODELS: [id: string, column: string, value: unknown][] = [
+    ["today-50", "active", "maybe"],
+    ["pcx-125", "engine_cc", "big"],
+    ["cub-110", "brand", ""],
+    ["rebel-250", "sort", -1],
+    ["nbox-660", "license_class", "none"],
+  ];
+  for (const [id, column, value] of OWN_MODELS) {
+    await t.test(`${id}: ${column} ${JSON.stringify(value)} lists its key, and none of its vehicles'`, () => {
+      const workbook = validWorkbook();
+      setCell(workbook, "Models", id, column, value);
+      assert.deepEqual(skippedRowKeys(workbook), { models: rowKeys(workbook, "Models", [id]), vehicles: [] });
+    });
+  }
+
+  // [plate, column, bad value]: an error in the row's own cells, on bikes of four models, retired わ1004 included.
+  const OWN_VEHICLES: [plate: string, column: string, value: unknown][] = [
+    ["わ1001", "status", "lost"],
+    ["わ1003", "odometer_km", "far"],
+    ["わ1004", "base_usage_days", -3],
+    ["わ1005", "odometer_km", -1],
+    ["わ1006", "status", "retire"],
+  ];
+  for (const [plate, column, value] of OWN_VEHICLES) {
+    await t.test(`${plate}: ${column} ${JSON.stringify(value)} lists its key`, () => {
+      const workbook = validWorkbook();
+      setCell(workbook, "Vehicles", plate, column, value);
+      assert.deepEqual(skippedRowKeys(workbook), { models: [], vehicles: rowKeys(workbook, "Vehicles", [plate]) });
+    });
+  }
+
+  await t.test("every bad row in one sheet lists its own key, once", () => {
+    const workbook = validWorkbook();
+    const models = ["today-50", "rebel-250", "nbox-660"];
+    const vehicles = ["わ1001", "わ1004", "わ1006"];
+    for (const [id, column, value] of OWN_MODELS) if (models.includes(id)) setCell(workbook, "Models", id, column, value);
+    for (const [plate, column, value] of OWN_VEHICLES) {
+      if (vehicles.includes(plate)) setCell(workbook, "Vehicles", plate, column, value);
+    }
+    // A row with two errors of its own is one key.
+    setCell(workbook, "Models", "nbox-660", "brand", "");
+    setCell(workbook, "Vehicles", "わ1006", "odometer_km", "far");
+    assert.deepEqual(skippedRowKeys(workbook), {
+      models: rowKeys(workbook, "Models", models),
+      vehicles: rowKeys(workbook, "Vehicles", vehicles),
+    });
+  });
+
+  await t.test("a skipped Types, RateClasses or Models row takes its rows' keys with it", () => {
+    // rebel-250 rides bike-400, and わ1005 is its bike; neither row has an error of its own. nbox-660 and わ1002 do.
+    const rateClass = validWorkbook();
+    setCell(rateClass, "RateClasses", "bike-400", "group", "boat");
+    setCell(rateClass, "Models", "nbox-660", "brand", "");
+    setCell(rateClass, "Vehicles", "わ1002", "status", "lost");
+    assert.deepEqual(skippedRowKeys(rateClass), {
+      models: rowKeys(rateClass, "Models", ["nbox-660"]),
+      vehicles: rowKeys(rateClass, "Vehicles", ["わ1002"]),
+    });
+
+    // motorcycle takes cub-110 and rebel-250, and their bikes わ1004 and わ1005, none with an error of its own.
+    const type = validWorkbook();
+    setCell(type, "Types", "motorcycle", "deposit_jpy", "abc");
+    setCell(type, "Vehicles", "わ1006", "status", "retire");
+    assert.deepEqual(skippedRowKeys(type), { models: [], vehicles: rowKeys(type, "Vehicles", ["わ1006"]) });
+
+    // A bad pcx-125 is listed, and its good bikes are not.
+    const model = validWorkbook();
+    setCell(model, "Models", "pcx-125", "engine_cc", "big");
+    assert.deepEqual(skippedRowKeys(model), { models: rowKeys(model, "Models", ["pcx-125"]), vehicles: [] });
+  });
+
+  await t.test("the first row of an id owns it: a repeat lists nothing of its own", () => {
+    // [the first row's brand / odometer, the repeat's, whether the first row is listed]
+    const cases: [first: unknown, repeat: unknown, listed: boolean][] = [
+      ["good", "bad", false],
+      ["good", "good", false],
+      ["bad", "good", true],
+      ["bad", "bad", true],
+    ];
+    const brand = { good: "Yamaha", bad: "" };
+    const odometer = { good: 9100, bad: "far" };
+    for (const [first, repeat, listed] of cases) {
+      const [f, r] = [first as "good" | "bad", repeat as "good" | "bad"];
+      const workbook = validWorkbook();
+      appendCopy(workbook, "Models", "pcx-125", { brand: brand[r] });
+      appendCopy(workbook, "Vehicles", "わ1002", { odometer_km: odometer[r] });
+      setCell(workbook, "Models", "pcx-125", "brand", brand[f]);
+      setCell(workbook, "Vehicles", "わ1002", "odometer_km", odometer[f]);
+      const expected = listed
+        ? { models: rowKeys(workbook, "Models", ["pcx-125"]), vehicles: rowKeys(workbook, "Vehicles", ["わ1002"]) }
+        : { models: [], vehicles: [] };
+      assert.deepEqual(skippedRowKeys(workbook), expected, `${f} then ${r}`);
+    }
+  });
+
+  await t.test("a listed row is still an error and still left out of the catalog", () => {
+    const workbook = validWorkbook();
+    setCell(workbook, "Models", "rebel-250", "engine_cc", "big");
+    setCell(workbook, "Vehicles", "わ1006", "status", "lost");
+    const { catalog, statuses } = validateCatalog(workbook, CATALOG_NOW);
+    assert.deepEqual(skippedRowKeys(workbook), {
+      models: rowKeys(workbook, "Models", ["rebel-250"]),
+      vehicles: rowKeys(workbook, "Vehicles", ["わ1006"]),
+    });
+    assertError(statuses, "Models", sheetRow(workbook, "Models", "rebel-250"), ["engine_cc"]);
+    assertError(statuses, "Vehicles", sheetRow(workbook, "Vehicles", "わ1006"), ["status"]);
+    const stored = canonical(catalog);
+    assert.ok(!stored.models.some(({ id }) => id === "rebel-250"), "rebel-250 is left out");
+    assert.ok(!stored.vehicles.some(({ plate }) => plate === "わ1006"), "わ1006 is left out");
+  });
+});
