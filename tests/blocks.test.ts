@@ -235,6 +235,7 @@ function assertStoredAs(row: BookingRow, block: ValidBlock, plate: string, at: n
     created_at: at,
     updated_at: at,
     cancelled_at: null,
+    refund_due_jpy: null,
   });
   assert.ok(typeof content_hash === "string" && content_hash.length > 0, `content_hash ${content_hash}`);
 }
