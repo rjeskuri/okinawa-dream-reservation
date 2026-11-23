@@ -16,6 +16,12 @@ export const cancel: Dictionary = {
     ko: "픽업일까지 남은 일수",
   },
   "cancel.label.percent": { ja: "返金率", en: "Refund rate", "zh-cn": "退款比例", ko: "환불 비율" },
+  "cancel.paidAtShop": {
+    ja: "オンラインでのお支払いはないため、キャンセルによる返金はありません。",
+    en: "Nothing was paid online, so cancelling refunds nothing.",
+    "zh-cn": "由于没有在线支付，取消后不会产生退款。",
+    ko: "온라인 결제 내역이 없어 취소하셔도 환불되는 금액은 없습니다.",
+  },
   "cancel.submit": {
     ja: "このご予約をキャンセルする",
     en: "Cancel this booking",

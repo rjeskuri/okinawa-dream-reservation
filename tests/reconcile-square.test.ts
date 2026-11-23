@@ -27,6 +27,11 @@
 // - A failed listing rejects with an Error that carries Square's detail, and changes nothing in D1.
 // - A payment or refund from another location never counts, even when Square's answer holds one: the reconciler has no
 //   location to compare with, so the client has to drop such rows.
+// - A staff cancellation (#145, #146) is checked against the refund staff chose, refund_due_jpy: expectedJpy = paid -
+//   refund_due_jpy, whatever the tiers said then or say now, so a refund beyond it is reported as surely as one that
+//   never came. A guest's, with refund_due_jpy NULL, is checked against the tier at cancelled_at as above. A staff
+//   retained_mismatch's detail says staff cancelled, names the refund they chose (when it is more than 0) and what the
+//   shop keeps, paid less what went back; amounts as whole yen, with thousands commas or without.
 import assert from "node:assert/strict";
 import { randomInt, randomUUID } from "node:crypto";
 import { test } from "node:test";
@@ -205,6 +210,11 @@ type PaidBooking = {
   paid?: number;
   /** Cancelled by the guest at this wall clock. */
   cancelled?: string;
+  /**
+   * Cancelled by staff instead, as #145's cancelByStaff leaves it: cancel_reason 'staff' and refund_due_jpy this total
+   * refund it settled on, the refunds before it plus its own.
+   */
+  staffRefundDue?: number;
   /** What Square charged, when it differs from what D1 holds. */
   squareAmount?: number;
   /** What Square says of the payment, when it is not COMPLETED. */
@@ -235,11 +245,12 @@ async function paidBooking(world: World, spec: PaidBooking): Promise<{ booking: 
     payment_id: paymentId,
     payment_attempt: 1,
     paid_jpy: paid,
-    cancel_reason: cancelledAt === null ? null : "guest",
+    cancel_reason: cancelledAt === null ? null : spec.staffRefundDue === undefined ? "guest" : "staff",
     created_at: heldAt,
     updated_at: cancelledAt ?? confirmedAt,
     confirmed_at: confirmedAt,
     cancelled_at: cancelledAt,
+    refund_due_jpy: cancelledAt === null ? undefined : spec.staffRefundDue,
   });
   const payment: SquareRecord = {
     id: paymentId,
@@ -1585,4 +1596,468 @@ test("a failed Square listing is not read as no payments", async () => {
     const result = await reconcileSquare({ db: world.db, square: fakeSquare(world).square, now: NOW });
     assert.equal(result.fixed, pendingFixes, "fixed once Square answers");
   });
+});
+
+// Staff cancellations (#146). Each case is a cancelled booking and what the reconciliation has to make of it, among the
+// ordinary month of seedClean, except the tier cases, which change the shop's tiers and so run alone. Most staff cases settle on a refund the tier would not give, so a check against the tier
+// flags them; the guest cases beside them are checked against the tier as before.
+
+/** 30 days or more 100%, 9 to 29 days 70%, 3 to 8 days 20%, less 0%: the shop's tiers after it republishes the sheet. */
+const NEW_TIERS: TierRow[] = [
+  { min_days_before: 30, refund_percent: 100 },
+  { min_days_before: 9, refund_percent: 70 },
+  { min_days_before: 3, refund_percent: 20 },
+];
+
+/** What the detail of a booking's retained_mismatch has to say. */
+type Said = { by: "staff"; refundDueJpy: number; keptJpy: number } | { by: "guest" };
+
+/** A booking and the issues it has, exactly; `said` when one of them is a retained_mismatch whose detail is checked. */
+type Checked = { booking: BookingRow; issues: ExpectedIssue[]; said?: Said };
+
+type CancelledCase = { what: string; seed: (world: World) => Promise<Checked & { fixes: Fix[] }> };
+
+/** A case run twice: once as seeded, and again after `settle` and the shop's new tiers, when it has `after`. */
+type SettlingCase = {
+  what: string;
+  seed: (world: World) => Promise<Checked & { fixes: Fix[]; settle?: () => Promise<void>; after: Omit<Checked, "booking"> }>;
+};
+
+function retained(booking: BookingRow, expectedJpy: number, actualJpy: number): ExpectedIssue {
+  return {
+    type: "retained_mismatch",
+    bookingRef: booking.ref,
+    paymentId: must(booking.payment_id, "payment id"),
+    refundId: ANY,
+    expectedJpy,
+    actualJpy,
+  };
+}
+
+/** D1 had the cancellation's refund as PENDING and Square has it as `status`: reported, and D1 takes Square's. */
+function statusMoved(booking: BookingRow, refund: { square: SquareRecord; row: RefundRow | null }, status: string): { issue: ExpectedIssue; fix: Fix } {
+  return {
+    issue: {
+      type: "refund_status_mismatch",
+      bookingRef: booking.ref,
+      paymentId: oneOf(undefined, must(booking.payment_id, "payment id")),
+      refundId: refund.square.id,
+      expectedJpy: refund.square.amount,
+      actualJpy: refund.square.amount,
+    },
+    fix: { kind: "status", row: must(refund.row, "refund row"), status },
+  };
+}
+
+/** `amount` written in `text` as whole yen, with or without thousands commas, and not as part of a longer number. */
+function mentionsYen(text: string, amount: number): boolean {
+  const forms = [...new Set([String(amount), amount.toLocaleString("en-US")])];
+  return new RegExp(`(?<![\\d,])(?:${forms.join("|")})(?!\\d|,\\d)`).test(text);
+}
+
+function assertSaid(issue: Issue | undefined, said: Said, label: string): void {
+  assert.ok(issue !== undefined, `${label}: no retained_mismatch whose detail could be read`);
+  const detail = String(issue.detail);
+  if (said.by === "guest") {
+    assert.doesNotMatch(detail, /staff/i, `${label}: a guest's cancellation told as staff's: ${detail}`);
+    return;
+  }
+  assert.match(detail, /staff/i, `${label}: the detail does not say staff cancelled: ${detail}`);
+  if (said.refundDueJpy > 0) {
+    assert.ok(mentionsYen(detail, said.refundDueJpy), `${label}: the detail does not name the refund chosen, ${said.refundDueJpy}: ${detail}`);
+  }
+  assert.ok(mentionsYen(detail, said.keptJpy), `${label}: the detail does not say the shop keeps ${said.keptJpy}: ${detail}`);
+}
+
+/** Each case's booking has exactly its issues, and no other booking has any. Every failure is listed at once. */
+function assertCases(issues: unknown, cases: (Checked & { what: string })[], label: string): void {
+  assert.ok(Array.isArray(issues), `${label}: issues is not an array`);
+  const all = issues as Issue[];
+  const refs = new Set(cases.map(({ booking }) => booking.ref));
+  const failures: string[] = [];
+  const check = (run: () => void) => {
+    try {
+      run();
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error));
+    }
+  };
+  for (const { what, booking, issues: expected, said } of cases) {
+    const own = all.filter((issue) => issue.bookingRef === booking.ref);
+    check(() => assertIssues(own, expected, `${label}, ${what}`));
+    if (said !== undefined) {
+      check(() => assertSaid(own.find((issue) => issue.type === "retained_mismatch"), said, `${label}, ${what}`));
+    }
+  }
+  const rest = all.filter((issue) => typeof issue.bookingRef !== "string" || !refs.has(issue.bookingRef));
+  check(() => assertIssues(rest, [], `${label}, the rest of the month`));
+  if (failures.length > 0) assert.fail(failures.join("\n\n"));
+}
+
+/** One run over an ordinary month with these cases in it: their issues, only their fixes, and no money moved. */
+async function reconcileCases(cases: CancelledCase[], label: string): Promise<void> {
+  await withWorld(async (world) => {
+    await seedClean(world);
+    const seeded: (Checked & { what: string; fixes: Fix[] })[] = [];
+    for (const { what, seed } of cases) seeded.push({ what, ...(await seed(world)) });
+    const fixes = seeded.flatMap((outcome) => outcome.fixes);
+    const fake = fakeSquare(world);
+    const before = await snapshot(world.db);
+
+    const result = await reconcile(world, fake.square);
+
+    assertCases(result.issues, seeded, label);
+    assert.equal(result.fixed, fixes.length, `${label}: fixed`);
+    assertOnlyFixes(before, await snapshot(world.db), fixes, label);
+    assert.deepEqual(fake.moneyCalls, [], `${label}: money moved`);
+  });
+}
+
+const STAFF_FULL_REFUNDS: CancelledCase[] = [
+  {
+    what: "a full refund 9 days before pickup, where the tier gives half",
+    seed: async (world) => {
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-06 09:00", pickup: "2030-05-31 09:00", cancelled: "2030-05-22 11:00", paid, staffRefundDue: paid });
+      await refundOf(world, booking, { at: "2030-05-22 11:00", origin: "cancel", amount: paid, status: "COMPLETED" });
+      return { booking, issues: [], fixes: [] };
+    },
+  },
+  {
+    what: "a full refund 3 days before pickup, the rest of what a Dashboard refund left",
+    seed: async (world) => {
+      // 3 days, 30%. Staff refunded part in the Dashboard first, and the cancellation sent the rest of what was paid.
+      const paid = yen(8000, 40_000);
+      const byStaff = randomInt(500, paid - 500);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-08 09:00", pickup: "2030-05-30 09:00", cancelled: "2030-05-27 16:00", paid, staffRefundDue: paid });
+      await refundOf(world, booking, { at: "2030-05-20 10:00", origin: "dashboard", amount: byStaff, status: "COMPLETED" });
+      await refundOf(world, booking, { at: "2030-05-27 16:00", origin: "cancel", amount: paid - byStaff, status: "COMPLETED" });
+      return { booking, issues: [], fixes: [] };
+    },
+  },
+  {
+    what: "a no-show's full refund, cancelled the day after pickup",
+    seed: async (world) => {
+      // -1 day: past pickup, below every tier, so the tier gives nothing back.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-02 09:00", pickup: "2030-05-24 09:00", cancelled: "2030-05-25 10:00", paid, staffRefundDue: paid });
+      await refundOf(world, booking, { at: "2030-05-25 10:00", origin: "cancel", amount: paid, status: "COMPLETED" });
+      return { booking, issues: [], fixes: [] };
+    },
+  },
+  {
+    what: "a full refund 1 day before pickup that D1 still has as pending and Square completed",
+    seed: async (world) => {
+      // 1 day, 0%. The status is put right, and the refund counts as gone back either way.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-15 09:00", pickup: "2030-05-31 09:00", cancelled: "2030-05-30 18:00", paid, staffRefundDue: paid });
+      const refund = await refundOf(world, booking, { at: "2030-05-30 18:00", origin: "cancel", amount: paid, status: "COMPLETED", d1: { status: "PENDING" } });
+      const { issue, fix } = statusMoved(booking, refund, "COMPLETED");
+      return { booking, issues: [issue], fixes: [fix] };
+    },
+  },
+  {
+    what: "a full refund 20 days before pickup, where the tier gives all of it too",
+    seed: async (world) => {
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-01 09:00", pickup: "2030-06-01 09:00", cancelled: "2030-05-12 09:00", paid, staffRefundDue: paid });
+      await refundOf(world, booking, { at: "2030-05-12 09:00", origin: "cancel", amount: paid, status: "COMPLETED" });
+      return { booking, issues: [], fixes: [] };
+    },
+  },
+  {
+    what: "a guest given all of it back 9 days before pickup, more than the tier",
+    seed: async (world) => {
+      // 9 days, 50%. The cancellation sent the tier and staff the rest in the Dashboard, with no staff cancellation.
+      const paid = yen(6000, 40_000);
+      const tier = tierRefund(paid, 50);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-04 09:00", pickup: "2030-05-28 09:00", cancelled: "2030-05-19 13:00", paid });
+      await refundOf(world, booking, { at: "2030-05-19 13:00", origin: "cancel", amount: tier, status: "COMPLETED" });
+      await refundOf(world, booking, { at: "2030-05-20 10:00", origin: "dashboard", amount: paid - tier, status: "COMPLETED" });
+      return { booking, issues: [retained(booking, paid - tier, 0)], fixes: [], said: { by: "guest" } };
+    },
+  },
+];
+
+const STAFF_NO_REFUNDS: CancelledCase[] = [
+  {
+    what: "nothing back 20 days before pickup, where the tier gives all of it",
+    seed: async (world) => {
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-03 09:00", pickup: "2030-05-31 09:00", cancelled: "2030-05-11 10:00", paid, staffRefundDue: 0 });
+      return { booking, issues: [], fixes: [] };
+    },
+  },
+  {
+    what: "nothing more 10 days before pickup, after a Dashboard refund short of the tier",
+    seed: async (world) => {
+      // 10 days, 50%. The cancellation settled on what had already gone back.
+      const paid = yen(8000, 40_000);
+      const byStaff = randomInt(500, tierRefund(paid, 50) - 500);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-05 09:00", pickup: "2030-06-02 09:00", cancelled: "2030-05-23 10:00", paid, staffRefundDue: byStaff });
+      await refundOf(world, booking, { at: "2030-05-15 10:00", origin: "dashboard", amount: byStaff, status: "COMPLETED" });
+      return { booking, issues: [], fixes: [] };
+    },
+  },
+  {
+    what: "nothing back 4 days before pickup, after a Dashboard refund Square failed",
+    seed: async (world) => {
+      // 4 days, 30%. The failed refund moved no money, so the cancellation settled on nothing.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-10 09:00", pickup: "2030-05-30 09:00", cancelled: "2030-05-26 10:00", paid, staffRefundDue: 0 });
+      await refundOf(world, booking, { at: "2030-05-25 10:00", origin: "dashboard", amount: randomInt(500, paid), status: "FAILED" });
+      return { booking, issues: [], fixes: [] };
+    },
+  },
+  {
+    what: "nothing back for a no-show, cancelled on the pickup day",
+    seed: async (world) => {
+      // 0 days, 0%.
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-09 09:00", pickup: "2030-05-23 09:00", cancelled: "2030-05-23 18:00", staffRefundDue: 0 });
+      return { booking, issues: [], fixes: [] };
+    },
+  },
+  {
+    what: "nothing chosen 15 days before pickup, and a Dashboard refund that went out after all",
+    seed: async (world) => {
+      // 15 days, 100%. Staff settled on keeping it all, so the shop keeps less than they chose.
+      const paid = yen(6000, 40_000);
+      const after = randomInt(500, paid - 500);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-07 09:00", pickup: "2030-06-08 09:00", cancelled: "2030-05-24 10:00", paid, staffRefundDue: 0 });
+      await refundOf(world, booking, { at: "2030-05-26 12:00", origin: "dashboard", amount: after, status: "COMPLETED" });
+      return {
+        booking,
+        issues: [retained(booking, paid, paid - after)],
+        fixes: [],
+        said: { by: "staff", refundDueJpy: 0, keptJpy: paid - after },
+      };
+    },
+  },
+  {
+    what: "a guest given nothing back 23 days before pickup, whose refund failed",
+    seed: async (world) => {
+      // 23 days, 100%.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-02 09:00", pickup: "2030-06-05 09:00", cancelled: "2030-05-13 10:00", paid });
+      await unsentRefund(world, booking, { at: "2030-05-13 10:00", origin: "cancel", amount: paid, status: "FAILED" });
+      return { booking, issues: [retained(booking, 0, paid)], fixes: [], said: { by: "guest" } };
+    },
+  },
+];
+
+const STAFF_REFUNDS_NOT_MADE: CancelledCase[] = [
+  {
+    what: "a full refund 9 days before pickup that Square rejected at the call",
+    seed: async (world) => {
+      // 9 days, 50%. The refused call left the row REJECTED with no Square id, so nothing went back.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-05 09:00", pickup: "2030-06-01 09:00", cancelled: "2030-05-23 09:00", paid, staffRefundDue: paid });
+      await unsentRefund(world, booking, { at: "2030-05-23 09:00", origin: "cancel", amount: paid, status: "REJECTED" });
+      return { booking, issues: [retained(booking, 0, paid)], fixes: [], said: { by: "staff", refundDueJpy: paid, keptJpy: paid } };
+    },
+  },
+  {
+    what: "a full refund 3 days before pickup that D1 has as pending and Square rejected",
+    seed: async (world) => {
+      // 3 days, 30%. Once D1 has the rejection, nothing has gone back.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-11 09:00", pickup: "2030-05-31 09:00", cancelled: "2030-05-28 12:00", paid, staffRefundDue: paid });
+      const refund = await refundOf(world, booking, { at: "2030-05-28 12:00", origin: "cancel", amount: paid, status: "REJECTED", d1: { status: "PENDING" } });
+      const { issue, fix } = statusMoved(booking, refund, "REJECTED");
+      return {
+        booking,
+        issues: [issue, retained(booking, 0, paid)],
+        fixes: [fix],
+        said: { by: "staff", refundDueJpy: paid, keptJpy: paid },
+      };
+    },
+  },
+  {
+    what: "a no-show's full refund stuck in RETRY, never made",
+    seed: async (world) => {
+      // -1 day, below every tier: the tier gives nothing back, so the shop keeping all of it would pass a tier check.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-01 09:00", pickup: "2030-05-26 09:00", cancelled: "2030-05-27 11:00", paid, staffRefundDue: paid });
+      await unsentRefund(world, booking, { at: "2030-05-27 11:00", origin: "cancel", amount: paid, status: "RETRY" });
+      return { booking, issues: [retained(booking, 0, paid)], fixes: [], said: { by: "staff", refundDueJpy: paid, keptJpy: paid } };
+    },
+  },
+  {
+    what: "a full refund 12 days before pickup that failed, after a Dashboard refund that went through",
+    seed: async (world) => {
+      // 12 days, 50%. Only the Dashboard part went back.
+      const paid = yen(8000, 40_000);
+      const byStaff = randomInt(500, paid - 500);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-04 09:00", pickup: "2030-06-05 09:00", cancelled: "2030-05-24 10:00", paid, staffRefundDue: paid });
+      await refundOf(world, booking, { at: "2030-05-18 10:00", origin: "dashboard", amount: byStaff, status: "COMPLETED" });
+      await unsentRefund(world, booking, { at: "2030-05-24 10:00", origin: "cancel", amount: paid - byStaff, status: "FAILED" });
+      return {
+        booking,
+        issues: [retained(booking, 0, paid - byStaff)],
+        fixes: [],
+        said: { by: "staff", refundDueJpy: paid, keptJpy: paid - byStaff },
+      };
+    },
+  },
+  {
+    what: "a full refund 20 days before pickup that Square rejected, where the tier gives all of it too",
+    seed: async (world) => {
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-02 09:00", pickup: "2030-06-04 09:00", cancelled: "2030-05-15 09:00", paid, staffRefundDue: paid });
+      await refundOf(world, booking, { at: "2030-05-15 09:00", origin: "cancel", amount: paid, status: "REJECTED" });
+      return { booking, issues: [retained(booking, 0, paid)], fixes: [], said: { by: "staff", refundDueJpy: paid, keptJpy: paid } };
+    },
+  },
+  {
+    what: "a guest's tier refund 9 days before pickup that Square rejected, checked against the tier",
+    seed: async (world) => {
+      // 9 days, 50%.
+      const paid = yen(6000, 40_000);
+      const tier = tierRefund(paid, 50);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-06 09:00", pickup: "2030-05-31 09:00", cancelled: "2030-05-22 09:00", paid });
+      await unsentRefund(world, booking, { at: "2030-05-22 09:00", origin: "cancel", amount: tier, status: "REJECTED" });
+      return { booking, issues: [retained(booking, paid - tier, paid)], fixes: [], said: { by: "guest" } };
+    },
+  },
+];
+
+/**
+ * Staff cancellations on the tier as it stood when they cancelled, and a guest's beside them. Day counts are JST calendar
+ * days to pickup, with the percent under TIERS and then under NEW_TIERS.
+ */
+const STAFF_TIER_REFUNDS: SettlingCase[] = [
+  {
+    what: "the tier 10 days before pickup, completed",
+    seed: async (world) => {
+      // 10 days: 50%, then 70%.
+      const paid = yen(6000, 40_000);
+      const tier = tierRefund(paid, 50);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-03 09:00", pickup: "2030-05-31 09:00", cancelled: "2030-05-21 10:00", paid, staffRefundDue: tier });
+      await refundOf(world, booking, { at: "2030-05-21 10:00", origin: "cancel", amount: tier, status: "COMPLETED" });
+      return { booking, issues: [], fixes: [], after: { issues: [] } };
+    },
+  },
+  {
+    what: "the tier 20 days before pickup, all of it, pending in D1 and completed in Square",
+    seed: async (world) => {
+      // 20 days: 100%, then 70%.
+      const paid = yen(6000, 40_000);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-01 09:00", pickup: "2030-06-01 09:00", cancelled: "2030-05-12 10:00", paid, staffRefundDue: paid });
+      const refund = await refundOf(world, booking, { at: "2030-05-12 10:00", origin: "cancel", amount: paid, status: "COMPLETED", d1: { status: "PENDING" } });
+      const { issue, fix } = statusMoved(booking, refund, "COMPLETED");
+      return { booking, issues: [issue], fixes: [fix], after: { issues: [] } };
+    },
+  },
+  {
+    what: "the tier 4 days before pickup, nothing more after a Dashboard refund that passed it",
+    seed: async (world) => {
+      // 4 days: 30%, then 20%. The Dashboard refund was more than the tier, so the cancellation settled on it.
+      const paid = yen(8000, 40_000);
+      const byStaff = randomInt(tierRefund(paid, 30) + 500, paid - 500);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-06 09:00", pickup: "2030-05-31 09:00", cancelled: "2030-05-27 10:00", paid, staffRefundDue: byStaff });
+      await refundOf(world, booking, { at: "2030-05-20 10:00", origin: "dashboard", amount: byStaff, status: "COMPLETED" });
+      return { booking, issues: [], fixes: [], after: { issues: [] } };
+    },
+  },
+  {
+    what: "the tier 8 days before pickup, the rest of it after a smaller Dashboard refund",
+    seed: async (world) => {
+      // 8 days: 50%, then 20%.
+      const paid = yen(8000, 40_000);
+      const tier = tierRefund(paid, 50);
+      const byStaff = randomInt(500, tier - 500);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-07 09:00", pickup: "2030-05-31 09:00", cancelled: "2030-05-23 10:00", paid, staffRefundDue: tier });
+      await refundOf(world, booking, { at: "2030-05-18 10:00", origin: "dashboard", amount: byStaff, status: "COMPLETED" });
+      await refundOf(world, booking, { at: "2030-05-23 10:00", origin: "cancel", amount: tier - byStaff, status: "COMPLETED" });
+      return { booking, issues: [], fixes: [], after: { issues: [] } };
+    },
+  },
+  {
+    what: "the tier 5 days before pickup, stuck in RETRY until the cron sends it",
+    seed: async (world) => {
+      // 5 days: 30%, then 20%. Nothing has gone back until the retry goes through.
+      const paid = yen(6000, 40_000);
+      const tier = tierRefund(paid, 30);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-09 09:00", pickup: "2030-06-03 09:00", cancelled: "2030-05-29 10:00", paid, staffRefundDue: tier });
+      const row = await unsentRefund(world, booking, { at: "2030-05-29 10:00", origin: "cancel", amount: tier, status: "RETRY" });
+      const settle = async () => {
+        const paymentId = must(booking.payment_id, "payment id");
+        const squareId = `${paymentId}_${randomUUID().slice(0, 8)}`;
+        const at = jst("2030-05-31 10:00");
+        world.refunds.push({ id: squareId, status: "COMPLETED", amount: tier, currency: "JPY", payment_id: paymentId, created_at: iso(at) });
+        await world.db
+          .prepare("UPDATE refunds SET square_refund_id = ?1, status = 'COMPLETED', updated_at = ?2 WHERE id = ?3")
+          .bind(squareId, at, row.id)
+          .run();
+      };
+      return {
+        booking,
+        issues: [retained(booking, paid - tier, paid)],
+        fixes: [],
+        said: { by: "staff", refundDueJpy: tier, keptJpy: paid },
+        settle,
+        after: { issues: [] },
+      };
+    },
+  },
+  {
+    what: "a guest's tier refund 10 days before pickup, checked against the shop's tiers of the day",
+    seed: async (world) => {
+      // 10 days: 50%, then 70%.
+      const paid = yen(6000, 40_000);
+      const tier = tierRefund(paid, 50);
+      const { booking } = await paidBooking(world, { confirmed: "2030-05-04 09:00", pickup: "2030-05-31 09:00", cancelled: "2030-05-21 11:00", paid });
+      await refundOf(world, booking, { at: "2030-05-21 11:00", origin: "cancel", amount: tier, status: "COMPLETED" });
+      return {
+        booking,
+        issues: [],
+        fixes: [],
+        after: { issues: [retained(booking, paid - tierRefund(paid, 70), paid - tier)], said: { by: "guest" } },
+      };
+    },
+  },
+];
+
+test("a staff cancellation with a completed full refund is no issue", async () => {
+  await reconcileCases(STAFF_FULL_REFUNDS, "staff full refunds");
+});
+
+test("a staff cancellation with no refund is no issue", async () => {
+  await reconcileCases(STAFF_NO_REFUNDS, "staff cancellations with no refund");
+});
+
+test("a staff cancellation with the tier refund is no issue once it settles", async () => {
+  await withWorld(async (world) => {
+    const seeded: ({ what: string } & Awaited<ReturnType<SettlingCase["seed"]>>)[] = [];
+    for (const { what, seed } of STAFF_TIER_REFUNDS) seeded.push({ what, ...(await seed(world)) });
+    const fixes = seeded.flatMap((outcome) => outcome.fixes);
+    const fake = fakeSquare(world);
+    const before = await snapshot(world.db);
+
+    const first = await reconcile(world, fake.square);
+
+    assertCases(first.issues, seeded, "the tier, as staff cancelled");
+    assert.equal(first.fixed, fixes.length, "fixed");
+    assertOnlyFixes(before, await snapshot(world.db), fixes, "the tier, as staff cancelled");
+    assert.deepEqual(fake.moneyCalls, [], "money moved");
+
+    // The stuck refund goes through, and the shop then publishes new tiers, which every day count above falls under
+    // differently. What staff settled on stands; a guest's cancellation is checked against the tiers of the day.
+    for (const { settle } of seeded) await settle?.();
+    await world.db.prepare("DELETE FROM cancellation_tiers").run();
+    await seedTiers(world.db, NEW_TIERS);
+    const later = fakeSquare(world);
+    const settled = await snapshot(world.db);
+
+    const again = await reconcile(world, later.square);
+
+    assertCases(again.issues, seeded.map(({ what, booking, after }) => ({ what, booking, ...after })), "the tier, settled and under new tiers");
+    assert.equal(again.fixed, 0, "fixed by the run after");
+    assertOnlyFixes(settled, await snapshot(world.db), [], "the tier, settled and under new tiers");
+    assert.deepEqual(later.moneyCalls, [], "money moved in the run after");
+  });
+});
+
+test("a staff full refund that Square rejected is a retained_mismatch with both amounts", async () => {
+  await reconcileCases(STAFF_REFUNDS_NOT_MADE, "staff full refunds not made");
 });
