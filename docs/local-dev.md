@@ -241,6 +241,16 @@ These are the things the 2026-11-25 walkthrough needed that the steps above don'
   - The cancellation email stated the refund.
   - The Bookings tab showed the cancelled booking as CANCELLED and the others as CONFIRMED.
   - Every outbox row was sent on its first try.
+- **#66 Square list shapes, 2026-11-27. Every shape matched the list and row rules of #31.**
+  - Only the sandbox was checked, on the "Okinawa Test" seller (Japan, JPY). Production could differ.
+  - The requests were raw `GET /v2/payments` and `GET /v2/refunds` calls with the query that `all()` in `src/lib/square/client.ts` sends: `begin_time` and `end_time` in ISO form, `location_id`, `limit`, and `Square-Version` 2026-09-16. The real client was not run against the sandbox.
+  - No rows, for a day in 2020 and for the last 10 minutes: both endpoints answered 200 with the body `{}`. This matches, because a body without a list counts as empty when it holds no key but `cursor`.
+  - Rows on one page: the body was `{payments: array}` or `{refunds: array}`, with no `cursor` and no `errors`. Matches.
+  - Cursor pages, forced with a `limit` of 1 to 4: every page but the last was `{payments|refunds: array, cursor: string}`, and the last page had no `cursor` key. When the rows filled the last page exactly, no cursor and no empty page followed. Matches.
+  - Payment rows: the 7 booking payments carried `reference_id` and `created_at` as non-empty strings, with no `payment_id`. A payment made through `POST /v2/payments` without a `reference_id` came back with no `reference_id` key at all. It was an API payment, not a Seller Dashboard payment. Matches.
+  - Refund rows: the #37 refund and a refund of that API payment carried `payment_id` and `created_at` as non-empty strings, with no `reference_id`. Matches.
+  - No row sent any of the three fields as null or as an empty string.
+  - Not produced: a Seller Dashboard payment, and an unlinked refund, which Square's docs say is not supported in Japan.
 
 ### Google Pay and Apple Pay
 
