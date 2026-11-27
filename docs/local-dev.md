@@ -206,6 +206,42 @@ Add a bike's photo upload also reads the Script Property `PHOTO_FOLDER_ID`: the 
 `GOOGLE_DRIVE_FOLDER_ID`. It does not change between runs; [docs/deploy.md](deploy.md#photo-upload-from-add-a-bike) has
 the scope and folder access it needs.
 
+### What the live checks needed
+
+These are the things the 2026-11-25 walkthrough needed that the steps above don't say:
+
+- `.dev.vars` needs `STAFF_EMAIL`, the staff notices' address. A `+staff` alias of the tester's Gmail works.
+- **Square sandbox token:**
+  - Use the Japan seller's own sandbox access token.
+  - The token on the Developer Console's Credentials page belongs to the US Default Test Account. A JPY payment fails with it.
+- **3DS:**
+  - The cards that raise a challenge are JCB `3569 9900 0000 0009` and Visa `4310 0000 0020 1019`, with code `123456`.
+  - `4800 0000 0000 0004` and JCB `3569 9900 0000 0017` pass verification with no challenge.
+  - `4000 0000 0000 0002` is declined.
+  - Every card takes CVV `111` and any future expiry.
+- **Postal code:** the card form can ask for a postal code, as it did with a `4111` test card; `00000` is accepted. JCB `3569 9900 0000 0017` is the card to try to see whether the field stays away.
+- **Mail web app:** probe it with `curl -L --data`. `-X POST` gets a 405 on Google's redirect.
+
+### Live check results
+
+- **#18 Publish, 2026-11-25. Passed.**
+  - Publish wrote `ok` on the good rows and an error on a Prices row whose price was set to `abc`. The row passed once its number was restored.
+  - Local D1 then held 32 models, 37 vehicles, 10 packages and 53 prices.
+  - `/media` served the photos, including one copied from Drive by that Publish.
+- **#37 Square sandbox, 2026-11-25. Passed.**
+  - Booking BSJN02PC confirmed with no challenge.
+  - YPC6FQBK confirmed after a 3DS challenge, in JPY.
+  - 2WY1SHN0 was declined twice with the decline shown and the hold kept. It was then paid on the same hold and confirmed.
+  - The webhooks returned 200 and their signatures verified. One unsigned probe was refused with 401.
+  - Cancelling 2WY1SHN0 from its email link refunded ¥1,000, and Square shows the refund `COMPLETED` in the sandbox dashboard.
+  - Google Pay is off (`ENABLE_GOOGLE_PAY` is `"false"`), so the wallet item does not apply yet.
+- **#45 Email, 2026-11-25. Passed.**
+  - Each guest confirmation arrived in its booking's language, the `ja` one included, with a cancel link that worked.
+  - The staff notices arrived in Japanese.
+  - The cancellation email stated the refund.
+  - The Bookings tab showed the cancelled booking as CANCELLED and the others as CONFIRMED.
+  - Every outbox row was sent on its first try.
+
 ### Google Pay and Apple Pay
 
 `ENABLE_GOOGLE_PAY` and `ENABLE_APPLE_PAY` are `"false"` in `wrangler.jsonc`. Only the exact string `true` turns a
